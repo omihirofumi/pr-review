@@ -1,0 +1,673 @@
+use std::{
+    fmt,
+    io::{Read, Write},
+    path::Path,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+
+use crate::{
+    diff::validate_comment,
+    model::{
+        ChangedFile, DraftComment, PrId, PrSummary, PullRequest, ReviewComment, ReviewData,
+        ReviewEvent,
+    },
+};
+
+const GH_TIMEOUT: Duration = Duration::from_secs(90);
+
+#[derive(Debug)]
+pub struct SubmissionUncertain(anyhow::Error);
+
+impl fmt::Display for SubmissionUncertain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "GitHub may have accepted this review. Check the PR before retrying; the submission result is uncertain: {:#}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SubmissionUncertain {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+pub fn is_submission_uncertain(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SubmissionUncertain>().is_some()
+}
+
+pub fn resolve_repo(repository: Option<&str>) -> Result<String> {
+    if let Some(repository) = repository {
+        validate_repo(repository)?;
+        return Ok(repository.to_owned());
+    }
+    let args = ["repo", "view", "--json", "nameWithOwner"];
+    let bytes = match gh(&args, None) {
+        Ok(bytes) => bytes,
+        Err(original) => {
+            let root = Command::new("jj")
+                .args(["--no-pager", "--color=never", "git", "root"])
+                .stdin(Stdio::null())
+                .output();
+            let bytes = root
+                .ok()
+                .filter(|result| result.status.success())
+                .and_then(|result| String::from_utf8(result.stdout).ok())
+                .and_then(|root| gh_in(&args, None, Some(Path::new(root.trim()))).ok());
+            bytes.with_context(|| {
+                format!(
+                    "Cannot resolve a GitHub repository from this directory; pass --repo owner/repo: {original:#}"
+                )
+            })?
+        }
+    };
+    let value: Value = serde_json::from_slice(&bytes)
+        .context("GitHub CLI returned invalid repository information")?;
+    let repo = value["nameWithOwner"]
+        .as_str()
+        .context("GitHub CLI did not return a repository; pass --repo owner/repo")?;
+    validate_repo(repo)?;
+    Ok(repo.to_owned())
+}
+
+pub fn parse_target(target: &str, repo: Option<&str>) -> Result<PrId> {
+    if let Some(path) = target.strip_prefix("https://github.com/") {
+        let path = path
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(path)
+            .trim_end_matches('/');
+        let pieces: Vec<_> = path.split('/').collect();
+        ensure!(
+            pieces.len() == 4 && pieces[2] == "pull",
+            "Expected a GitHub PR URL: https://github.com/owner/repo/pull/123"
+        );
+        let url_repo = format!("{}/{}", pieces[0], pieces[1]);
+        validate_repo(&url_repo)?;
+        if let Some(repo) = repo {
+            ensure!(
+                repo.eq_ignore_ascii_case(&url_repo),
+                "PR URL repository {url_repo} does not match --repo {repo}"
+            );
+        }
+        return Ok(PrId {
+            repo: url_repo,
+            number: parse_number(pieces[3])?,
+        });
+    }
+
+    let number = parse_number(target.strip_prefix('#').unwrap_or(target))?;
+    let repo = resolve_repo(repo)?;
+    Ok(PrId { repo, number })
+}
+
+pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummary>> {
+    let repo = resolve_repo(repo)?;
+    let mut args = vec![
+        "pr",
+        "list",
+        "--repo",
+        &repo,
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,title,author,isDraft,url",
+    ];
+    if let Some(search) = search.filter(|search| !search.trim().is_empty()) {
+        args.extend(["--search", search]);
+    }
+    let prs: Vec<SearchPr> = gh_json(&args)?;
+    prs.into_iter()
+        .map(|pr| {
+            let id = parse_target(&pr.url, Some(&repo))?;
+            ensure!(
+                id.number == pr.number,
+                "GitHub returned an inconsistent PR number"
+            );
+            Ok(PrSummary {
+                id,
+                title: pr.title,
+                author: login(pr.author),
+                draft: pr.is_draft,
+            })
+        })
+        .collect()
+}
+
+pub fn load_review(id: &PrId) -> Result<ReviewData> {
+    validate_id(id)?;
+    let initial = fetch_pr(id)?;
+    ensure!(
+        initial.changed_files <= 3000,
+        "This PR has {} files; GitHub's files API is limited to 3000",
+        initial.changed_files
+    );
+    let base_sha = merge_base(id, &initial.base.sha, &initial.head.sha)?;
+    let files: Vec<ChangedFile> = paginated(&format!(
+        "repos/{}/pulls/{}/files?per_page=100",
+        id.repo, id.number
+    ))?;
+    ensure!(
+        files.len() as u64 == initial.changed_files,
+        "GitHub returned {} of {} changed files; reload the PR",
+        files.len(),
+        initial.changed_files
+    );
+    let comments: Vec<ApiComment> = paginated(&format!(
+        "repos/{}/pulls/{}/comments?per_page=100",
+        id.repo, id.number
+    ))?;
+    let final_pr = fetch_pr(id)?;
+    ensure!(
+        final_pr.head.sha == initial.head.sha && final_pr.base.sha == initial.base.sha,
+        "PR changed while loading; reload to review its current diff"
+    );
+    Ok(ReviewData {
+        pr: PullRequest {
+            id: id.clone(),
+            title: initial.title,
+            body: initial.body.unwrap_or_default(),
+            url: initial.html_url,
+            author: login(initial.user),
+            head_sha: initial.head.sha,
+            base_sha,
+            draft: initial.draft,
+        },
+        files,
+        comments: comments
+            .into_iter()
+            .map(|comment| ReviewComment {
+                id: comment.id,
+                path: comment.path,
+                body: comment.body,
+                author: login(comment.user),
+                line: comment.line,
+                original_line: comment.original_line,
+                side: comment.side,
+                start_line: comment.start_line,
+                start_side: comment.start_side,
+                in_reply_to_id: comment.in_reply_to_id,
+            })
+            .collect(),
+    })
+}
+
+pub fn reviews_text(id: &PrId) -> Result<String> {
+    validate_id(id)?;
+    let reviews: Vec<ApiReview> = paginated(&format!(
+        "repos/{}/pulls/{}/reviews?per_page=100",
+        id.repo, id.number
+    ))?;
+    if reviews.is_empty() {
+        return Ok("No reviews found.".into());
+    }
+    Ok(reviews
+        .into_iter()
+        .map(|review| {
+            format!(
+                "@{} | {} | commit {}\n{}\n{}",
+                login(review.user),
+                review.state,
+                review.commit_id,
+                review.html_url,
+                review.body.unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+pub fn submit_review(
+    data: &ReviewData,
+    drafts: &[DraftComment],
+    body: &str,
+    event: ReviewEvent,
+) -> Result<String> {
+    let payload = review_payload(data, drafts, body, event)?;
+    let current = fetch_pr(&data.pr.id)?;
+    ensure!(current.state == "open", "This PR is no longer open");
+    ensure!(
+        current.head.sha == data.pr.head_sha,
+        "PR head changed since loading; reload before submitting (drafts are preserved)"
+    );
+    ensure!(
+        merge_base(&data.pr.id, &current.base.sha, &current.head.sha)? == data.pr.base_sha,
+        "PR diff base changed since loading; reload before submitting (drafts are preserved)"
+    );
+    let path = format!(
+        "repos/{}/pulls/{}/reviews",
+        data.pr.id.repo, data.pr.id.number
+    );
+    let bytes = gh(
+        &["api", "--method", "POST", &path, "--input", "-"],
+        Some(serde_json::to_vec(&payload)?),
+    )
+    .map_err(|error| anyhow::Error::new(SubmissionUncertain(error)))?;
+    let response: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::Error::new(SubmissionUncertain(
+            anyhow::Error::new(error).context("Invalid review response from GitHub"),
+        ))
+    })?;
+    Ok(response["html_url"]
+        .as_str()
+        .unwrap_or(&data.pr.url)
+        .to_owned())
+}
+
+fn review_payload(
+    data: &ReviewData,
+    drafts: &[DraftComment],
+    body: &str,
+    event: ReviewEvent,
+) -> Result<Value> {
+    validate_id(&data.pr.id)?;
+    validate_sha(&data.pr.head_sha)?;
+    validate_sha(&data.pr.base_sha)?;
+    ensure!(
+        event == ReviewEvent::Approve || !body.trim().is_empty(),
+        "A review summary is required for comments and change requests"
+    );
+    for draft in drafts {
+        ensure!(!draft.body.trim().is_empty(), "An inline comment is empty");
+        let file = data
+            .files
+            .iter()
+            .find(|file| file.filename == draft.path)
+            .with_context(|| format!("Comment file is not in this diff: {}", draft.path))?;
+        ensure!(
+            validate_comment(file, draft),
+            "Comment target is not in the displayed diff: {}:{} {:?}",
+            draft.path,
+            draft.line_label(),
+            draft.side
+        );
+    }
+    Ok(json!({
+        "commit_id": data.pr.head_sha,
+        "event": event.as_str(),
+        "body": body,
+        "comments": drafts,
+    }))
+}
+
+fn fetch_pr(id: &PrId) -> Result<ApiPr> {
+    validate_id(id)?;
+    let path = format!("repos/{}/pulls/{}", id.repo, id.number);
+    gh_json(&["api", "--method", "GET", &path])
+}
+
+fn merge_base(id: &PrId, base: &str, head: &str) -> Result<String> {
+    validate_sha(base)?;
+    validate_sha(head)?;
+    let path = format!("repos/{}/compare/{base}...{head}?per_page=1", id.repo);
+    let response: Value = gh_json(&["api", "--method", "GET", &path])?;
+    let sha = response["merge_base_commit"]["sha"]
+        .as_str()
+        .context("GitHub did not return the PR's diff base")?;
+    validate_sha(sha)?;
+    Ok(sha.to_owned())
+}
+
+fn paginated<T: DeserializeOwned>(path: &str) -> Result<Vec<T>> {
+    let pages: Vec<Vec<T>> = gh_json(&["api", "--method", "GET", "--paginate", "--slurp", path])?;
+    Ok(pages.into_iter().flatten().collect())
+}
+
+fn gh_json<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
+    serde_json::from_slice(&gh(args, None)?)
+        .with_context(|| format!("GitHub CLI returned invalid JSON for gh {}", args.join(" ")))
+}
+
+fn gh(args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
+    gh_in(args, input, None)
+}
+
+fn gh_in(args: &[&str], input: Option<Vec<u8>>, directory: Option<&Path>) -> Result<Vec<u8>> {
+    let mut command = Command::new("gh");
+    command
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_HOST", "github.com")
+        .env("GH_PAGER", "cat")
+        .env_remove("GH_REPO")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let mut child = command
+        .spawn()
+        .context("Could not run GitHub CLI; install gh and run gh auth login")?;
+    let mut stdout = child.stdout.take().context("Missing gh stdout")?;
+    let mut stderr = child.stderr.take().context("Missing gh stderr")?;
+    let stdout_thread = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let input_thread = input.map(|bytes| {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        thread::spawn(move || stdin.write_all(&bytes))
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().context("Could not wait for GitHub CLI")? {
+            break status;
+        }
+        if started.elapsed() >= GH_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "GitHub CLI timed out after {} seconds",
+                GH_TIMEOUT.as_secs()
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let output = stdout_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("GitHub output reader failed"))??;
+    let error = stderr_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("GitHub error reader failed"))??;
+    ensure!(
+        status.success(),
+        "gh {} failed: {}",
+        args.first().unwrap_or(&""),
+        String::from_utf8_lossy(&error).trim()
+    );
+    if let Some(input) = input_thread {
+        input
+            .join()
+            .map_err(|_| anyhow::anyhow!("GitHub input writer failed"))??;
+    }
+    Ok(output)
+}
+
+fn parse_number(number: &str) -> Result<u64> {
+    ensure!(
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+        "Expected a positive PR number or https://github.com/owner/repo/pull/123"
+    );
+    let number: u64 = number.parse().context("PR number is too large")?;
+    ensure!(number > 0, "PR number must be positive");
+    Ok(number)
+}
+
+fn validate_repo(repo: &str) -> Result<()> {
+    let parts: Vec<_> = repo.split('/').collect();
+    ensure!(
+        parts.len() == 2
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && parts[0]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            && parts[1]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            && ![".", ".."].contains(&parts[1]),
+        "Expected a repository in owner/repo format"
+    );
+    Ok(())
+}
+
+fn validate_id(id: &PrId) -> Result<()> {
+    validate_repo(&id.repo)?;
+    ensure!(id.number > 0, "PR number must be positive");
+    Ok(())
+}
+
+fn validate_sha(sha: &str) -> Result<()> {
+    ensure!(
+        [40, 64].contains(&sha.len()) && sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "GitHub returned an invalid commit SHA"
+    );
+    Ok(())
+}
+
+fn login(user: Option<ApiUser>) -> String {
+    user.map(|user| user.login)
+        .unwrap_or_else(|| "[deleted]".into())
+}
+
+#[derive(Deserialize)]
+struct ApiUser {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct ApiRef {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct ApiPr {
+    title: String,
+    body: Option<String>,
+    html_url: String,
+    user: Option<ApiUser>,
+    head: ApiRef,
+    base: ApiRef,
+    draft: bool,
+    changed_files: u64,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct ApiComment {
+    id: u64,
+    path: String,
+    body: String,
+    user: Option<ApiUser>,
+    line: Option<u32>,
+    original_line: Option<u32>,
+    side: String,
+    #[serde(default)]
+    start_line: Option<u32>,
+    #[serde(default)]
+    start_side: Option<String>,
+    in_reply_to_id: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ApiReview {
+    user: Option<ApiUser>,
+    state: String,
+    commit_id: String,
+    html_url: String,
+    body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SearchPr {
+    number: u64,
+    title: String,
+    author: Option<ApiUser>,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Side;
+
+    #[test]
+    fn parses_urls_numbers_and_repository_conflicts() {
+        assert_eq!(
+            parse_target(
+                "https://github.com/owner/repo/pull/42/?diff=split#discussion",
+                None
+            )
+            .unwrap(),
+            PrId {
+                repo: "owner/repo".into(),
+                number: 42
+            }
+        );
+        assert_eq!(parse_target("#12", Some("owner/repo")).unwrap().number, 12);
+        assert!(parse_target("https://github.com/owner/repo/pull/42", Some("other/repo")).is_err());
+    }
+
+    #[test]
+    fn rejects_non_pr_urls_and_unsafe_repository_components() {
+        for target in [
+            "0",
+            "-1",
+            "https://evil.test/owner/repo/pull/42",
+            "https://github.com/owner/repo/issues/42",
+            "https://github.com/owner/repo/pull/42/files",
+        ] {
+            assert!(
+                parse_target(target, Some("owner/repo")).is_err(),
+                "accepted {target}"
+            );
+        }
+        for repo in [
+            "../repo",
+            "owner/..",
+            "owner/repo/extra",
+            "owner/repo?x=1",
+            "--help",
+        ] {
+            assert!(parse_target("42", Some(repo)).is_err(), "accepted {repo}");
+        }
+    }
+
+    fn data() -> ReviewData {
+        ReviewData {
+            pr: PullRequest {
+                id: PrId {
+                    repo: "owner/repo".into(),
+                    number: 42,
+                },
+                title: "Title".into(),
+                body: String::new(),
+                url: "https://github.com/owner/repo/pull/42".into(),
+                author: "author".into(),
+                head_sha: "a".repeat(40),
+                base_sha: "b".repeat(40),
+                draft: false,
+            },
+            files: vec![ChangedFile {
+                filename: "renamed.rs".into(),
+                previous_filename: Some("old.rs".into()),
+                status: "renamed".into(),
+                additions: 1,
+                deletions: 1,
+                patch: Some("@@ -7,2 +7,2 @@\n-old\n+new\n context".into()),
+            }],
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pins_commit_and_preserves_deleted_side_coordinates() {
+        let draft = DraftComment {
+            start_line: None,
+            start_side: None,
+            path: "renamed.rs".into(),
+            line: 7,
+            side: Side::Left,
+            body: "Explain why".into(),
+        };
+        let payload = review_payload(
+            &data(),
+            &[draft],
+            "Please revise",
+            ReviewEvent::RequestChanges,
+        )
+        .unwrap();
+        assert_eq!(payload["commit_id"], "a".repeat(40));
+        assert_eq!(payload["event"], "REQUEST_CHANGES");
+        assert_eq!(payload["comments"][0]["path"], "renamed.rs");
+        assert_eq!(payload["comments"][0]["side"], "LEFT");
+        assert_eq!(payload["comments"][0]["line"], 7);
+    }
+
+    #[test]
+    fn rejects_comment_targets_outside_the_reviewed_patch() {
+        let invalid = DraftComment {
+            start_line: None,
+            start_side: None,
+            path: "renamed.rs".into(),
+            line: 100,
+            side: Side::Right,
+            body: "Comment".into(),
+        };
+        assert!(review_payload(&data(), &[invalid], "Summary", ReviewEvent::Comment).is_err());
+        assert!(review_payload(&data(), &[], " ", ReviewEvent::RequestChanges).is_err());
+        assert!(review_payload(&data(), &[], "", ReviewEvent::Approve).is_ok());
+    }
+
+    #[test]
+    fn submission_uncertainty_remains_detectable_through_context() {
+        let uncertain =
+            anyhow::Error::new(SubmissionUncertain(anyhow::anyhow!("transport failed")))
+                .context("Review submission failed");
+        assert!(is_submission_uncertain(&uncertain));
+        assert!(format!("{uncertain:#}").contains("may have accepted"));
+        assert!(!is_submission_uncertain(&anyhow::anyhow!(
+            "PR head changed"
+        )));
+    }
+
+    #[test]
+    fn submission_preserves_multiline_coordinates_without_changing_single_line_shape() {
+        let draft = DraftComment {
+            path: "renamed.rs".into(),
+            line: 8,
+            side: Side::Left,
+            start_line: Some(7),
+            start_side: Some(Side::Left),
+            body: "Preserve this invariant across the whole block.".into(),
+        };
+        let payload =
+            review_payload(&data(), &[draft], "Review summary", ReviewEvent::Comment).unwrap();
+        assert_eq!(
+            payload["comments"][0],
+            json!({
+                "path": "renamed.rs", "line": 8, "side": "LEFT",
+                "start_line": 7, "start_side": "LEFT",
+                "body": "Preserve this invariant across the whole block."
+            })
+        );
+        assert_eq!(payload["commit_id"], "a".repeat(40));
+    }
+
+    #[test]
+    fn api_comments_accept_legacy_and_multiline_coordinates() {
+        let mut value = json!({
+            "id": 1, "path": "a.rs", "body": "Comment", "user": {"login": "reviewer"},
+            "line": 21, "original_line": 20, "side": "RIGHT", "in_reply_to_id": null
+        });
+        let single: ApiComment = serde_json::from_value(value.clone()).unwrap();
+        assert!(single.start_line.is_none());
+        assert!(single.start_side.is_none());
+        value["start_line"] = json!(19);
+        value["start_side"] = json!("RIGHT");
+        let ranged: ApiComment = serde_json::from_value(value).unwrap();
+        assert_eq!(ranged.start_line, Some(19));
+        assert_eq!(ranged.start_side.as_deref(), Some("RIGHT"));
+    }
+}
