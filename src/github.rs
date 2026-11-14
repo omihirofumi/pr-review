@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use crate::{
     diff::validate_comment,
     model::{
-        ChangedFile, DraftComment, PrId, PrSummary, PullRequest, ReviewComment, ReviewData,
-        ReviewEvent,
+        ChangedFile, DraftComment, PrId, PrOverview, PrSummary, PullRequest, ReviewComment,
+        ReviewData, ReviewEvent,
     },
 };
 
@@ -144,6 +144,113 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
         .collect()
 }
 
+pub fn load_overview(id: &PrId) -> Result<PrOverview> {
+    let pr = fetch_pr(id)?;
+    validate_sha(&pr.head.sha)?;
+    validate_sha(&pr.base.sha)?;
+    Ok(PrOverview {
+        id: id.clone(),
+        title: pr.title,
+        body: pr.body.unwrap_or_default(),
+        url: pr.html_url,
+        author: login(pr.user),
+        head_sha: pr.head.sha,
+        base_tip_sha: pr.base.sha,
+        draft: pr.draft,
+        state: pr.state,
+        changed_files: pr.changed_files,
+        additions: pr.additions,
+        deletions: pr.deletions,
+    })
+}
+
+pub fn load_diff(overview: &PrOverview) -> Result<ReviewData> {
+    validate_overview(overview)?;
+    ensure!(
+        overview.changed_files <= 3000,
+        "This PR has {} files; GitHub's files API is limited to 3000",
+        overview.changed_files
+    );
+    let (base_sha, files) = thread::scope(|scope| -> Result<(String, Vec<ChangedFile>)> {
+        let base =
+            scope.spawn(|| merge_base(&overview.id, &overview.base_tip_sha, &overview.head_sha));
+        let files = scope.spawn(|| {
+            paginated(&format!(
+                "repos/{}/pulls/{}/files?per_page=100",
+                overview.id.repo, overview.id.number
+            ))
+        });
+        let base = base
+            .join()
+            .map_err(|_| anyhow::anyhow!("Diff base worker failed"));
+        let files = files
+            .join()
+            .map_err(|_| anyhow::anyhow!("Changed files worker failed"));
+        Ok((base??, files??))
+    })?;
+    verify_overview(overview)?;
+    ensure!(
+        files.len() as u64 == overview.changed_files,
+        "GitHub returned {} of {} changed files; reload the PR",
+        files.len(),
+        overview.changed_files
+    );
+    Ok(ReviewData {
+        pr: PullRequest {
+            id: overview.id.clone(),
+            title: overview.title.clone(),
+            body: overview.body.clone(),
+            url: overview.url.clone(),
+            author: overview.author.clone(),
+            head_sha: overview.head_sha.clone(),
+            base_sha,
+            draft: overview.draft,
+        },
+        files,
+        comments: Vec::new(),
+    })
+}
+
+pub fn load_comments(overview: &PrOverview) -> Result<Vec<ReviewComment>> {
+    validate_overview(overview)?;
+    let comments: Vec<ApiComment> = paginated(&format!(
+        "repos/{}/pulls/{}/comments?per_page=100",
+        overview.id.repo, overview.id.number
+    ))?;
+    verify_overview(overview)?;
+    Ok(comments.into_iter().map(review_comment).collect())
+}
+
+fn validate_overview(overview: &PrOverview) -> Result<()> {
+    validate_id(&overview.id)?;
+    validate_sha(&overview.head_sha)?;
+    validate_sha(&overview.base_tip_sha)
+}
+
+fn verify_overview(overview: &PrOverview) -> Result<()> {
+    let current = fetch_pr(&overview.id)?;
+    ensure!(
+        current.head.sha == overview.head_sha && current.base.sha == overview.base_tip_sha,
+        "PR changed since the overview loaded; refresh before loading its diff or comments"
+    );
+    Ok(())
+}
+
+fn review_comment(comment: ApiComment) -> ReviewComment {
+    ReviewComment {
+        id: comment.id,
+        path: comment.path,
+        body: comment.body,
+        author: login(comment.user),
+        line: comment.line,
+        original_line: comment.original_line,
+        side: comment.side,
+        start_line: comment.start_line,
+        start_side: comment.start_side,
+        in_reply_to_id: comment.in_reply_to_id,
+    }
+}
+
 pub fn load_review(id: &PrId) -> Result<ReviewData> {
     validate_id(id)?;
     let initial = fetch_pr(id)?;
@@ -184,21 +291,7 @@ pub fn load_review(id: &PrId) -> Result<ReviewData> {
             draft: initial.draft,
         },
         files,
-        comments: comments
-            .into_iter()
-            .map(|comment| ReviewComment {
-                id: comment.id,
-                path: comment.path,
-                body: comment.body,
-                author: login(comment.user),
-                line: comment.line,
-                original_line: comment.original_line,
-                side: comment.side,
-                start_line: comment.start_line,
-                start_side: comment.start_side,
-                in_reply_to_id: comment.in_reply_to_id,
-            })
-            .collect(),
+        comments: comments.into_iter().map(review_comment).collect(),
     })
 }
 
@@ -469,6 +562,10 @@ struct ApiPr {
     base: ApiRef,
     draft: bool,
     changed_files: u64,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
     state: String,
 }
 

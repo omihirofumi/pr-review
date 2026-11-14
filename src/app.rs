@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pr_review::{
+    analysis::Analysis,
     diff::{self, DiffLine, LineKind},
     model::*,
+    settings::{self, Provider, Settings},
 };
 
 use crate::store;
@@ -111,6 +113,9 @@ impl TextInput {
 }
 
 pub enum Dialog {
+    AgentPicker {
+        selected: usize,
+    },
     OpenPr {
         input: TextInput,
     },
@@ -151,6 +156,29 @@ pub enum Dialog {
         scroll: u16,
     },
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageTab {
+    #[default]
+    Overview,
+    Diff,
+}
+
+pub enum AiStatus {
+    Disabled,
+    Waiting,
+    Loading,
+    Ready(Box<Analysis>),
+    Error(String),
+}
+
+pub struct OverviewState {
+    pub metadata: PrOverview,
+    pub scroll: u16,
+    pub selected_step: usize,
+    pub focus_guide: bool,
+    pub ai: AiStatus,
 }
 
 pub struct ReviewState {
@@ -422,6 +450,11 @@ pub enum Action {
     Quit,
     LoadInbox,
     LoadPr(PrId),
+    LoadDiff,
+    Explain {
+        force: bool,
+    },
+    DisableAi,
     Activity(PrId),
     Prepare {
         pr: PullRequest,
@@ -437,6 +470,14 @@ pub enum Action {
 }
 
 pub struct App {
+    pub tab: PageTab,
+    pub overview: Option<OverviewState>,
+    pub diff_loading: bool,
+    pub diff_error: Option<String>,
+    pub comments_loading: bool,
+    pub generation: u64,
+    pub settings: Settings,
+    pub config_path: Option<PathBuf>,
     pub goto_pending: bool,
     pub repo: Option<String>,
     pub inbox: Vec<PrSummary>,
@@ -455,6 +496,14 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            tab: PageTab::Overview,
+            overview: None,
+            diff_loading: false,
+            diff_error: None,
+            comments_loading: false,
+            generation: 0,
+            settings: Settings::default(),
+            config_path: None,
             goto_pending: false,
             repo: None,
             inbox: Vec::new(),
@@ -474,6 +523,95 @@ impl App {
     pub fn message(&mut self, text: impl Into<String>, error: bool) {
         self.status = text.into();
         self.error = error;
+    }
+
+    pub fn opened(&mut self, metadata: PrOverview) {
+        self.repo = Some(metadata.id.repo.clone());
+        self.overview = Some(OverviewState {
+            metadata,
+            scroll: 0,
+            selected_step: 0,
+            focus_guide: false,
+            ai: if self.settings.ai.provider == Provider::None {
+                AiStatus::Disabled
+            } else {
+                AiStatus::Waiting
+            },
+        });
+        self.review = None;
+        self.tab = PageTab::Overview;
+        self.diff_loading = true;
+        self.diff_error = None;
+        self.goto_pending = false;
+        self.message(
+            "Overview ready. The diff is loading in the background.",
+            false,
+        );
+    }
+
+    pub fn accept_diff(&mut self, data: ReviewData) -> Result<()> {
+        let tab = self.tab;
+        self.loaded(data)?;
+        self.tab = tab;
+        self.diff_loading = false;
+        self.diff_error = None;
+        if !self.error {
+            self.message(
+                "Diff ready. 1 Overview / 2 Diff; a prepares the AI guide.",
+                false,
+            );
+        }
+        Ok(())
+    }
+
+    fn leave_pr(&mut self) {
+        self.overview = None;
+        self.review = None;
+        self.diff_loading = false;
+        self.diff_error = None;
+        self.comments_loading = false;
+        self.generation = self.generation.wrapping_add(1);
+        self.goto_pending = false;
+        self.message("Back to PR inbox", false);
+    }
+
+    fn jump_to_reading_step(&mut self) -> Result<()> {
+        let Some(overview) = &self.overview else {
+            return Ok(());
+        };
+        let AiStatus::Ready(analysis) = &overview.ai else {
+            return Ok(());
+        };
+        let Some(step) = analysis.reading_order.get(overview.selected_step) else {
+            return Ok(());
+        };
+        let review = self
+            .review
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("The diff is not ready yet"))?;
+        let index = review
+            .data
+            .files
+            .iter()
+            .position(|file| file.filename == step.path)
+            .ok_or_else(|| {
+                anyhow::anyhow!("The reading guide refers to a file outside this diff")
+            })?;
+        let position = step
+            .line
+            .and_then(|line| {
+                review.lines[index]
+                    .iter()
+                    .position(|row| pr_review::thread::matches_anchor(row, &step.side, line))
+            })
+            .unwrap_or(0);
+        review.selected_file = index;
+        review.positions[index] = position;
+        review.selection = None;
+        review.horizontal = 0;
+        review.focus = Focus::Diff;
+        self.tab = PageTab::Diff;
+        Ok(())
     }
 
     pub fn loaded(&mut self, mut data: ReviewData) -> Result<()> {
@@ -518,6 +656,7 @@ impl App {
             drafts,
             workspace: None,
         });
+        self.tab = PageTab::Diff;
         self.goto_pending = false;
         let pending = store::attempt(&self.root, &self.review.as_ref().unwrap().data.pr)?.is_some();
         if pending {
@@ -561,6 +700,70 @@ impl App {
                     self.filter.push(c);
                     self.selected_pr = 0;
                 }
+                _ => {}
+            }
+            return Ok(Action::None);
+        }
+        if self.overview.is_some() {
+            match key.code {
+                KeyCode::Char('1') => {
+                    self.tab = PageTab::Overview;
+                    self.goto_pending = false;
+                    return Ok(Action::None);
+                }
+                KeyCode::Char('2') => {
+                    self.tab = PageTab::Diff;
+                    self.goto_pending = false;
+                    return Ok(Action::None);
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.tab = if self.tab == PageTab::Overview {
+                        PageTab::Diff
+                    } else {
+                        PageTab::Overview
+                    };
+                    self.goto_pending = false;
+                    return Ok(Action::None);
+                }
+                KeyCode::Char('A') => {
+                    self.goto_pending = false;
+                    self.dialog = Some(Dialog::AgentPicker {
+                        selected: match self.settings.ai.provider {
+                            Provider::Codex => 0,
+                            Provider::Claude => 1,
+                            Provider::None => 2,
+                        },
+                    });
+                    return Ok(Action::None);
+                }
+                KeyCode::Char('a') => {
+                    self.goto_pending = false;
+                    if self
+                        .overview
+                        .as_ref()
+                        .is_some_and(|overview| matches!(overview.ai, AiStatus::Loading))
+                    {
+                        self.message("The AI guide is already being prepared", false);
+                        return Ok(Action::None);
+                    }
+                    if self.settings.ai.provider == Provider::None {
+                        self.dialog = Some(Dialog::AgentPicker { selected: 0 });
+                        return Ok(Action::None);
+                    }
+                    return Ok(Action::Explain { force: true });
+                }
+                _ => {}
+            }
+        }
+        if self.overview.is_some() && self.tab == PageTab::Overview {
+            return self.overview_key(key);
+        }
+        if self.overview.is_some() && self.review.is_none() {
+            match key.code {
+                KeyCode::Esc if !self.busy => self.leave_pr(),
+                KeyCode::Char('r') if !self.diff_loading => return Ok(Action::LoadDiff),
+                KeyCode::Char('q') if !self.busy => return Ok(Action::Quit),
+                KeyCode::Char('?') => self.dialog = Some(Dialog::Help { scroll: 0 }),
                 _ => {}
             }
             return Ok(Action::None);
@@ -663,8 +866,7 @@ impl App {
                 review.selection = None;
             }
             KeyCode::Esc if !self.busy => {
-                self.review = None;
-                self.message("Back to PR inbox", false);
+                self.leave_pr();
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 review.focus = if review.focus == Focus::Files {
@@ -796,6 +998,102 @@ impl App {
             .map_or(Action::None, |pr| Action::LoadPr(pr.id.clone())))
     }
 
+    fn overview_key(&mut self, key: KeyEvent) -> Result<Action> {
+        if self.goto_pending {
+            self.goto_pending = false;
+            match key.code {
+                KeyCode::Char('g') => {
+                    self.overview.as_mut().unwrap().scroll = 0;
+                    self.overview.as_mut().unwrap().focus_guide = false;
+                }
+                KeyCode::Char('e') => {
+                    self.overview.as_mut().unwrap().scroll = u16::MAX;
+                    self.overview.as_mut().unwrap().focus_guide = false;
+                }
+                KeyCode::Char('f') => self.jump_to_reading_step()?,
+                _ => {}
+            }
+            return Ok(Action::None);
+        }
+        let overview = self.overview.as_mut().unwrap();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                overview.scroll = overview.scroll.saturating_add(1);
+                overview.focus_guide = false;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                overview.scroll = overview.scroll.saturating_sub(1);
+                overview.focus_guide = false;
+            }
+            KeyCode::PageDown => {
+                overview.scroll = overview.scroll.saturating_add(15);
+                overview.focus_guide = false;
+            }
+            KeyCode::PageUp => {
+                overview.scroll = overview.scroll.saturating_sub(15);
+                overview.focus_guide = false;
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                overview.scroll = overview.scroll.saturating_add(12);
+                overview.focus_guide = false;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                overview.scroll = overview.scroll.saturating_sub(12);
+                overview.focus_guide = false;
+            }
+            KeyCode::Char('g') => self.goto_pending = true,
+            KeyCode::Home => {
+                overview.scroll = 0;
+                overview.focus_guide = false;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                overview.scroll = u16::MAX;
+                overview.focus_guide = false;
+            }
+            KeyCode::Char('n') | KeyCode::Char('p') => {
+                let len = match &overview.ai {
+                    AiStatus::Ready(analysis) => analysis.reading_order.len(),
+                    _ => 0,
+                };
+                overview.selected_step = if key.code == KeyCode::Char('n') {
+                    overview
+                        .selected_step
+                        .saturating_add(1)
+                        .min(len.saturating_sub(1))
+                } else {
+                    overview.selected_step.saturating_sub(1)
+                };
+                overview.focus_guide = true;
+            }
+            KeyCode::Enter | KeyCode::Char('o') => self.jump_to_reading_step()?,
+            KeyCode::Char('b') => self.dialog = Some(Dialog::Description { scroll: 0 }),
+            KeyCode::Char('?') => self.dialog = Some(Dialog::Help { scroll: 0 }),
+            KeyCode::Char('!') => self.dialog = Some(Dialog::Status { scroll: 0 }),
+            KeyCode::Char('#') if !self.busy => {
+                self.dialog = Some(Dialog::OpenPr {
+                    input: TextInput::default(),
+                })
+            }
+            KeyCode::Char('r') if !self.busy => {
+                return Ok(Action::LoadPr(overview.metadata.id.clone()));
+            }
+            KeyCode::Esc if !self.busy => self.leave_pr(),
+            KeyCode::Char('q') if !self.busy => {
+                if self
+                    .review
+                    .as_ref()
+                    .is_some_and(|review| !review.drafts.is_empty())
+                {
+                    self.dialog = Some(Dialog::Quit);
+                } else {
+                    return Ok(Action::Quit);
+                }
+            }
+            _ => {}
+        }
+        Ok(Action::None)
+    }
+
     fn dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
         let dialog = self.dialog.take().unwrap();
         if key.code == KeyCode::Esc {
@@ -803,6 +1101,42 @@ impl App {
         }
         let save = key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.dialog = match dialog {
+            Dialog::AgentPicker { mut selected } => {
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => selected = (selected + 1).min(2),
+                    KeyCode::Char('k') | KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Enter | KeyCode::Char('o') => {
+                        let provider =
+                            [Provider::Codex, Provider::Claude, Provider::None][selected];
+                        let mut settings = self.settings.clone();
+                        if settings.ai.provider != provider {
+                            settings.ai.model = None;
+                        }
+                        settings.ai.provider = provider;
+                        if let Some(path) = &self.config_path
+                            && let Err(error) = settings::save(path, &settings)
+                        {
+                            self.dialog = Some(Dialog::AgentPicker { selected });
+                            return Err(error);
+                        }
+                        self.settings = settings;
+                        if let Some(overview) = &mut self.overview {
+                            overview.ai = if provider == Provider::None {
+                                AiStatus::Disabled
+                            } else {
+                                AiStatus::Waiting
+                            };
+                        }
+                        return Ok(if provider == Provider::None {
+                            Action::DisableAi
+                        } else {
+                            Action::Explain { force: false }
+                        });
+                    }
+                    _ => {}
+                }
+                Some(Dialog::AgentPicker { selected })
+            }
             Dialog::OpenPr { mut input } => {
                 if key.code == KeyCode::Enter && !self.busy {
                     match self

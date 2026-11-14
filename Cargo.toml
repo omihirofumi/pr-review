@@ -1,6 +1,6 @@
 [package]
 name = "pr-review"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Review GitHub pull requests in the terminal with Jujutsu and Helix"
 license = "MIT"
@@ -23,6 +23,7 @@ ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+toml = "1.2.1"
 
 [dev-dependencies]
 

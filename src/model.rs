@@ -27,6 +27,22 @@ pub struct PrSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PrOverview {
+    pub id: PrId,
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    pub author: String,
+    pub head_sha: String,
+    pub base_tip_sha: String,
+    pub draft: bool,
+    pub state: String,
+    pub changed_files: u64,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChangedFile {
     pub filename: String,
     pub previous_filename: Option<String>,

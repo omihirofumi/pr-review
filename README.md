@@ -4,7 +4,7 @@
 
 A standalone Rust + Ratatui app for reviewing GitHub pull requests with Jujutsu and Helix.
 
-Run it inside a repository to browse that repository's PRs, read diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. `pr-review` remains available as an alias.
+Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. `pr-review` remains available as an alias.
 
 ## Install
 
@@ -41,7 +41,9 @@ gh-preview
 
 Select a PR with `j` / `k` and press `o`. If you already know its number, open it directly with `gh-preview 123`. Subdirectories work too; the app detects the containing repository.
 
-Once the diff is open:
+PRs open on **Overview**, showing the title, author description, and change counts as soon as the metadata arrives. Diff and comments load independently in the background. Press `2` for **Diff**, `1` for Overview, or `Tab` / `Shift-Tab` to switch. With an AI agent configured, a structured reading guide appears in Overview without blocking navigation.
+
+In Diff:
 
 1. Keep pressing `j` to read downward and continue into the next file. `k` goes backward. Use `gg` / `ge` to jump to the current file's top / bottom.
 2. Press `gf` or `o` to open the selected source line in Helix. Quit Helix to resume the review at the same position.
@@ -65,11 +67,50 @@ gh-preview --repo owner/repo                     # Explicit repository override
 gh-preview --repo owner/repo 123
 gh-preview https://github.com/owner/repo/pull/123
 gh-preview --demo                               # Offline example; never posts
+gh-preview 123 --agent codex                     # Codex guide for this launch
+gh-preview 123 --agent claude --model MODEL      # Claude with a model override
+gh-preview 123 --agent none                      # Read without an AI guide
+gh-preview --config-path                        # Print the configuration path
+gh-preview --config /path/to/config.toml 123     # Use another configuration file
 ```
 
 A repository is detected from the current directory, including subdirectories. A PR URL supplies its own repository. The inbox, refresh, search, and direct number entry stay scoped to that selected repository; there is no account-wide review queue. Outside a repository, use `--repo` or a PR URL.
 
 The inbox shows up to 100 open PRs. `/` filters the loaded inbox locally; `--search` queries GitHub within the selected repository. Press `#` from the inbox or review screen to open a PR by number without restarting.
+
+## Overview and AI reading guide
+
+Press `A` in either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/gh-preview/config.toml` (or `$XDG_CONFIG_HOME/gh-preview/config.toml`). A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+
+Example configuration:
+
+```toml
+[ai]
+provider = "codex"       # "codex", "claude", or "none"
+language = "en"          # e.g. "ja" for Japanese explanations
+auto_explain = true
+timeout_seconds = 180
+max_input_bytes = 160000
+# model = "MODEL"        # Omit to use the provider CLI's default model
+```
+
+`--agent` and `--model` override settings for one launch. Choosing another provider with `A` clears the saved model override so a provider-specific model is not reused accidentally. Set `auto_explain = false` to generate only when you press `a`.
+
+The explanation contains:
+
+- **Summary:** what the PR changes.
+- **Intent:** why, labeled as author-stated, inferred from the diff, or unknown.
+- **Changes:** the main behavior and affected files.
+- **Reading order:** an ordered route through the implementation with file/line references.
+- **Risks:** concrete areas to inspect during review.
+- **Verification:** visible test evidence, suggested checks, and unknowns. No tests are run by the explanation agent.
+- **Coverage:** which complete patches were included, omitted by the context budget, or unavailable from GitHub.
+
+In Overview, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / `p` select a reading-guide step. Press `Enter`, `o`, or `gf` to jump to that step in Diff; press `o` or `gf` again there to prepare its checkout and open Helix. `b` opens the full author description.
+
+Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
+
+Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide; `a` explicitly regenerates it. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in Overview while the description and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
 
 ## Review controls
 
@@ -81,7 +122,9 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 
 | Key | Action |
 | --- | --- |
-| `Tab`, `h`, `l` | Focus files or diff |
+| `1` / `2`, `Tab` / `Shift-Tab` | Overview / Diff tabs |
+| `h` / `l` | Focus files / diff pane in Diff |
+| `a` / `A` | Generate or regenerate AI guide / choose and save an agent |
 | `j` / `k`, up / down | Move through lines and continue into adjacent files |
 | `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous hunk |
@@ -146,6 +189,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-The test suite uses temporary local repositories and a fake `gh` executable; it does not post to GitHub. Tests require `jj`, Git, and Python 3. The diff fixtures cover old/new line coordinates, renames, absent patches, and malformed hunks. Workflow tests cover local persistence, failed writes, stale revisions, submission recovery, and request payloads.
+The test suite uses temporary local repositories and fake `gh`, `codex`, and `claude` executables; it does not post to GitHub or call a live AI provider. Tests require `jj`, Git, and Python 3. The diff fixtures cover old/new line coordinates, renames, absent patches, and malformed hunks. Workflow tests cover metadata-first loading, stale background results, agent cancellation and caching, structured output validation, local persistence, failed writes, stale revisions, submission recovery, and request payloads.
 
-`src/cli.rs` runs the shared command, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.
+`src/cli.rs` runs the shared command and background jobs, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/settings.rs` persists configuration, `src/analysis.rs` runs and validates AI explanations, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.

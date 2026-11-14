@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use pr_review::{
+    analysis::Analysis,
     diff::{DiffLine, LineKind},
     model::{ChangedFile, Side},
+    settings::Provider,
     thread::{Thread, matches_anchor, threads},
 };
 use ratatui::{
@@ -13,7 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::app::{App, Dialog, Focus, ReviewState, TextInput};
+use crate::app::{AiStatus, App, Dialog, Focus, OverviewState, PageTab, ReviewState, TextInput};
 
 const BACKGROUND: Color = Color::Rgb(24, 24, 23);
 const SIDEBAR: Color = Color::Rgb(29, 29, 28);
@@ -33,7 +35,7 @@ const COMMENT: Color = Color::Rgb(35, 36, 38);
 const COMMENT_ACCENT: Color = Color::Rgb(155, 174, 199);
 const DRAFT: Color = Color::Rgb(44, 39, 29);
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(BACKGROUND).fg(TEXT)),
@@ -55,8 +57,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .areas(area);
     draw_header(frame, app, header);
-    if app.review.is_some() {
+    let body = if app.overview.is_some() {
+        let [tabs, content] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+        draw_tabs(frame, app, tabs);
+        content
+    } else {
+        body
+    };
+    if app.overview.is_some() && matches!(app.tab, PageTab::Overview) {
+        draw_overview(frame, app, body);
+    } else if app.review.is_some() {
         draw_review(frame, app, body);
+    } else if app.overview.is_some() {
+        draw_diff_placeholder(frame, app, body);
     } else {
         draw_inbox(frame, app, body);
     }
@@ -81,6 +95,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
     let keys = if app.goto_pending {
         " g: g top · e end · f open · Esc cancel "
+    } else if app.overview.is_some() && matches!(app.tab, PageTab::Overview) {
+        if area.width < 76 {
+            " j/k scroll  n/p guide  a explain  A agent  ? keys "
+        } else {
+            " Tab views  j/k scroll  n/p guide  Enter diff  a explain  A agent  b description  ? keys "
+        }
+    } else if app.overview.is_some() && app.review.is_none() {
+        " 1 Overview  2 Diff  Tab views  r retry  ? keys "
     } else if app.review.is_some() && area.width < 76 {
         " v select  x/X lines  c note  o open  ? keys "
     } else if app.review.is_some() && area.width < 105 {
@@ -102,6 +124,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(overview) = &app.overview {
+        draw_overview_header(frame, app, overview, area);
+        return;
+    }
     let context = app.review.as_ref().map_or_else(
         || app.repo.clone().unwrap_or_else(|| "Pull requests".into()),
         |review| format!("{}  #{}", review.data.pr.id.repo, review.data.pr.id.number),
@@ -184,6 +210,615 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new("─".repeat(usize::from(rule.width))).style(Style::default().fg(BORDER)),
         rule,
+    );
+}
+
+fn draw_overview_header(frame: &mut Frame, app: &App, overview: &OverviewState, area: Rect) {
+    let metadata = &overview.metadata;
+    let [first, title, rule] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let [identity, status] = Layout::horizontal([
+        Constraint::Min(20),
+        Constraint::Length(if area.width >= 90 { 36 } else { 17 }),
+    ])
+    .areas(first);
+    let label = if app.demo {
+        "gh-preview · demo"
+    } else {
+        "gh-preview"
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {label}"), Style::default().fg(ACCENT).bold()),
+            Span::styled(
+                format!("   {} #{}", metadata.id.repo, metadata.id.number),
+                Style::default().fg(TEXT),
+            ),
+        ]))
+        .style(Style::default().bg(SIDEBAR)),
+        identity,
+    );
+    let selection = app
+        .review
+        .as_ref()
+        .filter(|_| matches!(app.tab, PageTab::Diff))
+        .and_then(selection_label);
+    let summary = selection.unwrap_or_else(|| {
+        if area.width >= 90 {
+            format!(
+                "{} files · +{} -{} · {}",
+                metadata.changed_files,
+                metadata.additions,
+                metadata.deletions,
+                &metadata.head_sha[..metadata.head_sha.len().min(8)]
+            )
+        } else {
+            format!("{} files", metadata.changed_files)
+        }
+    });
+    frame.render_widget(
+        Paragraph::new(summary)
+            .right_aligned()
+            .style(Style::default().fg(MUTED).bg(SIDEBAR)),
+        status,
+    );
+    frame.render_widget(
+        Paragraph::new(format!(" {}", metadata.title)).style(Style::default().fg(TEXT).bg(SIDEBAR)),
+        title,
+    );
+    frame.render_widget(
+        Paragraph::new("─".repeat(usize::from(rule.width))).style(Style::default().fg(BORDER)),
+        rule,
+    );
+}
+
+fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let diff = if app.diff_loading {
+        " 2 Diff · loading "
+    } else if app.diff_error.is_some() {
+        " 2 Diff · error "
+    } else if app.comments_loading {
+        " 2 Diff · comments "
+    } else {
+        " 2 Diff "
+    };
+    let selected = |active| {
+        Style::default()
+            .fg(if active { ACCENT } else { MUTED })
+            .bg(if active { PANEL } else { SIDEBAR })
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " 1 Overview ",
+                selected(matches!(app.tab, PageTab::Overview)).bold(),
+            ),
+            Span::raw(" "),
+            Span::styled(diff, selected(matches!(app.tab, PageTab::Diff)).bold()),
+            Span::styled(
+                if area.width >= 85 {
+                    "    Tab / Shift-Tab switches views"
+                } else {
+                    ""
+                },
+                Style::default().fg(MUTED),
+            ),
+        ]))
+        .style(Style::default().bg(SIDEBAR)),
+        area,
+    );
+}
+
+fn draw_diff_placeholder(frame: &mut Frame, app: &App, area: Rect) {
+    let mut lines = vec![Line::from("")];
+    if let Some(error) = &app.diff_error {
+        lines.push(Line::from(Span::styled(
+            "  The diff could not be loaded.",
+            Style::default().fg(RED).bold(),
+        )));
+        lines.push(Line::from(""));
+        lines.extend(
+            wrap_comment(error, usize::from(area.width).saturating_sub(4).max(1))
+                .into_iter()
+                .map(|line| Line::from(format!("  {line}"))),
+        );
+        lines.push(Line::from(""));
+        lines.push(Line::from("  r retries · 1 returns to the overview"));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  Loading changed files…",
+            Style::default().fg(ACCENT).bold(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from("  PR details are available in 1 Overview."));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(TEXT))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(overview) = &mut app.overview else {
+        return;
+    };
+    let metadata = &overview.metadata;
+    let body = if metadata.body.trim().is_empty() {
+        "No author description."
+    } else {
+        metadata.body.as_str()
+    };
+    let wrapped = wrap_comment(body, usize::from(area.width).saturating_sub(4).max(1));
+    let preview = if area.height >= 22 { 3 } else { 2 };
+    let description_height = wrapped.len().min(preview) as u16 + 1;
+    let [details, description, state, content] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(description_height),
+        Constraint::Length(2),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(
+                        " {} · {}{}",
+                        metadata.author,
+                        metadata.state.to_lowercase(),
+                        if metadata.draft { " · draft" } else { "" }
+                    ),
+                    Style::default().fg(TEXT),
+                ),
+                Span::styled(
+                    format!(" · {} changed files", metadata.changed_files),
+                    Style::default().fg(MUTED),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!(" {}", metadata.url),
+                Style::default().fg(MUTED),
+            )),
+        ]),
+        details,
+    );
+    let mut description_lines = vec![Line::from(Span::styled(
+        " AUTHOR DESCRIPTION · b opens full text",
+        Style::default().fg(MUTED),
+    ))];
+    description_lines.extend(
+        wrapped
+            .into_iter()
+            .take(preview)
+            .map(|line| Line::from(format!("  {line}"))),
+    );
+    frame.render_widget(Paragraph::new(description_lines), description);
+    let (caption, color) = match &overview.ai {
+        AiStatus::Disabled => (
+            " AI guide not configured · a chooses an agent".to_owned(),
+            MUTED,
+        ),
+        AiStatus::Waiting => (
+            if app.diff_loading {
+                " Waiting for the diff to prepare the AI guide…".to_owned()
+            } else {
+                " AI guide is ready to generate · a explains this PR".to_owned()
+            },
+            ACCENT,
+        ),
+        AiStatus::Loading => (
+            format!(" Preparing AI guide with {}…", app.settings.ai.provider),
+            ACCENT,
+        ),
+        AiStatus::Ready(_) => (
+            format!(
+                " AI GUIDE · {} · a regenerates · n/p reading order · Enter jumps",
+                app.settings.ai.provider
+            ),
+            ACCENT,
+        ),
+        AiStatus::Error(_) => (
+            " AI guide unavailable · a retries · A chooses an agent".to_owned(),
+            RED,
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(caption)
+            .style(Style::default().fg(color))
+            .wrap(Wrap { trim: false }),
+        state,
+    );
+    match &overview.ai {
+        AiStatus::Ready(analysis) => {
+            let wide = content.width >= 110;
+            let [narrative, guide] = if wide {
+                Layout::horizontal([Constraint::Min(50), Constraint::Length(38)]).areas(content)
+            } else {
+                [content, Rect::default()]
+            };
+            let rows = overview_rows(analysis, narrative.width, !wide);
+            let scroll = draw_overview_rows(frame, &rows, overview, narrative);
+            if wide {
+                draw_reading_guide(frame, analysis, overview.selected_step, guide);
+            }
+            overview.scroll = scroll;
+        }
+        status => {
+            let mut rows = Vec::new();
+            match status {
+                AiStatus::Disabled => {
+                    overview_heading(&mut rows, "SET UP YOUR AI GUIDE");
+                    overview_text(
+                        &mut rows,
+                        "Choose Codex or Claude with a or A. PR details and the Diff tab remain available without an AI agent.",
+                        content.width,
+                        2,
+                        TEXT,
+                        None,
+                    );
+                    overview_text(
+                        &mut rows,
+                        &format!(
+                            "Model: {} · Language: {}",
+                            app.settings.ai.model.as_deref().unwrap_or("agent default"),
+                            app.settings.ai.language
+                        ),
+                        content.width,
+                        2,
+                        MUTED,
+                        None,
+                    );
+                }
+                AiStatus::Waiting => {
+                    overview_heading(&mut rows, "PR DETAILS ARE READY");
+                    overview_text(
+                        &mut rows,
+                        if app.diff_loading {
+                            "The guide will use the PR description and changed code when the diff arrives. You can read the description now or switch to 2 Diff."
+                        } else {
+                            "Press a to prepare the guide from the PR description and changed code, or switch to 2 Diff to start reviewing."
+                        },
+                        content.width,
+                        2,
+                        TEXT,
+                        None,
+                    );
+                }
+                AiStatus::Loading => {
+                    overview_heading(&mut rows, "PREPARING THE REVIEW GUIDE");
+                    overview_text(
+                        &mut rows,
+                        "The explanation is being prepared. You can switch to 2 Diff and start reviewing while it runs.",
+                        content.width,
+                        2,
+                        TEXT,
+                        None,
+                    );
+                }
+                AiStatus::Error(error) => {
+                    overview_heading(&mut rows, "AGENT DETAILS");
+                    overview_text(&mut rows, error, content.width, 2, RED, None);
+                    overview_text(
+                        &mut rows,
+                        "Press a to try again, A to choose another agent, or 2 to inspect the diff.",
+                        content.width,
+                        2,
+                        TEXT,
+                        None,
+                    );
+                }
+                AiStatus::Ready(_) => unreachable!(),
+            }
+            overview.scroll = draw_overview_rows(frame, &rows, overview, content);
+        }
+    }
+}
+
+struct OverviewRow {
+    line: Line<'static>,
+    step: Option<usize>,
+}
+
+fn overview_heading(rows: &mut Vec<OverviewRow>, heading: &str) {
+    if !rows.is_empty() {
+        rows.push(OverviewRow {
+            line: Line::from(""),
+            step: None,
+        });
+    }
+    rows.push(OverviewRow {
+        line: Line::from(Span::styled(
+            format!(" {heading}"),
+            Style::default().fg(ACCENT).bold(),
+        )),
+        step: None,
+    });
+}
+
+fn overview_text(
+    rows: &mut Vec<OverviewRow>,
+    text: &str,
+    width: u16,
+    indent: usize,
+    color: Color,
+    step: Option<usize>,
+) {
+    for line in wrap_comment(text, usize::from(width).saturating_sub(indent + 1).max(1)) {
+        rows.push(OverviewRow {
+            line: Line::from(Span::styled(
+                format!("{}{line}", " ".repeat(indent)),
+                Style::default().fg(color),
+            )),
+            step,
+        });
+    }
+}
+
+fn reading_step_label(index: usize, step: &pr_review::analysis::ReadingStep) -> String {
+    format!(
+        "{}. {}{} · {}",
+        index + 1,
+        step.path,
+        step.line
+            .map_or_else(String::new, |line| format!(":{line}")),
+        side_label(&step.side)
+    )
+}
+
+fn overview_reading_order(rows: &mut Vec<OverviewRow>, analysis: &Analysis, width: u16) {
+    overview_heading(rows, "READING ORDER · n/p chooses · Enter opens diff");
+    if analysis.reading_order.is_empty() {
+        overview_text(
+            rows,
+            "No reading order was provided.",
+            width,
+            2,
+            MUTED,
+            None,
+        );
+    }
+    for (index, step) in analysis.reading_order.iter().enumerate() {
+        overview_text(
+            rows,
+            &reading_step_label(index, step),
+            width,
+            2,
+            COMMENT_ACCENT,
+            Some(index),
+        );
+        overview_text(rows, &step.reason, width, 4, TEXT, Some(index));
+        rows.push(OverviewRow {
+            line: Line::from(""),
+            step: None,
+        });
+    }
+}
+
+fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<OverviewRow> {
+    let mut rows = Vec::new();
+    overview_heading(&mut rows, "SUMMARY");
+    overview_text(&mut rows, &analysis.summary, width, 2, TEXT, None);
+    let basis = match analysis.intent.basis.as_str() {
+        "author_description" => "from author description",
+        "inferred_from_diff" => "inferred from diff",
+        _ => "unknown basis",
+    };
+    overview_heading(&mut rows, &format!("INTENT · {basis}"));
+    overview_text(&mut rows, &analysis.intent.text, width, 2, TEXT, None);
+    overview_heading(&mut rows, "MAIN CHANGES");
+    if analysis.changes.is_empty() {
+        overview_text(
+            &mut rows,
+            "No changes were summarized.",
+            width,
+            2,
+            MUTED,
+            None,
+        );
+    }
+    for change in &analysis.changes {
+        overview_text(&mut rows, &change.title, width, 2, ACCENT, None);
+        overview_text(&mut rows, &change.detail, width, 4, TEXT, None);
+        if !change.files.is_empty() {
+            overview_text(
+                &mut rows,
+                &format!("Files: {}", change.files.join(", ")),
+                width,
+                4,
+                MUTED,
+                None,
+            );
+        }
+    }
+    if include_guide {
+        overview_reading_order(&mut rows, analysis, width);
+    }
+    overview_heading(&mut rows, "REVIEW RISKS");
+    if analysis.risks.is_empty() {
+        overview_text(&mut rows, "No risks were listed.", width, 2, MUTED, None);
+    }
+    for risk in &analysis.risks {
+        overview_text(&mut rows, &risk.title, width, 2, ACCENT, None);
+        overview_text(&mut rows, &risk.detail, width, 4, TEXT, None);
+        if !risk.files.is_empty() {
+            overview_text(
+                &mut rows,
+                &format!("Files: {}", risk.files.join(", ")),
+                width,
+                4,
+                MUTED,
+                None,
+            );
+        }
+    }
+    overview_heading(&mut rows, "VERIFICATION");
+    overview_text(&mut rows, "Existing tests", width, 2, GREEN, None);
+    if analysis.verification.existing_tests.is_empty() {
+        overview_text(
+            &mut rows,
+            "None identified in the supplied context.",
+            width,
+            4,
+            MUTED,
+            None,
+        );
+    }
+    for test in &analysis.verification.existing_tests {
+        overview_text(&mut rows, &format!("- {test}"), width, 4, TEXT, None);
+    }
+    overview_text(&mut rows, "Suggested checks", width, 2, GREEN, None);
+    if analysis.verification.suggested_checks.is_empty() {
+        overview_text(
+            &mut rows,
+            "No additional checks were listed.",
+            width,
+            4,
+            MUTED,
+            None,
+        );
+    }
+    for check in &analysis.verification.suggested_checks {
+        overview_text(&mut rows, &format!("- {check}"), width, 4, TEXT, None);
+    }
+    overview_heading(&mut rows, "UNKNOWNS");
+    if analysis.verification.unknowns.is_empty() {
+        overview_text(&mut rows, "No unknowns were listed.", width, 2, MUTED, None);
+    }
+    for unknown in &analysis.verification.unknowns {
+        overview_text(&mut rows, &format!("- {unknown}"), width, 2, TEXT, None);
+    }
+    overview_heading(&mut rows, "CONTEXT COVERAGE");
+    overview_text(
+        &mut rows,
+        &format!(
+            "{} files included · {} omitted · {} without a text diff",
+            analysis.coverage.included_files.len(),
+            analysis.coverage.omitted_files.len(),
+            analysis.coverage.unavailable_files.len()
+        ),
+        width,
+        2,
+        MUTED,
+        None,
+    );
+    for file in &analysis.coverage.omitted_files {
+        overview_text(
+            &mut rows,
+            &format!("Omitted: {file}"),
+            width,
+            2,
+            MUTED,
+            None,
+        );
+    }
+    for file in &analysis.coverage.unavailable_files {
+        overview_text(
+            &mut rows,
+            &format!("No text diff: {file}"),
+            width,
+            2,
+            MUTED,
+            None,
+        );
+    }
+    rows
+}
+
+fn draw_overview_rows(
+    frame: &mut Frame,
+    rows: &[OverviewRow],
+    overview: &OverviewState,
+    area: Rect,
+) -> u16 {
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+    let height = usize::from(area.height);
+    let requested = if overview.focus_guide {
+        rows.iter()
+            .position(|row| row.step == Some(overview.selected_step))
+            .map_or(usize::from(overview.scroll), |row| row.saturating_sub(2))
+    } else {
+        usize::from(overview.scroll)
+    };
+    let start = requested.min(rows.len().saturating_sub(height));
+    for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
+        let selected = row.step == Some(overview.selected_step);
+        frame.render_widget(
+            Paragraph::new(row.line.clone()).style(Style::default().bg(if selected {
+                PANEL
+            } else {
+                BACKGROUND
+            })),
+            Rect::new(area.x, area.y + offset as u16, area.width, 1),
+        );
+    }
+    start.min(u16::MAX as usize) as u16
+}
+
+fn draw_reading_guide(frame: &mut Frame, analysis: &Analysis, selected_step: usize, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(BORDER))
+        .style(Style::default().bg(SIDEBAR));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [heading, list] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(" READING ORDER\n n/p chooses · Enter jumps")
+            .style(Style::default().fg(ACCENT)),
+        heading,
+    );
+    if analysis.reading_order.is_empty() {
+        frame.render_widget(
+            Paragraph::new(" No reading order provided.").style(Style::default().fg(MUTED)),
+            list,
+        );
+        return;
+    }
+    let items = analysis
+        .reading_order
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let mut lines = wrap_comment(
+                &reading_step_label(index, step),
+                usize::from(list.width).saturating_sub(3).max(1),
+            )
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    format!(" {line}"),
+                    Style::default().fg(COMMENT_ACCENT),
+                ))
+            })
+            .collect::<Vec<_>>();
+            lines.extend(
+                wrap_comment(
+                    &step.reason,
+                    usize::from(list.width).saturating_sub(3).max(1),
+                )
+                .into_iter()
+                .map(|line| Line::from(format!(" {line}"))),
+            );
+            lines.push(Line::from(""));
+            ListItem::new(lines)
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(selected_step));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(Style::default().bg(PANEL))
+            .highlight_symbol("›"),
+        list,
+        &mut state,
     );
 }
 
@@ -375,7 +1010,7 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
 
     let [file_header, content] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(diff_area);
-    draw_file_header(frame, review, file_header);
+    draw_file_header(frame, review, app.comments_loading, file_header);
     let rows = review_rows(review, content.width);
     let start = viewport_start(&rows, review.position(), usize::from(content.height));
     for (offset, row) in rows
@@ -391,7 +1026,7 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_file_header(frame: &mut Frame, review: &ReviewState, area: Rect) {
+fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: bool, area: Rect) {
     let Some(file) = review.current_file() else {
         return;
     };
@@ -434,7 +1069,12 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, area: Rect) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            " {comments} comments · {drafts} draft{} · {}",
+            " {} · {drafts} draft{} · {}",
+            if comments_loading {
+                "comments loading".into()
+            } else {
+                format!("{comments} comments")
+            },
             if drafts == 1 { "" } else { "s" },
             if review.show_comments {
                 "shown"
@@ -1025,6 +1665,92 @@ fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
 
 fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
     match dialog {
+        Dialog::AgentPicker { selected } => {
+            let inner = popup(
+                frame,
+                " Explanation agent / Enter saves / Esc cancels ".into(),
+                80,
+                17,
+            );
+            let roomy = inner.height >= 12;
+            let [intro, choices, details, footer] = Layout::vertical([
+                Constraint::Length(if roomy { 2 } else { 1 }),
+                Constraint::Length(if roomy { 6 } else { 3 }),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+            frame.render_widget(
+                Paragraph::new("Choose the agent used to explain PRs.")
+                    .style(Style::default().fg(TEXT)),
+                intro,
+            );
+            let items = [
+                (Provider::Codex, "Codex", "Uses your installed Codex CLI"),
+                (Provider::Claude, "Claude", "Uses your installed Claude CLI"),
+                (
+                    Provider::None,
+                    "No AI guide",
+                    "Keep PR details and code review available",
+                ),
+            ]
+            .into_iter()
+            .map(|(provider, name, description)| {
+                let mut lines = vec![Line::from(Span::styled(
+                    format!(
+                        "{name}{}",
+                        if app.settings.ai.provider == provider {
+                            " · current"
+                        } else {
+                            ""
+                        }
+                    ),
+                    Style::default().fg(ACCENT),
+                ))];
+                if roomy {
+                    lines.push(Line::from(Span::styled(
+                        description,
+                        Style::default().fg(MUTED),
+                    )));
+                }
+                ListItem::new(lines)
+            })
+            .collect::<Vec<_>>();
+            let mut state = ListState::default().with_selected(Some(*selected));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .highlight_style(Style::default().bg(SELECTED))
+                    .highlight_symbol("› "),
+                choices,
+                &mut state,
+            );
+            let mut text = vec![Line::from(format!(
+                "Model: {} · Language: {}",
+                app.settings.ai.model.as_deref().unwrap_or("agent default"),
+                app.settings.ai.language
+            ))];
+            if roomy {
+                text.push(Line::from(format!(
+                    "Automatic explanations: {}",
+                    if app.settings.ai.auto_explain {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                )));
+                if let Some(path) = &app.config_path {
+                    text.push(Line::from(format!("Config: {}", path.display())));
+                }
+            }
+            frame.render_widget(
+                Paragraph::new(text).style(Style::default().fg(MUTED)),
+                details,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter saves · Esc cancels").style(Style::default().fg(ACCENT)),
+                footer,
+            );
+        }
         Dialog::OpenPr { input } => {
             let inner = popup(
                 frame,
@@ -1095,24 +1821,38 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 84,
                 32,
             );
-            frame.render_widget(Paragraph::new("NAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / h / l     Switch between files and diff\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
+            frame.render_widget(Paragraph::new("NAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
         }
         Dialog::Description { scroll } => {
-            let review = app.review.as_ref().unwrap();
             let inner = popup(
                 frame,
                 " PR description / j,k scroll / Esc closes ".into(),
                 100,
                 frame.area().height.saturating_sub(4),
             );
-            let body = format!(
-                "{}\n{}\nby {}{}\n\n{}",
-                review.data.pr.title,
-                review.data.pr.url,
-                review.data.pr.author,
-                if review.data.pr.draft { " (draft)" } else { "" },
-                review.data.pr.body
-            );
+            let body = if let Some(overview) = &app.overview {
+                let metadata = &overview.metadata;
+                format!(
+                    "{}\n{}\nby {}{}\n\n{}",
+                    metadata.title,
+                    metadata.url,
+                    metadata.author,
+                    if metadata.draft { " (draft)" } else { "" },
+                    metadata.body
+                )
+            } else if let Some(review) = &app.review {
+                let pr = &review.data.pr;
+                format!(
+                    "{}\n{}\nby {}{}\n\n{}",
+                    pr.title,
+                    pr.url,
+                    pr.author,
+                    if pr.draft { " (draft)" } else { "" },
+                    pr.body
+                )
+            } else {
+                "No pull request is selected.".into()
+            };
             frame.render_widget(
                 Paragraph::new(body)
                     .wrap(Wrap { trim: false })
@@ -1366,7 +2106,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             for shown in [true, false] {
                 app.review.as_mut().unwrap().show_comments = shown;
-                terminal.draw(|frame| draw(frame, &app)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 let output = screen(&terminal);
                 assert!(output.contains("2 comments"));
                 assert!(output.contains(if shown { "shown" } else { "hidden" }));
@@ -1377,11 +2117,11 @@ mod tests {
                 body: "Looks good".into(),
                 scroll: 0,
             });
-            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             app.dialog = Some(Dialog::OpenPr {
                 input: TextInput::default(),
             });
-            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             app.dialog = None;
         }
     }
@@ -1487,7 +2227,7 @@ mod tests {
         );
         assert!(rows.iter().all(|row| row.source.is_none()));
         let mut terminal = Terminal::new(TestBackend::new(48, 12)).unwrap();
-        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let output = screen(&terminal);
         assert!(output.contains("outdated"));
         assert!(output.contains("Historical discussion"));
@@ -1522,7 +2262,7 @@ mod tests {
         app.loaded(demo_data()).unwrap();
         app.review.as_mut().unwrap().show_comments = false;
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
-        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let mut additions = 0;
         let mut deletions = 0;
@@ -1550,7 +2290,7 @@ mod tests {
         ] {
             app.review.as_mut().unwrap().positions[0] = position;
             let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
-            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let buffer = terminal.backend().buffer();
             let y = (5..34)
                 .find(|&y| buffer[(119, y)].bg == background)
@@ -1597,7 +2337,7 @@ mod tests {
         assert!(row_text(rows.iter().find(|row| row.source == Some(5)).unwrap()).starts_with('›'));
         for (width, height) in [(48, 12), (80, 24), (120, 36)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             assert!(screen(&terminal).contains("SELECT 4 lines"));
         }
         app.review
@@ -1608,7 +2348,7 @@ mod tests {
             .unwrap()
             .extending = false;
         let mut terminal = Terminal::new(TestBackend::new(48, 12)).unwrap();
-        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("4 lines selected"));
     }
 
@@ -1618,11 +2358,11 @@ mod tests {
         let mut app = App::new(temp.path().into(), true);
         app.goto_pending = true;
         let mut terminal = Terminal::new(TestBackend::new(48, 12)).unwrap();
-        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("g: g top · e end · f open"));
         app.loaded(demo_data()).unwrap();
         app.goto_pending = true;
-        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("g: g top · e end · f open"));
     }
 
@@ -1678,8 +2418,170 @@ mod tests {
             Dialog::Threads { scroll: 0 },
         ] {
             app.dialog = Some(dialog);
-            terminal.draw(|frame| draw(frame, &app)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             assert!(screen(&terminal).contains("19–20"));
         }
+    }
+
+    fn overview_metadata() -> pr_review::model::PrOverview {
+        let data = demo_data();
+        pr_review::model::PrOverview {
+            id: data.pr.id,
+            title: data.pr.title,
+            body: "Bound retry waits by the remaining deadline.".into(),
+            url: data.pr.url,
+            author: data.pr.author,
+            head_sha: data.pr.head_sha,
+            base_tip_sha: data.pr.base_sha,
+            draft: data.pr.draft,
+            state: "OPEN".into(),
+            changed_files: 2,
+            additions: 11,
+            deletions: 2,
+        }
+    }
+
+    fn analysis_fixture() -> Analysis {
+        serde_json::from_value(serde_json::json!({
+            "summary": "Retry waits now respect the request deadline.",
+            "intent": {"text": "Keep retries inside the caller's deadline.", "basis": "author_description"},
+            "changes": [{"title": "Bound the retry delay", "detail": "The remaining budget caps the delay before retrying.", "files": ["src/client.rs"]}],
+            "reading_order": [
+                {"path": "src/client.rs", "line": 25, "side": "RIGHT", "reason": "Start with the request execution path."},
+                {"path": "tests/deadline.rs", "line": 3, "side": "RIGHT", "reason": "Then inspect zero-budget coverage."}
+            ],
+            "risks": [{"title": "Time spent sending", "detail": "Check whether send also respects the remaining deadline.", "files": ["src/client.rs"]}],
+            "verification": {"existing_tests": ["tests/deadline.rs"], "suggested_checks": ["Run the deadline test with a zero budget."], "unknowns": ["Deployment latency is not shown."]},
+            "coverage": {"included_files": ["src/client.rs", "tests/deadline.rs"], "omitted_files": ["large-fixture.json"], "unavailable_files": ["diagram.png"]}
+        })).unwrap()
+    }
+
+    #[test]
+    fn overview_metadata_renders_before_any_diff_for_every_ai_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.opened(overview_metadata());
+        for (state, message) in [
+            (AiStatus::Disabled, "AI guide not configured"),
+            (AiStatus::Waiting, "Waiting for the diff"),
+            (AiStatus::Loading, "Preparing AI guide"),
+            (
+                AiStatus::Error("Missing codex executable".into()),
+                "AI guide unavailable",
+            ),
+        ] {
+            app.overview.as_mut().unwrap().ai = state;
+            for (width, height) in [(80, 24), (120, 36)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let output = screen(&terminal);
+                assert!(output.contains("Keep request retries within the deadline"));
+                assert!(output.contains("Bound retry waits by the remaining deadline."));
+                assert!(output.contains("https://github.com/example/service/pull/42"));
+                assert!(output.contains("1 Overview"));
+                assert!(output.contains("2 Diff"));
+                assert!(output.contains(message));
+                assert!(app.review.is_none());
+            }
+        }
+        app.overview.as_mut().unwrap().ai = AiStatus::Waiting;
+        app.diff_loading = false;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("a explains this PR"));
+    }
+
+    #[test]
+    fn structured_overview_includes_all_sections_and_keeps_reading_steps_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.settings.ai.provider = Provider::Codex;
+        app.opened(overview_metadata());
+        app.overview.as_mut().unwrap().ai = AiStatus::Ready(Box::new(analysis_fixture()));
+        let rows = overview_rows(&analysis_fixture(), 80, true);
+        let text = rows
+            .iter()
+            .flat_map(|row| row.line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<String>();
+        for section in [
+            "SUMMARY",
+            "INTENT",
+            "MAIN CHANGES",
+            "READING ORDER",
+            "REVIEW RISKS",
+            "VERIFICATION",
+            "UNKNOWNS",
+            "CONTEXT COVERAGE",
+        ] {
+            assert!(text.contains(section), "Missing overview section {section}");
+        }
+        for (width, height) in [(80, 24), (120, 36)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(screen(&terminal).contains("Retry waits now respect"));
+            app.overview.as_mut().unwrap().selected_step = 1;
+            app.overview.as_mut().unwrap().focus_guide = true;
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(screen(&terminal).contains("tests/deadline.rs:3"));
+            app.overview.as_mut().unwrap().focus_guide = false;
+            app.overview.as_mut().unwrap().scroll = u16::MAX;
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let output = screen(&terminal);
+            assert!(output.contains("CONTEXT COVERAGE"));
+            assert!(output.contains("diagram.png"));
+            let end = app.overview.as_ref().unwrap().scroll;
+            assert!(end > 0 && end < u16::MAX);
+            app.key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('k'),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert_eq!(app.overview.as_ref().unwrap().scroll, end - 1);
+            app.overview.as_mut().unwrap().scroll = 0;
+        }
+    }
+
+    #[test]
+    fn overview_description_and_agent_picker_work_without_review_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.opened(overview_metadata());
+        app.config_path = Some(temp.path().join("config.toml"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.dialog = Some(Dialog::Description { scroll: 0 });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Bound retry waits by the remaining deadline."));
+        app.dialog = Some(Dialog::AgentPicker { selected: 1 });
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let output = screen(&terminal);
+        for text in [
+            "Codex",
+            "Claude",
+            "No AI guide",
+            "Enter saves",
+            "agent default",
+        ] {
+            assert!(output.contains(text));
+        }
+        assert!(app.review.is_none());
+    }
+
+    #[test]
+    fn diff_loading_and_error_views_do_not_require_review_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.opened(overview_metadata());
+        app.tab = PageTab::Diff;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(screen(&terminal).contains("Loading changed files"));
+        app.diff_loading = false;
+        app.diff_error = Some("Network connection is unavailable".into());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let output = screen(&terminal);
+        assert!(output.contains("Network connection is unavailable"));
+        assert!(output.contains("r retries"));
+        assert!(output.contains("Keep request retries within the deadline"));
     }
 }

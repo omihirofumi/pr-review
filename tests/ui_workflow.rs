@@ -17,7 +17,7 @@ fn key(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
 }
 
-fn screen(app: &App, width: u16, height: u16) -> String {
+fn screen(app: &mut App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| ui::draw(frame, app)).unwrap();
     terminal
@@ -71,7 +71,7 @@ fn inline_published_reply_and_draft_visibility_preserves_left_source_target() {
         body: "LOCAL-DRAFT-BODY".into(),
     });
     let anchor = review.anchor();
-    let before = screen(&app, 120, 60);
+    let before = screen(&mut app, 120, 60);
     for text in [
         "PUBLISHED-BODY",
         "REPLY-BODY",
@@ -81,7 +81,7 @@ fn inline_published_reply_and_draft_visibility_preserves_left_source_target() {
         assert!(before.contains(text), "Missing visible inline text: {text}");
     }
     app.key(key('t')).unwrap();
-    let hidden = screen(&app, 120, 60);
+    let hidden = screen(&mut app, 120, 60);
     for text in [
         "PUBLISHED-BODY",
         "REPLY-BODY",
@@ -96,7 +96,7 @@ fn inline_published_reply_and_draft_visibility_preserves_left_source_target() {
     assert_eq!(app.review.as_ref().unwrap().anchor(), anchor);
     assert_eq!(anchor, Some((Side::Left, 1)));
     app.key(key('t')).unwrap();
-    assert_eq!(screen(&app, 120, 60), before);
+    assert_eq!(screen(&mut app, 120, 60), before);
 }
 
 #[test]
@@ -112,13 +112,13 @@ fn long_published_comment_tail_is_reachable_in_full_thread_view() {
     data.comments = vec![comment(1, Some(18), "RIGHT", &body)];
     app.loaded(data).unwrap();
     app.key(key('j')).unwrap();
-    let inline = screen(&app, 100, 32);
+    let inline = screen(&mut app, 100, 32);
     assert!(inline.contains("T opens the full thread"));
     assert!(!inline.contains("TAIL-OF-PUBLISHED-COMMENT"));
     app.key(key('T')).unwrap();
     let mut tail_visible = false;
     for _ in 0..40 {
-        if screen(&app, 100, 32).contains("TAIL-OF-PUBLISHED-COMMENT") {
+        if screen(&mut app, 100, 32).contains("TAIL-OF-PUBLISHED-COMMENT") {
             tail_visible = true;
             break;
         }
@@ -139,12 +139,12 @@ fn outdated_comment_on_a_missing_patch_stays_unanchored_and_can_be_hidden() {
     data.comments = vec![comment(1, None, "LEFT", "OUTDATED-UNANCHORED-BODY")];
     app.loaded(data).unwrap();
     assert!(app.review.as_ref().unwrap().anchor().is_none());
-    let visible = screen(&app, 110, 32);
+    let visible = screen(&mut app, 110, 32);
     assert!(visible.contains("No text diff available"));
     assert!(visible.contains("OUTDATED-UNANCHORED-BODY"));
     assert!(visible.contains("outdated"));
     app.key(key('t')).unwrap();
-    assert!(!screen(&app, 110, 32).contains("OUTDATED-UNANCHORED-BODY"));
+    assert!(!screen(&mut app, 110, 32).contains("OUTDATED-UNANCHORED-BODY"));
     assert!(app.review.as_ref().unwrap().anchor().is_none());
 }
 
@@ -167,7 +167,7 @@ fn unsorted_api_files_form_contiguous_groups_with_matching_source_navigation() {
             .collect::<Vec<_>>(),
         vec!["src/client.rs", "src/retry.rs", "tests/deadline.rs"]
     );
-    let rendered = screen(&app, 120, 36);
+    let rendered = screen(&mut app, 120, 36);
     let retry = rendered.find("retry.rs").unwrap();
     let tests_heading = rendered.find("▾ tests").unwrap();
     assert!(retry < tests_heading);

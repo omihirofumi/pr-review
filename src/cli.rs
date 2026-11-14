@@ -1,6 +1,17 @@
 use crate::{app, store, ui};
 
-use std::{io, path::PathBuf, process::Command, sync::mpsc, thread, time::Duration};
+use std::{
+    io,
+    path::PathBuf,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -10,7 +21,12 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use directories::ProjectDirs;
-use pr_review::{github, model::*, workspace};
+use pr_review::{
+    analysis, github,
+    model::*,
+    settings::{self, Provider},
+    workspace,
+};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::{Action, App};
@@ -40,6 +56,17 @@ struct Args {
     workspace_root: Option<PathBuf>,
     #[arg(long, help = "Explore the interface offline with an example PR")]
     demo: bool,
+    #[arg(
+        long,
+        help = "Configuration file; defaults to ~/.config/gh-preview/config.toml"
+    )]
+    config: Option<PathBuf>,
+    #[arg(long, value_enum, help = "AI explanation provider for this launch")]
+    agent: Option<Provider>,
+    #[arg(long, help = "AI model override for this launch")]
+    model: Option<String>,
+    #[arg(long, help = "Print the configuration path and exit")]
+    config_path: bool,
 }
 
 impl Args {
@@ -60,9 +87,25 @@ impl Args {
     }
 }
 
-enum JobResult {
+pub(crate) enum JobResult {
     Inbox(Result<Vec<PrSummary>>),
-    Review(Result<Box<ReviewData>>),
+    Overview {
+        generation: u64,
+        result: Result<PrOverview>,
+    },
+    Diff {
+        generation: u64,
+        result: Result<Box<ReviewData>>,
+    },
+    Comments {
+        generation: u64,
+        result: Result<Vec<ReviewComment>>,
+    },
+    Analysis {
+        generation: u64,
+        request: u64,
+        result: Result<Box<analysis::Analysis>>,
+    },
     Activity(Result<String>),
     Prepared {
         result: Result<PathBuf>,
@@ -76,6 +119,43 @@ enum JobResult {
 }
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
+
+#[derive(Default)]
+pub(crate) struct Runtime {
+    generation: u64,
+    pending_comments: Option<Vec<ReviewComment>>,
+    pending_ai: Option<bool>,
+    ai_request: u64,
+    ai_cancel: Option<Arc<AtomicBool>>,
+    ai_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Runtime {
+    fn stop_ai(&mut self) {
+        if let Some(cancel) = self.ai_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = self.ai_handle.take() {
+            let _ = handle.join();
+        }
+        self.ai_request = self.ai_request.wrapping_add(1);
+    }
+
+    fn sync(&mut self, generation: u64) {
+        if generation != self.generation {
+            self.stop_ai();
+            self.generation = generation;
+            self.pending_comments = None;
+            self.pending_ai = None;
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.stop_ai();
+    }
+}
 
 struct TerminalGuard;
 impl Drop for TerminalGuard {
@@ -91,7 +171,25 @@ impl Drop for TerminalGuard {
 }
 
 pub fn run() -> Result<()> {
-    let (args, target) = Args::parse().resolve()?;
+    let args = Args::parse();
+    let config_path = args
+        .config
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(settings::default_path)?;
+    if args.config_path {
+        println!("{}", config_path.display());
+        return Ok(());
+    }
+    let mut settings = settings::load(&config_path)?;
+    if let Some(provider) = args.agent {
+        settings.ai.provider = provider;
+    }
+    if let Some(model) = &args.model {
+        settings.ai.model = Some(model.clone());
+    }
+    settings.ai.validate()?;
+    let (args, target) = args.resolve()?;
     let root = args.workspace_root.clone().map(Ok).unwrap_or_else(|| {
         ProjectDirs::from("dev", "pr-review", "pr-review")
             .map(|p| p.data_local_dir().to_path_buf())
@@ -104,6 +202,8 @@ pub fn run() -> Result<()> {
     };
     let mut app = App::new(root, args.demo);
     app.repo = args.repo.clone();
+    app.settings = settings;
+    app.config_path = Some(config_path);
     if args.demo {
         let demo = app::demo_data();
         app.inbox = vec![PrSummary {
@@ -112,7 +212,12 @@ pub fn run() -> Result<()> {
             author: demo.pr.author.clone(),
             draft: false,
         }];
-        app.loaded(demo)?;
+        app.opened(demo_overview(&demo));
+        app.accept_diff(demo)?;
+        app.message(
+            "Offline demo. 1 Overview / 2 Diff; no agent or GitHub requests are made.",
+            false,
+        );
     }
     let panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -131,24 +236,37 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     let (sender, receiver) = mpsc::channel();
+    let mut runtime = Runtime::default();
     if let Some(id) = target {
-        dispatch(Action::LoadPr(id), &mut app, &args, &sender, &mut terminal)?;
+        dispatch(
+            Action::LoadPr(id),
+            &mut app,
+            &args,
+            &sender,
+            &mut terminal,
+            &mut runtime,
+        )?;
     } else if !args.demo {
-        dispatch(Action::LoadInbox, &mut app, &args, &sender, &mut terminal)?;
+        dispatch(
+            Action::LoadInbox,
+            &mut app,
+            &args,
+            &sender,
+            &mut terminal,
+            &mut runtime,
+        )?;
     }
     loop {
         while let Ok(result) = receiver.try_recv() {
+            let Some(result) = apply_background(result, &mut app, &sender, &mut runtime) else {
+                continue;
+            };
             app.busy = false;
             match result {
                 JobResult::Inbox(Ok(prs)) => {
                     app.inbox = prs;
                     app.selected_pr = 0;
                     app.message(format!("{} pull requests loaded", app.inbox.len()), false);
-                }
-                JobResult::Review(Ok(data)) => {
-                    if let Err(error) = app.loaded(*data) {
-                        app.message(format!("{error:#}"), true);
-                    }
                 }
                 JobResult::Activity(Ok(text)) => {
                     app.dialog = Some(app::Dialog::Activity { text, scroll: 0 })
@@ -206,22 +324,30 @@ pub fn run() -> Result<()> {
                     app.message(format!("{error:#}. Drafts remain saved. V shows published reviews; u recovers an uncertain submission."), true);
                 }
                 JobResult::Inbox(Err(error))
-                | JobResult::Review(Err(error))
                 | JobResult::Activity(Err(error))
                 | JobResult::Prepared {
                     result: Err(error), ..
                 } => app.message(format!("{error:#}"), true),
+                JobResult::Overview { .. }
+                | JobResult::Diff { .. }
+                | JobResult::Comments { .. }
+                | JobResult::Analysis { .. } => {}
             }
         }
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut app))?;
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match app.key(key) {
                     Ok(Action::Quit) => break,
                     Ok(action) => {
-                        if let Err(error) =
-                            dispatch(action, &mut app, &args, &sender, &mut terminal)
-                        {
+                        if let Err(error) = dispatch(
+                            action,
+                            &mut app,
+                            &args,
+                            &sender,
+                            &mut terminal,
+                            &mut runtime,
+                        ) {
                             app.busy = false;
                             app.message(format!("{error:#}"), true);
                         }
@@ -246,13 +372,181 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn apply_background(
+    result: JobResult,
+    app: &mut App,
+    sender: &mpsc::Sender<JobResult>,
+    runtime: &mut Runtime,
+) -> Option<JobResult> {
+    match result {
+        JobResult::Overview { generation, result } => {
+            if generation != app.generation {
+                return None;
+            }
+            app.busy = false;
+            match result {
+                Ok(metadata) => {
+                    app.opened(metadata.clone());
+                    app.comments_loading = true;
+                    spawn_diff(sender, generation, metadata.clone());
+                    let sender = sender.clone();
+                    thread::spawn(move || {
+                        let _ = sender.send(JobResult::Comments {
+                            generation,
+                            result: github::load_comments(&metadata),
+                        });
+                    });
+                }
+                Err(error) => app.message(format!("{error:#}"), true),
+            }
+        }
+        JobResult::Diff { generation, result } => {
+            if generation != app.generation {
+                return None;
+            }
+            app.diff_loading = false;
+            match result {
+                Ok(mut data) => {
+                    if let Some(comments) = runtime.pending_comments.take() {
+                        data.comments = comments;
+                    }
+                    if let Err(error) = app.accept_diff(*data) {
+                        app.diff_error = Some(format!("{error:#}"));
+                        return None;
+                    }
+                    let pending = runtime.pending_ai.take();
+                    if (app.settings.ai.auto_explain || pending.is_some())
+                        && app.settings.ai.provider != Provider::None
+                    {
+                        start_analysis(app, sender, runtime, pending.unwrap_or(false));
+                    }
+                }
+                Err(error) => {
+                    app.diff_error = Some(format!("{error:#}"));
+                    app.message(
+                        "The diff could not be loaded. The overview is still available; r retries.",
+                        true,
+                    );
+                }
+            }
+        }
+        JobResult::Comments { generation, result } => {
+            if generation != app.generation {
+                return None;
+            }
+            app.comments_loading = false;
+            match result {
+                Ok(comments) => {
+                    if let Some(review) = &mut app.review {
+                        review.data.comments = comments;
+                    } else {
+                        runtime.pending_comments = Some(comments);
+                    }
+                }
+                Err(error) => app.message(
+                    format!("Review comments could not be loaded: {error:#}. r refreshes the PR."),
+                    true,
+                ),
+            }
+        }
+        JobResult::Analysis {
+            generation,
+            request,
+            result,
+        } => {
+            if generation != app.generation || request != runtime.ai_request {
+                return None;
+            }
+            if let Some(overview) = &mut app.overview {
+                overview.ai = match result {
+                    Ok(analysis) => app::AiStatus::Ready(analysis),
+                    Err(error) => app::AiStatus::Error(format!("{error:#}")),
+                };
+            }
+        }
+        foreground => return Some(foreground),
+    }
+    None
+}
+
+fn spawn_diff(sender: &mpsc::Sender<JobResult>, generation: u64, metadata: PrOverview) {
+    let sender = sender.clone();
+    thread::spawn(move || {
+        let _ = sender.send(JobResult::Diff {
+            generation,
+            result: github::load_diff(&metadata).map(Box::new),
+        });
+    });
+}
+
+fn start_analysis(
+    app: &mut App,
+    sender: &mpsc::Sender<JobResult>,
+    runtime: &mut Runtime,
+    force: bool,
+) {
+    if app.demo {
+        app.message("Offline demo does not run an AI agent", false);
+        return;
+    }
+    if app.settings.ai.provider == Provider::None {
+        return;
+    }
+    let Some(overview) = app.overview.as_ref() else {
+        return;
+    };
+    let Some(review) = app.review.as_ref() else {
+        runtime.pending_ai = Some(force);
+        return;
+    };
+    let metadata = overview.metadata.clone();
+    let review = review.data.clone();
+    let config = app.settings.ai.clone();
+    let cache_root = app.root.join("analysis");
+    runtime.stop_ai();
+    let request = runtime.ai_request;
+    let generation = app.generation;
+    let cancel = Arc::new(AtomicBool::new(false));
+    runtime.ai_cancel = Some(cancel.clone());
+    app.overview.as_mut().unwrap().ai = app::AiStatus::Loading;
+    let sender = sender.clone();
+    runtime.ai_handle = Some(thread::spawn(move || {
+        let result = analysis::generate(&metadata, &review, &config, &cache_root, cancel, force)
+            .map(Box::new);
+        let _ = sender.send(JobResult::Analysis {
+            generation,
+            request,
+            result,
+        });
+    }));
+}
+
+fn demo_overview(data: &ReviewData) -> PrOverview {
+    PrOverview {
+        id: data.pr.id.clone(),
+        title: data.pr.title.clone(),
+        body: data.pr.body.clone(),
+        url: data.pr.url.clone(),
+        author: data.pr.author.clone(),
+        head_sha: data.pr.head_sha.clone(),
+        base_tip_sha: data.pr.base_sha.clone(),
+        draft: data.pr.draft,
+        state: "open".into(),
+        changed_files: data.files.len() as u64,
+        additions: data.files.iter().map(|file| file.additions).sum(),
+        deletions: data.files.iter().map(|file| file.deletions).sum(),
+    }
+}
+
 fn dispatch(
     action: Action,
     app: &mut App,
     args: &Args,
     sender: &mpsc::Sender<JobResult>,
     terminal: &mut Tui,
+    runtime: &mut Runtime,
 ) -> Result<()> {
+    runtime.sync(app.generation);
     if matches!(action, Action::None | Action::Quit) {
         return Ok(());
     }
@@ -260,9 +554,30 @@ fn dispatch(
         open_editor_action(app, terminal, *target);
         return Ok(());
     }
+    match action {
+        Action::Explain { force } => {
+            start_analysis(app, sender, runtime, force);
+            return Ok(());
+        }
+        Action::DisableAi => {
+            runtime.stop_ai();
+            runtime.pending_ai = None;
+            return Ok(());
+        }
+        Action::LoadDiff => {
+            if let Some(overview) = &app.overview {
+                let id = overview.metadata.id.clone();
+                return dispatch(Action::LoadPr(id), app, args, sender, terminal, runtime);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     if app.demo {
         if let Action::LoadPr(_) = action {
-            app.loaded(app::demo_data())?;
+            let data = app::demo_data();
+            app.opened(demo_overview(&data));
+            app.accept_diff(data)?;
         } else {
             app.message("Demo is offline. Nothing was sent to GitHub.", false);
         }
@@ -286,9 +601,25 @@ fn dispatch(
             });
         }
         Action::LoadPr(id) => {
-            app.message(format!("Loading {} #{}...", id.repo, id.number), false);
+            app.generation = app.generation.wrapping_add(1);
+            runtime.sync(app.generation);
+            app.overview = None;
+            app.review = None;
+            app.diff_loading = false;
+            app.diff_error = None;
+            app.comments_loading = false;
+            app.goto_pending = false;
+            app.tab = app::PageTab::Overview;
+            let generation = app.generation;
+            app.message(
+                format!("Loading the overview for {} #{}...", id.repo, id.number),
+                false,
+            );
             thread::spawn(move || {
-                let _ = sender.send(JobResult::Review(github::load_review(&id).map(Box::new)));
+                let _ = sender.send(JobResult::Overview {
+                    generation,
+                    result: github::load_overview(&id),
+                });
             });
         }
         Action::Activity(id) => {
@@ -341,7 +672,12 @@ fn dispatch(
                 });
             });
         }
-        Action::None | Action::Quit | Action::OpenEditor(_) => {
+        Action::None
+        | Action::Quit
+        | Action::OpenEditor(_)
+        | Action::LoadDiff
+        | Action::Explain { .. }
+        | Action::DisableAi => {
             app.busy = false;
         }
     }
