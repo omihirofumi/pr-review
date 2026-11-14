@@ -41,7 +41,9 @@ gh-preview
 
 Select a PR with `j` / `k` and press `o`. If you already know its number, open it directly with `gh-preview 123`. Subdirectories work too; the app detects the containing repository.
 
-PRs open on **Overview**, showing the title, author description, and change counts as soon as the metadata arrives. Diff and comments load independently in the background. Press `2` for **Diff**, `1` for Overview, or `Tab` / `Shift-Tab` to switch. With an AI agent configured, a structured reading guide appears in Overview without blocking navigation.
+The PR list has a compact table and a preview pane showing the selected PR's Markdown description. `j` / `k` changes the selected PR; `h` / `l` or `Tab` focuses the table / preview. Press `p` to hide or show the preview, `P` to switch its position, and `[` / `]` or `1` / `2` to switch between **Description** and **AI guide**. Narrow terminals place the preview below the table. `Ctrl-d` / `Ctrl-u` scroll the preview. Descriptions arrive with the list; browsing them does not load diffs or start an AI agent. Press `a` to prepare or reuse a guide for the selected PR.
+
+Press `o` or `Enter` in the list to open **Diff**. A direct target such as `gh-preview 123` opens **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Diff and comments load independently in the background. Inside an opened PR, press `2` for Diff, `1` for Overview, or `Tab` / `Shift-Tab` to switch. With an AI agent configured, a structured reading guide appears in Overview without blocking navigation.
 
 In Diff:
 
@@ -55,7 +57,7 @@ In Diff:
 
 Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to read published review summaries. Press `#` to open another PR by number, `?` for the keyboard guide, or `q` to quit. After installing an update, restart the app to use the new version.
 
-To learn the controls without contacting GitHub, run `gh-preview --demo`. The demo allows local drafts and review previews; source checkout and Helix opening require a real PR.
+To learn the controls without contacting GitHub, run `gh-preview --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
 
 ## Command options
 
@@ -80,7 +82,7 @@ The inbox shows up to 100 open PRs. `/` filters the loaded inbox locally; `--sea
 
 ## Overview and AI reading guide
 
-Press `A` in either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/gh-preview/config.toml` (or `$XDG_CONFIG_HOME/gh-preview/config.toml`). A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+Press `A` in the PR list or either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/gh-preview/config.toml` (or `$XDG_CONFIG_HOME/gh-preview/config.toml`). A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
 
 Example configuration:
 
@@ -110,7 +112,21 @@ In Overview, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / 
 
 Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
 
-Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide; `a` explicitly regenerates it. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in Overview while the description and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
+Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide. In an opened PR, `a` explicitly regenerates it; in the PR list, `a` prepares or reuses the selected PR's guide. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in Overview while the description and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
+
+## Ask your agent and explain a diff
+
+**Ask** and **Explain diff** use the configured Codex or Claude CLI and its existing login. They share the guide's language, model, timeout, and context budget.
+
+- In Diff, press `Q` to ask about the current hunk. Select lines with `v` or repeated `x` first to ask about that range. AI questions can include both removed and added lines.
+- Press `E` to immediately explain the selected lines or current hunk: behavior before and after, purpose, how the change works, and review concerns.
+- In an opened PR's Overview, press `Q` to ask about the whole PR.
+- Write a question and press `Ctrl-s` to send. `Enter` inserts a newline; `Ctrl-h` deletes backward. Write another question in the same panel for a follow-up.
+- `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation. `Esc` closes the panel and cancels its active request. Reopen with `Q` to continue the conversation.
+
+Each turn shows its source scope, file/line references, unknowns, and context coverage. Questions include the selected lines, surrounding complete hunks, PR description, and additional patches that fit the budget. References are checked against the supplied diff. Older conversation turns are omitted when necessary to fit the budget, and that omission is reported.
+
+Conversations remain in memory for the current open PR revision; leaving the PR or changing agents clears them. Use `c` for persistent GitHub-review drafts and `Q` for local agent questions. AI explanations and questions do not publish reviews or run tests. A failed request restores the question for editing and retry.
 
 ## Review controls
 
@@ -124,7 +140,8 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | --- | --- |
 | `1` / `2`, `Tab` / `Shift-Tab` | Overview / Diff tabs |
 | `h` / `l` | Focus files / diff pane in Diff |
-| `a` / `A` | Generate or regenerate AI guide / choose and save an agent |
+| `a` / `A` | Prepare AI guide / choose and save an agent |
+| `Q` / `E` | Ask the agent / explain selected diff lines or the current hunk |
 | `j` / `k`, up / down | Move through lines and continue into adjacent files |
 | `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous hunk |
@@ -178,7 +195,7 @@ Use `V` to inspect published reviews and `T` to inspect inline comments, then pr
 - No textual review for binary files or files whose patch GitHub omits. Malformed or truncated hunks remain visible but cannot receive comments.
 - Merge, suggestion application, and CI-log viewing are outside the review workflow.
 - Working-copy edits are preserved, but the app does not offer to reset them.
-- Local questions and inline replies for Codex/Claude are not implemented. Comment drafts currently belong to GitHub reviews.
+- AI conversations are local to the current open PR session; exporting or persisting them across restarts is not yet supported.
 
 ## Development
 
@@ -191,4 +208,4 @@ cargo test --all-targets
 
 The test suite uses temporary local repositories and fake `gh`, `codex`, and `claude` executables; it does not post to GitHub or call a live AI provider. Tests require `jj`, Git, and Python 3. The diff fixtures cover old/new line coordinates, renames, absent patches, and malformed hunks. Workflow tests cover metadata-first loading, stale background results, agent cancellation and caching, structured output validation, local persistence, failed writes, stale revisions, submission recovery, and request payloads.
 
-`src/cli.rs` runs the shared command and background jobs, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/settings.rs` persists configuration, `src/analysis.rs` runs and validates AI explanations, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.
+`src/cli.rs` runs the shared command and background jobs, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/settings.rs` persists configuration, `src/analysis.rs` runs and validates AI explanations, `src/assistant.rs` supplies focused questions and follow-ups, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.

@@ -105,13 +105,14 @@ struct CacheEntry {
     analysis: Analysis,
 }
 
-struct ContextData {
+pub(crate) struct ContextData {
+    pub(crate) data: Value,
     prompt: String,
-    coverage: Coverage,
-    included: HashMap<String, String>,
+    pub(crate) coverage: Coverage,
+    pub(crate) included: HashMap<String, String>,
     test_paths: HashSet<String>,
     description_available: bool,
-    description_truncated: bool,
+    pub(crate) description_truncated: bool,
 }
 
 pub fn generate(
@@ -198,7 +199,7 @@ pub fn generate(
     Ok(analysis)
 }
 
-fn build_context(
+pub(crate) fn build_context(
     overview: &PrOverview,
     review: &ReviewData,
     config: &AiConfig,
@@ -281,6 +282,7 @@ fn build_context(
     }
     Ok(ContextData {
         prompt: encoded_prompt(&data)?,
+        data,
         coverage,
         included,
         test_paths,
@@ -455,10 +457,19 @@ fn save_cache(path: &Path, entry: &CacheEntry) -> Result<()> {
 }
 
 fn run_provider(config: &AiConfig, prompt: &str, cancel: &AtomicBool) -> Result<Vec<u8>> {
+    run_structured(config, prompt, &response_schema(), cancel)
+}
+
+pub(crate) fn run_structured(
+    config: &AiConfig,
+    prompt: &str,
+    response_schema: &Value,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>> {
     let temporary = tempfile::tempdir().context("Cannot create isolated AI working directory")?;
     let schema = temporary.path().join("schema.json");
     let answer = temporary.path().join("answer.json");
-    let schema_json = serde_json::to_string(&response_schema())?;
+    let schema_json = serde_json::to_string(response_schema)?;
     fs::write(&schema, &schema_json)?;
     let mut command = match config.provider {
         Provider::Codex => {

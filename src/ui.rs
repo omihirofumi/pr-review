@@ -12,10 +12,15 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Wrap,
+    },
 };
 
-use crate::app::{AiStatus, App, Dialog, Focus, OverviewState, PageTab, ReviewState, TextInput};
+use crate::app::{
+    AiStatus, App, Dialog, Focus, OverviewState, PageTab, PreviewTab, ReviewState, TextInput,
+};
 
 const BACKGROUND: Color = Color::Rgb(24, 24, 23);
 const SIDEBAR: Color = Color::Rgb(29, 29, 28);
@@ -106,19 +111,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.review.is_some() && area.width < 76 {
         " v select  x/X lines  c note  o open  ? keys "
     } else if app.review.is_some() && area.width < 105 {
-        " v select  x/X lines  ; collapse  g goto  c note  o open  V reviews  ? keys "
+        " v select  c note  Q ask  E explain  o open  t threads  ? keys "
     } else if app.review.is_some() {
-        " v select  x/X lines  ; collapse  gg/ge top/end  gf/o open  c note  t toggle  T threads  V reviews  s submit  ? keys "
+        " v select  x/X lines  gg/ge top/end  gf/o open  Q ask  E explain  c note  t toggle  s submit  ? keys "
     } else if area.width < 76 {
-        " o open  # open PR  / filter  ? keys "
+        " j/k select  o diff  p preview  ? keys "
     } else {
-        " j/k select  o open  # open PR  / filter  r refresh  ? keys  q quit "
+        " j/k select  o diff  Tab focus  p/P preview  [/] tabs  a guide  ? keys "
     };
     frame.render_widget(
         Paragraph::new(keys).style(Style::default().fg(MUTED).bg(PANEL)),
         help,
     );
-    if let Some(dialog) = &app.dialog {
+    if let Some(Dialog::Ask {
+        input,
+        focus,
+        scroll,
+    }) = &app.dialog
+    {
+        let actual = draw_ask(frame, app, input, focus.as_deref(), *scroll);
+        if let Some(Dialog::Ask { scroll, .. }) = &mut app.dialog {
+            *scroll = actual;
+        }
+    } else if let Some(dialog) = &app.dialog {
         draw_dialog(frame, app, dialog);
     }
 }
@@ -355,7 +370,13 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         metadata.body.as_str()
     };
     let wrapped = wrap_comment(body, usize::from(area.width).saturating_sub(4).max(1));
-    let preview = if area.height >= 22 { 3 } else { 2 };
+    let preview = if !matches!(overview.ai, AiStatus::Ready(_)) {
+        0
+    } else if area.height >= 22 {
+        3
+    } else {
+        2
+    };
     let description_height = wrapped.len().min(preview) as u16 + 1;
     let [details, description, state, content] = Layout::vertical([
         Constraint::Length(2),
@@ -450,72 +471,28 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
             overview.scroll = scroll;
         }
         status => {
-            let mut rows = Vec::new();
-            match status {
+            let note = match status {
                 AiStatus::Disabled => {
-                    overview_heading(&mut rows, "SET UP YOUR AI GUIDE");
-                    overview_text(
-                        &mut rows,
-                        "Choose Codex or Claude with a or A. PR details and the Diff tab remain available without an AI agent.",
-                        content.width,
-                        2,
-                        TEXT,
-                        None,
-                    );
-                    overview_text(
-                        &mut rows,
-                        &format!(
-                            "Model: {} · Language: {}",
-                            app.settings.ai.model.as_deref().unwrap_or("agent default"),
-                            app.settings.ai.language
-                        ),
-                        content.width,
-                        2,
-                        MUTED,
-                        None,
-                    );
+                    "Choose an agent with A, or read the description below.".to_owned()
                 }
                 AiStatus::Waiting => {
-                    overview_heading(&mut rows, "PR DETAILS ARE READY");
-                    overview_text(
-                        &mut rows,
-                        if app.diff_loading {
-                            "The guide will use the PR description and changed code when the diff arrives. You can read the description now or switch to 2 Diff."
-                        } else {
-                            "Press a to prepare the guide from the PR description and changed code, or switch to 2 Diff to start reviewing."
-                        },
-                        content.width,
-                        2,
-                        TEXT,
-                        None,
-                    );
+                    if app.diff_loading {
+                        "The guide will be prepared when the diff is ready.".to_owned()
+                    } else {
+                        "Press a to prepare the AI guide.".to_owned()
+                    }
                 }
-                AiStatus::Loading => {
-                    overview_heading(&mut rows, "PREPARING THE REVIEW GUIDE");
-                    overview_text(
-                        &mut rows,
-                        "The explanation is being prepared. You can switch to 2 Diff and start reviewing while it runs.",
-                        content.width,
-                        2,
-                        TEXT,
-                        None,
-                    );
-                }
+                AiStatus::Loading => format!(
+                    "{} is preparing the guide. Read the description below, or switch to Diff.",
+                    app.settings.ai.provider
+                ),
                 AiStatus::Error(error) => {
-                    overview_heading(&mut rows, "AGENT DETAILS");
-                    overview_text(&mut rows, error, content.width, 2, RED, None);
-                    overview_text(
-                        &mut rows,
-                        "Press a to try again, A to choose another agent, or 2 to inspect the diff.",
-                        content.width,
-                        2,
-                        TEXT,
-                        None,
-                    );
+                    format!("Guide unavailable: {error}. Press a to retry or A to choose an agent.")
                 }
                 AiStatus::Ready(_) => unreachable!(),
-            }
-            overview.scroll = draw_overview_rows(frame, &rows, overview, content);
+            };
+            let description = format!("*{note}*\n\n---\n\n{body}");
+            overview.scroll = markdown(frame, &description, content, overview.scroll);
         }
     }
 }
@@ -839,51 +816,316 @@ fn selection_label(review: &ReviewState) -> Option<String> {
     )
 }
 
-fn draw_inbox(frame: &mut Frame, app: &App, area: Rect) {
-    let prs = app.visible_prs();
-    let title = if app.filtering {
-        format!(" Filter: {}_", app.filter)
-    } else if app.filter.is_empty() {
-        " PULL REQUESTS".into()
+fn markdown(frame: &mut Frame, body: &str, area: Rect, scroll: u16) -> u16 {
+    let text = tui_markdown::from_str(body);
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(TEXT))
+        .wrap(Wrap { trim: false });
+    let limit = paragraph
+        .line_count(area.width)
+        .saturating_sub(usize::from(area.height))
+        .min(u16::MAX as usize) as u16;
+    let scroll = scroll.min(limit);
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+    scroll
+}
+
+fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
+    let selected = app
+        .visible_prs()
+        .get(app.selected_pr)
+        .map(|pr| (*pr).clone());
+    let bottom = app.preview.bottom.unwrap_or(area.width < 110);
+    app.preview.actual_bottom = bottom;
+    let [list_area, preview_area] = if !app.preview.shown {
+        [area, Rect::default()]
+    } else if bottom {
+        Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area)
     } else {
-        format!(" Filter: {}", app.filter)
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area)
     };
-    let [heading, list] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(title).style(Style::default().fg(MUTED)),
-        heading,
-    );
+    let title = if app.filtering {
+        format!(" PULL REQUESTS · /{}_ ", app.filter)
+    } else if !app.filter.is_empty() {
+        format!(" PULL REQUESTS · {} ", app.filter)
+    } else {
+        " PULL REQUESTS ".into()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(if !app.preview.focused { ACCENT } else { BORDER }));
+    let inner = block.inner(list_area);
+    frame.render_widget(block, list_area);
+    let prs = app.visible_prs();
     if prs.is_empty() {
-        frame.render_widget(Paragraph::new(if app.busy { "  Loading pull requests..." } else { "  No matching pull requests.\n\n  # opens a PR by number.\n  / filters this list.\n  r refreshes the queue." }).style(Style::default().fg(MUTED)).wrap(Wrap { trim: false }), list);
+        frame.render_widget(
+            Paragraph::new(if app.busy {
+                "Loading pull requests…"
+            } else {
+                "No matching pull requests.
+# opens a PR · / filters · r refreshes"
+            })
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(MUTED)),
+            inner,
+        );
+    } else {
+        let rows = prs.iter().map(|pr| {
+            Row::new(vec![
+                Cell::from(if pr.draft { "D" } else { " " }),
+                Cell::from(format!("#{}", pr.id.number)).style(Style::default().fg(ACCENT)),
+                Cell::from(pr.title.clone()),
+                Cell::from(pr.author.clone()).style(Style::default().fg(MUTED)),
+            ])
+        });
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(1),
+                Constraint::Length(6),
+                Constraint::Min(12),
+                Constraint::Length(if inner.width >= 50 { 12 } else { 0 }),
+            ],
+        )
+        .header(
+            Row::new(["", "PR", "TITLE", "AUTHOR"])
+                .style(Style::default().fg(MUTED))
+                .bottom_margin(1),
+        )
+        .column_spacing(1)
+        .row_highlight_style(Style::default().bg(PANEL).fg(TEXT))
+        .highlight_symbol("› ");
+        frame.render_stateful_widget(
+            table,
+            inner,
+            &mut TableState::default().with_selected(Some(app.selected_pr)),
+        );
+    }
+    if preview_area.width == 0 || preview_area.height == 0 {
         return;
     }
-    let items = prs
-        .iter()
-        .map(|pr| {
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} #{}", pr.id.repo, pr.id.number),
-                        Style::default().fg(ACCENT),
-                    ),
-                    Span::styled(
-                        format!("  {}{}", pr.author, if pr.draft { " · draft" } else { "" }),
-                        Style::default().fg(MUTED),
-                    ),
-                ]),
-                Line::from(Span::styled(pr.title.clone(), Style::default().fg(TEXT))),
-                Line::from(""),
-            ])
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" PREVIEW · h/l focus · p hides · P position ")
+        .border_style(Style::default().fg(if app.preview.focused { ACCENT } else { BORDER }));
+    let inner = block.inner(preview_area);
+    frame.render_widget(block, preview_area);
+    let Some(pr) = selected else {
+        return;
+    };
+    let [tabs, title, content] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+    let style = |tab| {
+        Style::default().fg(if app.preview.tab == tab {
+            ACCENT
+        } else {
+            MUTED
         })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default().with_selected(Some(app.selected_pr));
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_style(Style::default().bg(PANEL))
-            .highlight_symbol(" › "),
-        list,
-        &mut state,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" 1 Description ", style(PreviewTab::Description)),
+            Span::styled(
+                match app
+                    .preview
+                    .guides
+                    .get(&crate::app::preview_key(&pr.id))
+                    .map(|guide| &guide.status)
+                {
+                    Some(AiStatus::Loading) => " 2 AI guide · preparing ",
+                    Some(AiStatus::Ready(_)) => " 2 AI guide · ready ",
+                    Some(AiStatus::Error(_)) => " 2 AI guide · error ",
+                    _ => " 2 AI guide ",
+                },
+                style(PreviewTab::Guide),
+            ),
+        ])),
+        tabs,
     );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                pr.title.clone(),
+                Style::default().fg(TEXT).bold(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "#{} · {}{}",
+                    pr.id.number,
+                    pr.author,
+                    if pr.draft { " · draft" } else { "" }
+                ),
+                Style::default().fg(MUTED),
+            )),
+            Line::from(""),
+        ]),
+        title,
+    );
+    let body = if pr.body.trim().is_empty() {
+        "No author description."
+    } else {
+        &pr.body
+    };
+    let guide = app.preview.guides.get(&crate::app::preview_key(&pr.id));
+    let scroll = if app.preview.tab == PreviewTab::Description {
+        markdown(frame, body, content, app.preview.scroll)
+    } else if let Some(crate::app::PreviewGuide {
+        status: AiStatus::Ready(analysis),
+        revision,
+    }) = guide
+    {
+        let mut rows = Vec::new();
+        overview_text(
+            &mut rows,
+            &format!(
+                "{} · revision {}",
+                app.settings.ai.provider,
+                &revision[..revision.len().min(8)]
+            ),
+            content.width,
+            0,
+            MUTED,
+            None,
+        );
+        rows.extend(overview_rows(analysis, content.width, true));
+        let start = usize::from(app.preview.scroll)
+            .min(rows.len().saturating_sub(usize::from(content.height)));
+        for (offset, row) in rows
+            .iter()
+            .skip(start)
+            .take(usize::from(content.height))
+            .enumerate()
+        {
+            frame.render_widget(
+                Paragraph::new(row.line.clone()),
+                Rect::new(content.x, content.y + offset as u16, content.width, 1),
+            );
+        }
+        start.min(u16::MAX as usize) as u16
+    } else {
+        let hint = match guide.map(|guide| &guide.status) {
+            Some(AiStatus::Loading) => format!("*Preparing with {}…*", app.settings.ai.provider),
+            Some(AiStatus::Error(error)) => {
+                format!("**Guide unavailable:** {error}\n\nPress `a` to retry.")
+            }
+            _ => "`a`: prepare guide · `A`: choose agent".into(),
+        };
+        markdown(
+            frame,
+            &format!("{hint}\n\n{body}"),
+            content,
+            app.preview.scroll,
+        )
+    };
+    app.preview.scroll = scroll;
+}
+
+fn draw_ask(
+    frame: &mut Frame,
+    app: &App,
+    input: &TextInput,
+    focus: Option<&pr_review::assistant::Focus>,
+    scroll: u16,
+) -> u16 {
+    let inner = popup(
+        frame,
+        format!(
+            " Ask {} · Ctrl-s sends · Esc closes/cancels ",
+            app.settings.ai.provider
+        ),
+        frame.area().width.saturating_sub(2),
+        frame.area().height.saturating_sub(2),
+    );
+    let [scope, transcript, editor_label, editor] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(2),
+        Constraint::Length(1),
+        Constraint::Length(4),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(focus.map_or("Entire PR", |focus| focus.label.as_str()))
+            .style(Style::default().fg(ACCENT))
+            .wrap(Wrap { trim: false }),
+        scope,
+    );
+    let mut text = String::new();
+    let mut latest_start = 0;
+    for turn in &app.chat.turns {
+        text.push_str(&format!(
+            "**You** · {}\n\n{}\n\n",
+            turn.scope, turn.question
+        ));
+        latest_start = text.len();
+        text.push_str(&format!(
+            "**{}**\n\n{}\n\n",
+            app.settings.ai.provider, turn.response.answer
+        ));
+        for reference in &turn.response.references {
+            text.push_str(&format!(
+                "- `{}{} · {:?}` — {}\n",
+                reference.path,
+                reference
+                    .line
+                    .map_or(String::new(), |line| format!(":{line}")),
+                reference.side,
+                reference.reason
+            ));
+        }
+        if !turn.response.unknowns.is_empty() {
+            text.push_str("\n**Unknowns**\n");
+        }
+        for unknown in &turn.response.unknowns {
+            text.push_str(&format!("- {unknown}\n"));
+        }
+        text.push_str(&format!(
+            "\n*Context: {} files included · {} omitted · {} unavailable.*\n\n---\n\n",
+            turn.response.coverage.included_files.len(),
+            turn.response.coverage.omitted_files.len(),
+            turn.response.coverage.unavailable_files.len()
+        ));
+    }
+    if let Some((question, scope)) = &app.chat.pending {
+        latest_start = text.len();
+        text.push_str(&format!(
+            "**You** · {scope}\n\n{question}\n\n*{} is thinking…*",
+            app.settings.ai.provider
+        ));
+    }
+    if let Some(error) = &app.chat.error {
+        latest_start = text.len();
+        text.push_str(&format!(
+            "\n\n**Request failed:** {error}\n\nYou can edit and resend your question."
+        ));
+    }
+    if text.is_empty() {
+        text.push_str("Ask about the behavior, intent, risks, or tests. The selected lines and surrounding hunks are supplied as context.\n\nCtrl-d / Ctrl-u scroll the conversation. Follow-up questions retain previous turns.");
+    }
+    let requested = if scroll == u16::MAX {
+        Paragraph::new(tui_markdown::from_str(&text[..latest_start]))
+            .wrap(Wrap { trim: false })
+            .line_count(transcript.width)
+            .min(u16::MAX as usize) as u16
+    } else {
+        scroll
+    };
+    let actual = markdown(frame, &text, transcript, requested);
+    frame.render_widget(
+        Paragraph::new(if app.chat.pending.is_some() {
+            "Thinking… · Esc cancels"
+        } else {
+            "Question / follow-up · Ctrl-h backspace · Ctrl-s send"
+        })
+        .style(Style::default().fg(MUTED)),
+        editor_label,
+    );
+    draw_input(frame, input, editor);
+    actual
 }
 
 struct SidebarRow {
@@ -1665,6 +1907,7 @@ fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
 
 fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
     match dialog {
+        Dialog::Ask { .. } => {}
         Dialog::AgentPicker { selected } => {
             let inner = popup(
                 frame,
@@ -1821,7 +2064,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 84,
                 32,
             );
-            frame.render_widget(Paragraph::new("NAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
+            frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
         }
         Dialog::Description { scroll } => {
             let inner = popup(

@@ -20,6 +20,8 @@ pub struct PullRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PrSummary {
+    #[serde(default)]
+    pub body: String,
     pub id: PrId,
     pub title: String,
     pub author: String,

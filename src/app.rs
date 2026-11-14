@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pr_review::{
     analysis::Analysis,
+    assistant::{self, Chat},
     diff::{self, DiffLine, LineKind},
     model::*,
     settings::{self, Provider, Settings},
@@ -113,6 +114,11 @@ impl TextInput {
 }
 
 pub enum Dialog {
+    Ask {
+        input: TextInput,
+        focus: Option<Box<assistant::Focus>>,
+        scroll: u16,
+    },
     AgentPicker {
         selected: usize,
     },
@@ -171,6 +177,46 @@ pub enum AiStatus {
     Loading,
     Ready(Box<Analysis>),
     Error(String),
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum PreviewTab {
+    #[default]
+    Description,
+    Guide,
+}
+
+pub struct PreviewGuide {
+    pub revision: String,
+    pub status: AiStatus,
+}
+
+pub struct PreviewState {
+    pub shown: bool,
+    pub bottom: Option<bool>,
+    pub actual_bottom: bool,
+    pub focused: bool,
+    pub tab: PreviewTab,
+    pub scroll: u16,
+    pub guides: HashMap<String, PreviewGuide>,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            bottom: None,
+            actual_bottom: false,
+            focused: false,
+            tab: PreviewTab::Description,
+            scroll: 0,
+            guides: HashMap::new(),
+        }
+    }
+}
+
+pub fn preview_key(id: &PrId) -> String {
+    format!("{}#{}", id.repo, id.number)
 }
 
 pub struct OverviewState {
@@ -446,6 +492,12 @@ impl ReviewState {
 }
 
 pub enum Action {
+    PreviewGuide(PrId),
+    Ask {
+        question: String,
+        focus: Option<Box<assistant::Focus>>,
+    },
+    CancelAsk,
     None,
     Quit,
     LoadInbox,
@@ -470,6 +522,9 @@ pub enum Action {
 }
 
 pub struct App {
+    pub preview: PreviewState,
+    pub chat: Chat,
+    pub open_on_diff: bool,
     pub tab: PageTab,
     pub overview: Option<OverviewState>,
     pub diff_loading: bool,
@@ -496,6 +551,9 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            preview: PreviewState::default(),
+            chat: Chat::default(),
+            open_on_diff: false,
             tab: PageTab::Overview,
             overview: None,
             diff_loading: false,
@@ -539,7 +597,12 @@ impl App {
             },
         });
         self.review = None;
-        self.tab = PageTab::Overview;
+        self.tab = if self.open_on_diff {
+            PageTab::Diff
+        } else {
+            PageTab::Overview
+        };
+        self.chat = Chat::default();
         self.diff_loading = true;
         self.diff_error = None;
         self.goto_pending = false;
@@ -565,7 +628,22 @@ impl App {
     }
 
     fn leave_pr(&mut self) {
-        self.overview = None;
+        if let Some(overview) = self.overview.take() {
+            let status = if matches!(overview.ai, AiStatus::Loading) {
+                AiStatus::Waiting
+            } else {
+                overview.ai
+            };
+            self.preview.guides.insert(
+                preview_key(&overview.metadata.id),
+                PreviewGuide {
+                    revision: overview.metadata.head_sha,
+                    status,
+                },
+            );
+        }
+        self.open_on_diff = false;
+        self.chat = Chat::default();
         self.review = None;
         self.diff_loading = false;
         self.diff_error = None;
@@ -695,12 +773,42 @@ impl App {
                 KeyCode::Backspace => {
                     self.filter.pop();
                     self.selected_pr = 0;
+                    self.preview.scroll = 0;
                 }
                 KeyCode::Char(c) => {
                     self.filter.push(c);
                     self.selected_pr = 0;
+                    self.preview.scroll = 0;
                 }
                 _ => {}
+            }
+            return Ok(Action::None);
+        }
+        if matches!(key.code, KeyCode::Char('Q') | KeyCode::Char('E'))
+            && let Some(review) = &self.review
+        {
+            if self.settings.ai.provider == Provider::None {
+                bail!("Choose Codex or Claude with A before asking");
+            }
+            let focus = if self.tab == PageTab::Diff || self.overview.is_none() {
+                Some(Box::new(assistant::Focus::from_file(
+                    review
+                        .current_file()
+                        .ok_or_else(|| anyhow::anyhow!("Choose a file"))?,
+                    review.position(),
+                    review.selected_range(),
+                )?))
+            } else {
+                None
+            };
+            self.goto_pending = false;
+            self.dialog = Some(Dialog::Ask {
+                input: TextInput::default(),
+                focus: focus.clone(),
+                scroll: u16::MAX,
+            });
+            if key.code == KeyCode::Char('E') {
+                return Ok(Action::Ask { question: "Explain this diff: what changes, why it may be needed, how it works, and what I should check during review. Distinguish evidence from inference.".into(), focus });
             }
             return Ok(Action::None);
         }
@@ -791,7 +899,10 @@ impl App {
                         } else {
                             review.goto_line(if end { usize::MAX } else { 0 });
                         }
+                    } else if self.preview.focused {
+                        self.preview.scroll = if end { u16::MAX } else { 0 };
                     } else {
+                        self.preview.scroll = 0;
                         self.selected_pr = if end {
                             self.visible_prs().len().saturating_sub(1)
                         } else {
@@ -839,26 +950,7 @@ impl App {
             return Ok(Action::None);
         }
         if self.review.is_none() {
-            let len = self.visible_prs().len();
-            match key.code {
-                KeyCode::Char('j') | KeyCode::Down => {
-                    self.selected_pr = (self.selected_pr + 1).min(len.saturating_sub(1))
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    self.selected_pr = self.selected_pr.saturating_sub(1)
-                }
-                KeyCode::Home => self.selected_pr = 0,
-                KeyCode::Char('G') | KeyCode::End => self.selected_pr = len.saturating_sub(1),
-                KeyCode::Char('/') => self.filtering = true,
-                KeyCode::Char('r') if !self.busy => return Ok(Action::LoadInbox),
-                KeyCode::Enter | KeyCode::Char('o') if !self.busy => {
-                    if let Some(pr) = self.visible_prs().get(self.selected_pr) {
-                        return Ok(Action::LoadPr(pr.id.clone()));
-                    }
-                }
-                _ => {}
-            }
-            return Ok(Action::None);
+            return self.inbox_key(key);
         }
         let review = self.review.as_mut().unwrap();
         match key.code {
@@ -964,6 +1056,106 @@ impl App {
                 return Ok(Action::LoadPr(review.data.pr.id.clone()));
             }
             _ => {}
+        }
+        Ok(Action::None)
+    }
+
+    fn inbox_key(&mut self, key: KeyEvent) -> Result<Action> {
+        let len = self.visible_prs().len();
+        let old = self.selected_pr;
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.preview.shown = true;
+                self.preview.focused = !self.preview.focused;
+            }
+            KeyCode::Char('h') | KeyCode::Left => self.preview.focused = false,
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.preview.shown = true;
+                self.preview.focused = true;
+            }
+            KeyCode::Char('p') => {
+                self.preview.shown = !self.preview.shown;
+                if !self.preview.shown {
+                    self.preview.focused = false;
+                }
+            }
+            KeyCode::Char('P') => self.preview.bottom = Some(!self.preview.actual_bottom),
+            KeyCode::Char('[') | KeyCode::Char(']') | KeyCode::Char('1') | KeyCode::Char('2') => {
+                self.preview.shown = true;
+                self.preview.tab = match key.code {
+                    KeyCode::Char('1') => PreviewTab::Description,
+                    KeyCode::Char('2') => PreviewTab::Guide,
+                    _ => {
+                        if self.preview.tab == PreviewTab::Description {
+                            PreviewTab::Guide
+                        } else {
+                            PreviewTab::Description
+                        }
+                    }
+                };
+                self.preview.scroll = 0;
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.preview.scroll = self.preview.scroll.saturating_add(12)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.preview.scroll = self.preview.scroll.saturating_sub(12)
+            }
+            KeyCode::PageDown => self.preview.scroll = self.preview.scroll.saturating_add(15),
+            KeyCode::PageUp => self.preview.scroll = self.preview.scroll.saturating_sub(15),
+            KeyCode::Char('j') | KeyCode::Down if self.preview.focused => {
+                self.preview.scroll = self.preview.scroll.saturating_add(1)
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.preview.focused => {
+                self.preview.scroll = self.preview.scroll.saturating_sub(1)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.selected_pr = (self.selected_pr + 1).min(len.saturating_sub(1))
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.selected_pr = self.selected_pr.saturating_sub(1)
+            }
+            KeyCode::Home if self.preview.focused => self.preview.scroll = 0,
+            KeyCode::End | KeyCode::Char('G') if self.preview.focused => {
+                self.preview.scroll = u16::MAX
+            }
+            KeyCode::Home => self.selected_pr = 0,
+            KeyCode::End | KeyCode::Char('G') => self.selected_pr = len.saturating_sub(1),
+            KeyCode::Char('/') => self.filtering = true,
+            KeyCode::Char('A') => {
+                self.dialog = Some(Dialog::AgentPicker {
+                    selected: match self.settings.ai.provider {
+                        Provider::Codex => 0,
+                        Provider::Claude => 1,
+                        Provider::None => 2,
+                    },
+                })
+            }
+            KeyCode::Char('a') => {
+                if self.settings.ai.provider == Provider::None {
+                    self.dialog = Some(Dialog::AgentPicker { selected: 0 });
+                } else if let Some(pr) = self.visible_prs().get(self.selected_pr) {
+                    let id = pr.id.clone();
+                    self.preview.tab = PreviewTab::Guide;
+                    self.preview.shown = true;
+                    return Ok(Action::PreviewGuide(id));
+                }
+            }
+            KeyCode::Char('r') if !self.busy => {
+                self.preview.guides.clear();
+                return Ok(Action::LoadInbox);
+            }
+            KeyCode::Enter | KeyCode::Char('o') if !self.busy => {
+                if let Some(pr) = self.visible_prs().get(self.selected_pr) {
+                    let id = pr.id.clone();
+                    self.open_on_diff = true;
+                    return Ok(Action::LoadPr(id));
+                }
+            }
+            _ => {}
+        }
+        if old != self.selected_pr {
+            self.preview.scroll = 0;
         }
         Ok(Action::None)
     }
@@ -1097,10 +1289,45 @@ impl App {
     fn dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
         let dialog = self.dialog.take().unwrap();
         if key.code == KeyCode::Esc {
+            if matches!(dialog, Dialog::Ask { .. }) && self.chat.pending.is_some() {
+                self.chat.pending = None;
+                return Ok(Action::CancelAsk);
+            }
             return Ok(Action::None);
         }
         let save = key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.dialog = match dialog {
+            Dialog::Ask {
+                mut input,
+                focus,
+                mut scroll,
+            } => {
+                if save && self.chat.pending.is_none() && !input.text.trim().is_empty() {
+                    let question = input.text.clone();
+                    self.dialog = Some(Dialog::Ask {
+                        input: TextInput::default(),
+                        focus: focus.clone(),
+                        scroll: u16::MAX,
+                    });
+                    return Ok(Action::Ask { question, focus });
+                }
+                match key.code {
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        scroll = scroll.saturating_add(12)
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        scroll = scroll.saturating_sub(12)
+                    }
+                    KeyCode::PageDown => scroll = scroll.saturating_add(15),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(15),
+                    _ => input.key(key),
+                }
+                Some(Dialog::Ask {
+                    input,
+                    focus,
+                    scroll,
+                })
+            }
             Dialog::AgentPicker { mut selected } => {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => selected = (selected + 1).min(2),
@@ -1118,6 +1345,10 @@ impl App {
                         {
                             self.dialog = Some(Dialog::AgentPicker { selected });
                             return Err(error);
+                        }
+                        if self.settings.ai.provider != provider {
+                            self.chat = Chat::default();
+                            self.preview.guides.clear();
                         }
                         self.settings = settings;
                         if let Some(overview) = &mut self.overview {
@@ -1457,6 +1688,7 @@ mod tests {
         let mut app = App::new(dir.path().into(), false);
         let data = demo_data();
         app.inbox.push(PrSummary {
+            body: "Example description".into(),
             id: data.pr.id.clone(),
             title: data.pr.title.clone(),
             author: data.pr.author.clone(),

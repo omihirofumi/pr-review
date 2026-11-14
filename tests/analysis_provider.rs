@@ -8,7 +8,7 @@ use std::{
 };
 
 use pr_review::{
-    analysis,
+    analysis, assistant,
     model::{ChangedFile, PrId, PrOverview, PullRequest, ReviewData},
     settings::{self, AiConfig, Provider, Settings},
 };
@@ -153,6 +153,113 @@ fn provider_fixture_child() {
             std::thread::sleep(Duration::from_millis(150));
             signal.store(true, Ordering::Relaxed);
         });
+    }
+    if scenario.starts_with("ask_") {
+        let focus = assistant::Focus::from_file(&review.files[0], 2, Some((2, 3))).unwrap();
+        let mut history = Vec::new();
+        if scenario == "ask_small_budget" {
+            config.max_input_bytes = 100;
+        }
+        if scenario == "ask_pre_canceled" {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if scenario == "ask_canceled" {
+            let signal = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                signal.store(true, Ordering::Relaxed);
+            });
+        }
+        if scenario == "ask_history" {
+            for _ in 0..12 {
+                history.push(assistant::Turn {
+                    question: "earlier question".into(),
+                    scope: "Entire PR".into(),
+                    response: assistant::Answer {
+                        answer: "x".repeat(1000),
+                        references: vec![],
+                        unknowns: vec![],
+                        coverage: Default::default(),
+                    },
+                });
+            }
+            config.max_input_bytes = 12_000;
+        }
+        let result = assistant::answer(
+            &overview,
+            &review,
+            &config,
+            "Why is this delay bounded?",
+            Some(&focus),
+            &history,
+            cancel.clone(),
+        );
+        match scenario.as_str() {
+            "ask_success" | "ask_history" => {
+                let response = result.unwrap();
+                assert_eq!(response.references[0].line, Some(8));
+                assert_eq!(response.coverage.included_files.len(), 2);
+                if scenario == "ask_history" {
+                    assert!(
+                        response
+                            .unknowns
+                            .iter()
+                            .any(|text| text.contains("Earlier conversation"))
+                    );
+                }
+                history.push(assistant::Turn {
+                    question: "Why is this delay bounded?".into(),
+                    scope: focus.label.clone(),
+                    response,
+                });
+                assistant::answer(
+                    &overview,
+                    &review,
+                    &config,
+                    "What happens with no remaining time?",
+                    Some(&focus),
+                    &history,
+                    cancel,
+                )
+                .unwrap();
+                let calls = calls(&root);
+                let payload: serde_json::Value = serde_json::from_str(
+                    calls[1]["prompt"]
+                        .as_str()
+                        .unwrap()
+                        .split_once('\n')
+                        .unwrap()
+                        .1,
+                )
+                .unwrap();
+                assert!(
+                    !payload["reviewer_request"]["previous_turns"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    payload["reviewer_request"]["focus"]["selected_lines"]
+                        .as_array()
+                        .unwrap()
+                        .len()
+                        == 2
+                );
+                assert!(
+                    calls.iter().all(
+                        |call| call["prompt"].as_str().unwrap().len() <= config.max_input_bytes
+                    )
+                );
+            }
+            "ask_small_budget" | "ask_pre_canceled" => {
+                assert!(result.is_err());
+                assert!(calls(&root).is_empty());
+            }
+            _ => {
+                assert!(result.is_err());
+            }
+        }
+        return;
     }
     let started = Instant::now();
     let result = analysis::generate(
@@ -453,7 +560,7 @@ prompt = sys.stdin.read()
 schema = json.loads(Path(args[args.index('--output-schema') + 1]).read_text()) if program == 'codex' else json.loads(args[args.index('--json-schema') + 1])
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps({'program': program, 'args': args, 'cwd': os.getcwd(), 'prompt': prompt, 'schema': schema, 'codex_home': os.environ.get('CODEX_HOME'), 'claude_config': os.environ.get('CLAUDE_CONFIG_DIR')}) + '\n')
-if scenario in ['timeout', 'canceled']:
+if scenario in ['timeout', 'canceled', 'ask_canceled']:
     subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])
     time.sleep(20)
 if scenario == 'provider_error':
@@ -468,7 +575,8 @@ if scenario == 'large_pipes':
     sys.stdout.flush()
     sys.stderr.write('e' * 250000)
     sys.stderr.flush()
-data = json.loads(prompt.split('\n', 1)[1])['untrusted_review_data']
+payload = json.loads(prompt.split('\n', 1)[1])
+data = payload.get('evidence', payload)['untrusted_review_data']
 response = {
     'summary': 'Retries respect the request deadline.',
     'intent': {'text': 'Bound retries by the deadline.', 'basis': 'author_description' if data['pr']['description'].strip() else 'inferred_from_diff'},
@@ -481,9 +589,58 @@ if scenario == 'invalid_line': response['reading_order'][0]['line'] = 9999
 if scenario == 'invalid_file': response['changes'][0]['files'] = ['not-provided.rs']
 if scenario == 'invented_test': response['verification']['existing_tests'] = ['tests/invented.rs']
 if scenario == 'missing_line': del response['reading_order'][0]['line']
+if scenario.startswith('ask_'):
+    response = {'answer': 'The delay fits the remaining deadline.', 'references': [{'path': 'src/lib.rs', 'line': 8, 'side': 'RIGHT', 'reason': 'The new delay.'}], 'unknowns': ['No tests were run.']}
+    if scenario == 'ask_invalid_line': response['references'][0]['line'] = 9999
+    if scenario == 'ask_invalid_file': response['references'][0]['path'] = 'not-provided.rs'
+    if scenario == 'ask_empty': response['answer'] = ''
 if program == 'codex':
     answer = Path(args[args.index('--output-last-message') + 1])
     answer.write_text('PRIVATE_SENTINEL not json' if scenario == 'malformed' else json.dumps(response))
 else:
     print(json.dumps({'result': json.dumps(response)} if scenario == 'unstructured' else {'is_error': False, 'structured_output': response}))
 "#;
+
+#[cfg(unix)]
+#[test]
+fn questions_and_followups_use_both_providers_with_validated_focus_and_bounded_history() {
+    for provider in ["codex", "claude"] {
+        assert_eq!(run_fixture("ask_success", provider).len(), 2);
+        assert_eq!(run_fixture("ask_history", provider).len(), 2);
+        for scenario in [
+            "ask_invalid_line",
+            "ask_invalid_file",
+            "ask_empty",
+            "ask_small_budget",
+            "ask_pre_canceled",
+            "ask_canceled",
+        ] {
+            run_fixture(scenario, provider);
+        }
+    }
+}
+
+#[test]
+fn focused_questions_preserve_both_diff_sides_and_complete_hunks() {
+    let (_, mut review) = fixture();
+    review.files[0]
+        .patch
+        .as_mut()
+        .unwrap()
+        .push_str("\n@@ -20 +21 @@\n-other\n+later");
+    let focus = assistant::Focus::from_file(&review.files[0], 2, Some((2, 3))).unwrap();
+    assert_eq!(focus.selected_lines.len(), 2);
+    assert_eq!(focus.selected_lines[0].old_line, Some(8));
+    assert_eq!(focus.selected_lines[1].new_line, Some(8));
+    assert!(!focus.patch.contains("later"));
+    assert!(
+        assistant::Focus::from_file(&review.files[0], 0, None)
+            .unwrap()
+            .label
+            .contains("hunk")
+    );
+    let both = assistant::Focus::from_file(&review.files[0], 2, Some((2, 7))).unwrap();
+    assert!(both.patch.contains("later"));
+    review.files[0].patch = Some("@@ -1,2 +1,2 @@\n-bad\n+incomplete".into());
+    assert!(assistant::Focus::from_file(&review.files[0], 0, None).is_err());
+}

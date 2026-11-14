@@ -121,7 +121,7 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
         "--limit",
         "100",
         "--json",
-        "number,title,author,isDraft,url",
+        "number,title,body,author,isDraft,url",
     ];
     if let Some(search) = search.filter(|search| !search.trim().is_empty()) {
         args.extend(["--search", search]);
@@ -135,6 +135,7 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
                 "GitHub returned an inconsistent PR number"
             );
             Ok(PrSummary {
+                body: pr.body.unwrap_or_default(),
                 id,
                 title: pr.title,
                 author: login(pr.author),
@@ -596,6 +597,7 @@ struct ApiReview {
 
 #[derive(Deserialize)]
 struct SearchPr {
+    body: Option<String>,
     number: u64,
     title: String,
     author: Option<ApiUser>,

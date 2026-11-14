@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod assistant;
 pub mod diff;
 pub mod github;
 pub mod model;

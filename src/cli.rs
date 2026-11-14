@@ -22,7 +22,7 @@ use crossterm::{
 };
 use directories::ProjectDirs;
 use pr_review::{
-    analysis, github,
+    analysis, assistant, github,
     model::*,
     settings::{self, Provider},
     workspace,
@@ -89,6 +89,24 @@ impl Args {
 
 pub(crate) enum JobResult {
     Inbox(Result<Vec<PrSummary>>),
+    PreviewContext {
+        generation: u64,
+        request: u64,
+        id: PrId,
+        result: Result<(PrOverview, Box<ReviewData>)>,
+    },
+    PreviewGuide {
+        generation: u64,
+        request: u64,
+        id: PrId,
+        revision: String,
+        result: Result<Box<analysis::Analysis>>,
+    },
+    Answer {
+        generation: u64,
+        request: u64,
+        result: Result<assistant::Answer>,
+    },
     Overview {
         generation: u64,
         result: Result<PrOverview>,
@@ -123,6 +141,10 @@ type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 #[derive(Default)]
 pub(crate) struct Runtime {
     generation: u64,
+    provider: Option<Provider>,
+    ask_request: u64,
+    ask_cancel: Option<Arc<AtomicBool>>,
+    ask_handle: Option<thread::JoinHandle<()>>,
     pending_comments: Option<Vec<ReviewComment>>,
     pending_ai: Option<bool>,
     ai_request: u64,
@@ -131,6 +153,16 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    fn stop_ask(&mut self) {
+        if let Some(cancel) = self.ask_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = self.ask_handle.take() {
+            let _ = handle.join();
+        }
+        self.ask_request = self.ask_request.wrapping_add(1);
+    }
+
     fn stop_ai(&mut self) {
         if let Some(cancel) = self.ai_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
@@ -144,6 +176,7 @@ impl Runtime {
     fn sync(&mut self, generation: u64) {
         if generation != self.generation {
             self.stop_ai();
+            self.stop_ask();
             self.generation = generation;
             self.pending_comments = None;
             self.pending_ai = None;
@@ -154,6 +187,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.stop_ai();
+        self.stop_ask();
     }
 }
 
@@ -206,16 +240,16 @@ pub fn run() -> Result<()> {
     app.config_path = Some(config_path);
     if args.demo {
         let demo = app::demo_data();
+        app.repo = Some(demo.pr.id.repo.clone());
         app.inbox = vec![PrSummary {
+            body: demo.pr.body.clone(),
             id: demo.pr.id.clone(),
             title: demo.pr.title.clone(),
             author: demo.pr.author.clone(),
             draft: false,
         }];
-        app.opened(demo_overview(&demo));
-        app.accept_diff(demo)?;
         app.message(
-            "Offline demo. 1 Overview / 2 Diff; no agent or GitHub requests are made.",
+            "Offline demo. Browse PRs; o opens Diff; a shows a sample guide. Nothing is sent.",
             false,
         );
     }
@@ -331,7 +365,10 @@ pub fn run() -> Result<()> {
                 JobResult::Overview { .. }
                 | JobResult::Diff { .. }
                 | JobResult::Comments { .. }
-                | JobResult::Analysis { .. } => {}
+                | JobResult::Analysis { .. }
+                | JobResult::PreviewContext { .. }
+                | JobResult::PreviewGuide { .. }
+                | JobResult::Answer { .. } => {}
             }
         }
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
@@ -358,7 +395,8 @@ pub fn run() -> Result<()> {
                     if let Some(
                         app::Dialog::Compose { input, .. }
                         | app::Dialog::Submit { input, .. }
-                        | app::Dialog::OpenPr { input },
+                        | app::Dialog::OpenPr { input }
+                        | app::Dialog::Ask { input, .. },
                     ) = &mut app.dialog
                     {
                         input.text.insert_str(input.cursor, &text);
@@ -379,6 +417,96 @@ pub(crate) fn apply_background(
     runtime: &mut Runtime,
 ) -> Option<JobResult> {
     match result {
+        JobResult::PreviewContext {
+            generation,
+            request,
+            id,
+            result,
+        } => {
+            if generation != app.generation || request != runtime.ai_request {
+                return None;
+            }
+            match result {
+                Ok((overview, review)) => {
+                    let config = app.settings.ai.clone();
+                    let cache = app.root.join("analysis");
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    runtime.ai_cancel = Some(cancel.clone());
+                    let sender = sender.clone();
+                    runtime.ai_handle = Some(thread::spawn(move || {
+                        let result =
+                            analysis::generate(&overview, &review, &config, &cache, cancel, false)
+                                .map(Box::new);
+                        let _ = sender.send(JobResult::PreviewGuide {
+                            generation,
+                            request,
+                            id,
+                            revision: overview.head_sha,
+                            result,
+                        });
+                    }));
+                }
+                Err(error) => {
+                    app.preview.guides.insert(
+                        app::preview_key(&id),
+                        app::PreviewGuide {
+                            revision: String::new(),
+                            status: app::AiStatus::Error(format!("{error:#}")),
+                        },
+                    );
+                }
+            }
+        }
+        JobResult::PreviewGuide {
+            generation,
+            request,
+            id,
+            revision,
+            result,
+        } => {
+            if generation != app.generation || request != runtime.ai_request {
+                return None;
+            }
+            app.preview.guides.insert(
+                app::preview_key(&id),
+                app::PreviewGuide {
+                    revision,
+                    status: match result {
+                        Ok(guide) => app::AiStatus::Ready(guide),
+                        Err(error) => app::AiStatus::Error(format!("{error:#}")),
+                    },
+                },
+            );
+        }
+        JobResult::Answer {
+            generation,
+            request,
+            result,
+        } => {
+            if generation != app.generation || request != runtime.ask_request {
+                return None;
+            }
+            if let Some((question, scope)) = app.chat.pending.take() {
+                match result {
+                    Ok(response) => app.chat.turns.push(assistant::Turn {
+                        question,
+                        scope,
+                        response,
+                    }),
+                    Err(error) => {
+                        app.chat.error = Some(format!("{error:#}"));
+                        if let Some(app::Dialog::Ask { input, .. }) = &mut app.dialog
+                            && input.text.is_empty()
+                        {
+                            *input = app::TextInput::new(question);
+                        }
+                    }
+                }
+            }
+            if let Some(app::Dialog::Ask { scroll, .. }) = &mut app.dialog {
+                *scroll = u16::MAX;
+            }
+        }
         JobResult::Overview { generation, result } => {
             if generation != app.generation {
                 return None;
@@ -486,7 +614,10 @@ fn start_analysis(
     force: bool,
 ) {
     if app.demo {
-        app.message("Offline demo does not run an AI agent", false);
+        if let (Some(overview), Some(review)) = (&mut app.overview, &app.review) {
+            overview.ai = app::AiStatus::Ready(sample_guide(&review.data));
+        }
+        app.message("Offline sample guide. No AI agent was run.", false);
         return;
     }
     if app.settings.ai.provider == Provider::None {
@@ -521,6 +652,126 @@ fn start_analysis(
     }));
 }
 
+fn sample_guide(data: &ReviewData) -> Box<analysis::Analysis> {
+    Box::new(analysis::Analysis {
+        summary: "Offline sample: add a timeout to retry requests so a stalled connection does not block indefinitely.".into(),
+        intent: analysis::Intent { text: "Bound request latency while preserving retries.".into(), basis: "author_description".into() },
+        changes: vec![analysis::Change { title: "Request deadline".into(), detail: "Inspect the retry path and timeout coverage.".into(), files: vec![data.files[0].filename.clone()] }],
+        reading_order: vec![analysis::ReadingStep { path: data.files[0].filename.clone(), line: None, side: Side::Right, reason: "Start with the request implementation.".into() }],
+        risks: Vec::new(), verification: analysis::Verification { existing_tests: Vec::new(), suggested_checks: vec!["Run the timeout tests.".into()], unknowns: vec!["This is an offline example, not a generated analysis.".into()] },
+        coverage: analysis::Coverage { included_files: data.files.iter().map(|file| file.filename.clone()).collect(), ..Default::default() },
+    })
+}
+
+fn start_preview(app: &mut App, sender: &mpsc::Sender<JobResult>, runtime: &mut Runtime, id: PrId) {
+    runtime.stop_ai();
+    for guide in app.preview.guides.values_mut() {
+        if matches!(guide.status, app::AiStatus::Loading) {
+            guide.status = app::AiStatus::Waiting;
+        }
+    }
+    app.preview.shown = true;
+    app.preview.tab = app::PreviewTab::Guide;
+    app.preview.scroll = 0;
+    let key = app::preview_key(&id);
+    if app.demo {
+        let data = app::demo_data();
+        app.preview.guides.insert(
+            key,
+            app::PreviewGuide {
+                revision: data.pr.head_sha.clone(),
+                status: app::AiStatus::Ready(sample_guide(&data)),
+            },
+        );
+        return;
+    }
+    if app.settings.ai.provider == Provider::None {
+        return;
+    }
+    app.preview.guides.insert(
+        key,
+        app::PreviewGuide {
+            revision: String::new(),
+            status: app::AiStatus::Loading,
+        },
+    );
+    let generation = app.generation;
+    let request = runtime.ai_request;
+    let sender = sender.clone();
+    thread::spawn(move || {
+        let result = github::load_overview(&id).and_then(|overview| {
+            github::load_diff(&overview).map(|review| (overview, Box::new(review)))
+        });
+        let _ = sender.send(JobResult::PreviewContext {
+            generation,
+            request,
+            id,
+            result,
+        });
+    });
+}
+
+fn start_question(
+    app: &mut App,
+    sender: &mpsc::Sender<JobResult>,
+    runtime: &mut Runtime,
+    question: String,
+    focus: Option<Box<assistant::Focus>>,
+) -> Result<()> {
+    if app.chat.pending.is_some() {
+        return Ok(());
+    }
+    let review = app
+        .review
+        .as_ref()
+        .context("Wait for the diff before asking a question")?
+        .data
+        .clone();
+    let overview = app
+        .overview
+        .as_ref()
+        .map(|state| state.metadata.clone())
+        .unwrap_or_else(|| demo_overview(&review));
+    let config = app.settings.ai.clone();
+    if config.provider == Provider::None {
+        bail!("Choose an agent with A before asking");
+    }
+    runtime.stop_ask();
+    let scope = focus
+        .as_ref()
+        .map_or_else(|| "Entire PR".into(), |focus| focus.label.clone());
+    app.chat.error = None;
+    app.chat.pending = Some((question.clone(), scope));
+    let generation = app.generation;
+    let request = runtime.ask_request;
+    let cancel = Arc::new(AtomicBool::new(false));
+    runtime.ask_cancel = Some(cancel.clone());
+    let history = app.chat.turns.clone();
+    let sender = sender.clone();
+    let demo = app.demo;
+    runtime.ask_handle = Some(thread::spawn(move || {
+        let result = if demo {
+            Ok(assistant::Answer { answer: "Offline example: compare the removed and added lines to understand the timeout change. Ask a follow-up below; real PRs use your configured agent.".into(), references: Vec::new(), unknowns: vec!["No AI agent was run in this demo.".into()], coverage: Default::default() })
+        } else {
+            assistant::answer(
+                &overview,
+                &review,
+                &config,
+                &question,
+                focus.as_deref(),
+                &history,
+                cancel,
+            )
+        };
+        let _ = sender.send(JobResult::Answer {
+            generation,
+            request,
+            result,
+        });
+    }));
+    Ok(())
+}
+
 fn demo_overview(data: &ReviewData) -> PrOverview {
     PrOverview {
         id: data.pr.id.clone(),
@@ -547,6 +798,14 @@ fn dispatch(
     runtime: &mut Runtime,
 ) -> Result<()> {
     runtime.sync(app.generation);
+    if runtime.provider != Some(app.settings.ai.provider) {
+        runtime.stop_ai();
+        runtime.stop_ask();
+        runtime.provider = Some(app.settings.ai.provider);
+    }
+    if matches!(action, Action::LoadInbox) {
+        runtime.stop_ai();
+    }
     if matches!(action, Action::None | Action::Quit) {
         return Ok(());
     }
@@ -555,12 +814,32 @@ fn dispatch(
         return Ok(());
     }
     match action {
+        Action::PreviewGuide(id) => {
+            start_preview(app, sender, runtime, id);
+            return Ok(());
+        }
+        Action::Ask { question, focus } => {
+            start_question(app, sender, runtime, question, focus)?;
+            return Ok(());
+        }
+        Action::CancelAsk => {
+            runtime.stop_ask();
+            return Ok(());
+        }
+        Action::Explain { force: _ } if app.overview.is_none() => {
+            if let Some(pr) = app.visible_prs().get(app.selected_pr) {
+                let id = pr.id.clone();
+                start_preview(app, sender, runtime, id);
+            }
+            return Ok(());
+        }
         Action::Explain { force } => {
             start_analysis(app, sender, runtime, force);
             return Ok(());
         }
         Action::DisableAi => {
             runtime.stop_ai();
+            runtime.stop_ask();
             runtime.pending_ai = None;
             return Ok(());
         }
@@ -578,6 +857,9 @@ fn dispatch(
             let data = app::demo_data();
             app.opened(demo_overview(&data));
             app.accept_diff(data)?;
+            if let Some(overview) = &mut app.overview {
+                overview.ai = app::AiStatus::Ready(sample_guide(&app::demo_data()));
+            }
         } else {
             app.message("Demo is offline. Nothing was sent to GitHub.", false);
         }
@@ -677,7 +959,10 @@ fn dispatch(
         | Action::OpenEditor(_)
         | Action::LoadDiff
         | Action::Explain { .. }
-        | Action::DisableAi => {
+        | Action::DisableAi
+        | Action::PreviewGuide(_)
+        | Action::Ask { .. }
+        | Action::CancelAsk => {
             app.busy = false;
         }
     }

@@ -325,6 +325,10 @@ mod cli {
             app.comments_loading = true;
             app.overview.as_mut().unwrap().ai = app::AiStatus::Loading;
             let mut runtime = Runtime {
+                provider: None,
+                ask_request: 0,
+                ask_cancel: None,
+                ask_handle: None,
                 generation: 7,
                 ai_request: 9,
                 pending_comments: None,
@@ -374,6 +378,10 @@ mod cli {
             app.opened(crate::overview());
             app.overview.as_mut().unwrap().ai = app::AiStatus::Loading;
             let mut runtime = Runtime {
+                provider: None,
+                ask_request: 0,
+                ask_cancel: None,
+                ask_handle: None,
                 generation: 7,
                 ai_request: 9,
                 pending_comments: None,
@@ -516,6 +524,10 @@ mod cli {
                 }
             });
             let mut runtime = Runtime {
+                provider: None,
+                ask_request: 0,
+                ask_cancel: None,
+                ask_handle: None,
                 generation: 7,
                 pending_comments: Some(app::demo_data().comments),
                 pending_ai: Some(true),
@@ -546,6 +558,10 @@ mod cli {
             });
             {
                 let _runtime = Runtime {
+                    provider: None,
+                    ask_request: 0,
+                    ask_cancel: None,
+                    ask_handle: None,
                     generation: 0,
                     pending_comments: None,
                     pending_ai: None,
@@ -558,4 +574,307 @@ mod cli {
             receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         }
     }
+    #[cfg(test)]
+    mod question_background {
+        use super::*;
+        fn answer() -> assistant::Answer {
+            assistant::Answer {
+                answer: "The deadline bounds the delay.".into(),
+                references: vec![],
+                unknowns: vec![],
+                coverage: Default::default(),
+            }
+        }
+
+        #[test]
+        fn questions_and_preview_guides_ignore_stale_tokens_without_unlocking_mutations() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = App::new(directory.path().into(), false);
+            app.generation = 7;
+            app.busy = true;
+            app.chat.pending = Some(("Why?".into(), "Entire PR".into()));
+            let mut runtime = Runtime {
+                generation: 7,
+                ask_request: 3,
+                ai_request: 4,
+                provider: None,
+                ask_cancel: None,
+                ask_handle: None,
+                pending_comments: None,
+                pending_ai: None,
+                ai_cancel: None,
+                ai_handle: None,
+            };
+            let (sender, _) = mpsc::channel();
+            for (generation, request) in [(6, 3), (7, 2)] {
+                apply_background(
+                    JobResult::Answer {
+                        generation,
+                        request,
+                        result: Ok(answer()),
+                    },
+                    &mut app,
+                    &sender,
+                    &mut runtime,
+                );
+                assert!(app.chat.pending.is_some());
+                assert!(app.chat.turns.is_empty());
+                assert!(app.busy);
+            }
+            apply_background(
+                JobResult::Answer {
+                    generation: 7,
+                    request: 3,
+                    result: Ok(answer()),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert_eq!(app.chat.turns.len(), 1);
+            assert!(app.chat.pending.is_none());
+            assert!(app.busy);
+            let id = crate::overview().id;
+            apply_background(
+                JobResult::PreviewGuide {
+                    generation: 7,
+                    request: 3,
+                    id: id.clone(),
+                    revision: "old".into(),
+                    result: Ok(Box::new(crate::analysis())),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(app.preview.guides.is_empty());
+            apply_background(
+                JobResult::PreviewGuide {
+                    generation: 7,
+                    request: 4,
+                    id,
+                    revision: "current".into(),
+                    result: Ok(Box::new(crate::analysis())),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert_eq!(app.preview.guides.len(), 1);
+            assert!(app.busy);
+        }
+
+        #[test]
+        fn failed_question_restores_unsent_text_and_drop_cancels_the_worker() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = App::new(directory.path().into(), false);
+            app.chat.pending = Some(("Original question".into(), "Entire PR".into()));
+            app.dialog = Some(app::Dialog::Ask {
+                input: Default::default(),
+                focus: None,
+                scroll: 0,
+            });
+            let mut runtime = Runtime::default();
+            let (sender, _) = mpsc::channel();
+            apply_background(
+                JobResult::Answer {
+                    generation: 0,
+                    request: 0,
+                    result: Err(anyhow::anyhow!("offline")),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(
+                matches!(&app.dialog, Some(app::Dialog::Ask { input, .. }) if input.text == "Original question")
+            );
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = cancel.clone();
+            runtime.ask_cancel = Some(cancel.clone());
+            runtime.ask_handle = Some(thread::spawn(move || {
+                while !worker_cancel.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }));
+            drop(runtime);
+            assert!(cancel.load(Ordering::Relaxed));
+        }
+    }
+}
+
+fn browsing_app(root: std::path::PathBuf) -> App {
+    let mut app = App::new(root, false);
+    let metadata = overview();
+    app.repo = Some(metadata.id.repo.clone());
+    for number in [1, 2] {
+        app.inbox.push(pr_review::model::PrSummary {
+            id: pr_review::model::PrId {
+                repo: metadata.id.repo.clone(),
+                number,
+            },
+            title: format!("Review change {number}"),
+            author: "author".into(),
+            draft: number == 2,
+            body: format!(
+                "# Description {number}\n\nSelected body {number}\n\n{}",
+                (0..150)
+                    .map(|line| format!("- Item {number}/{line}\n"))
+                    .collect::<String>()
+            ),
+        });
+    }
+    app
+}
+
+#[test]
+fn list_preview_follows_selection_without_loading_diff_or_starting_an_agent() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = browsing_app(directory.path().into());
+    assert!(screen(&mut app).contains("Selected body 1"));
+    assert!(matches!(press(&mut app, 'j').unwrap(), Action::None));
+    let output = screen(&mut app);
+    assert!(output.contains("Selected body 2"));
+    assert!(!output.contains("Selected body 1"));
+    assert!(app.review.is_none() && app.overview.is_none());
+    press(&mut app, 'l').unwrap();
+    press(&mut app, 'g').unwrap();
+    press(&mut app, 'e').unwrap();
+    screen(&mut app);
+    let end = app.preview.scroll;
+    assert!(end > 0 && end < u16::MAX);
+    press(&mut app, 'k').unwrap();
+    screen(&mut app);
+    assert_eq!(app.preview.scroll, end - 1);
+    assert_eq!(app.selected_pr, 1);
+    press(&mut app, 'p').unwrap();
+    assert!(!screen(&mut app).contains("Selected body"));
+    press(&mut app, 'p').unwrap();
+    press(&mut app, 'P').unwrap();
+    screen(&mut app);
+    assert!(app.preview.actual_bottom);
+    press(&mut app, 'h').unwrap();
+    assert!(matches!(press(&mut app, 'o').unwrap(), Action::LoadPr(_)));
+    app.opened(overview());
+    assert_eq!(app.tab, PageTab::Diff);
+}
+
+#[test]
+fn preview_is_responsive_and_keeps_description_readable_while_a_guide_loads() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = browsing_app(directory.path().into());
+    app.settings.ai.provider = Provider::Codex;
+    let id = app.inbox[0].id.clone();
+    app.preview.guides.insert(
+        app::preview_key(&id),
+        app::PreviewGuide {
+            revision: String::new(),
+            status: AiStatus::Loading,
+        },
+    );
+    app.preview.tab = app::PreviewTab::Guide;
+    for (width, height) in [(48, 12), (80, 24), (140, 40)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        let output = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(output.contains("PULL REQUESTS"));
+        if height >= 24 {
+            assert!(
+                output.contains("Selected body 1"),
+                "{width}x{height}: {output}"
+            );
+        }
+    }
+    app.preview.guides.insert(
+        app::preview_key(&id),
+        app::PreviewGuide {
+            revision: "a".repeat(40),
+            status: AiStatus::Ready(Box::new(analysis())),
+        },
+    );
+    assert!(screen(&mut app).contains("Bound retry waits"));
+}
+
+#[test]
+fn ask_and_explain_keep_ai_questions_separate_from_review_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.loaded(app::demo_data()).unwrap();
+    app.settings.ai.provider = Provider::Codex;
+    press(&mut app, 'x').unwrap();
+    press(&mut app, 'x').unwrap();
+    assert!(matches!(press(&mut app, 'Q').unwrap(), Action::None));
+    for c in "Whyあ".chars() {
+        press(&mut app, c).unwrap();
+    }
+    app.key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))
+        .unwrap();
+    let action = app
+        .key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let Action::Ask { question, focus } = action else {
+        panic!("Expected an AI question")
+    };
+    assert_eq!(question, "Why");
+    assert_eq!(focus.unwrap().selected_lines.len(), 2);
+    assert!(app.review.as_ref().unwrap().drafts.is_empty());
+    app.chat.pending = Some((question, "selection".into()));
+    assert!(matches!(
+        app.key(key(KeyCode::Esc)).unwrap(),
+        Action::CancelAsk
+    ));
+    assert!(app.chat.pending.is_none());
+    let action = press(&mut app, 'E').unwrap();
+    assert!(matches!(action, Action::Ask { focus: Some(_), .. }));
+    assert!(screen(&mut app).contains("Ask codex"));
+}
+
+#[test]
+fn a_long_ai_response_opens_at_the_answer_and_remains_scrollable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.loaded(app::demo_data()).unwrap();
+    app.settings.ai.provider = Provider::Codex;
+    app.chat.turns.push(pr_review::assistant::Turn {
+        question: "Why?".into(),
+        scope: "Entire PR".into(),
+        response: pr_review::assistant::Answer {
+            answer: format!("START_OF_ANSWER\n\n{}", "More explanation.\n\n".repeat(200)),
+            references: vec![],
+            unknowns: vec!["END_OF_RESPONSE".into()],
+            coverage: Default::default(),
+        },
+    });
+    app.dialog = Some(Dialog::Ask {
+        input: Default::default(),
+        focus: None,
+        scroll: u16::MAX,
+    });
+    assert!(screen(&mut app).contains("START_OF_ANSWER"));
+    app.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(!screen(&mut app).contains("START_OF_ANSWER"));
+    assert!(
+        matches!(app.dialog, Some(Dialog::Ask { scroll, .. }) if scroll > 0 && scroll < u16::MAX)
+    );
+}
+
+#[test]
+fn keeping_the_same_agent_preserves_chat_and_switching_agents_clears_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.settings.ai.provider = Provider::Codex;
+    app.chat.error = Some("Preserved conversation state".into());
+    app.dialog = Some(Dialog::AgentPicker { selected: 0 });
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert!(app.chat.error.is_some());
+    app.dialog = Some(Dialog::AgentPicker { selected: 1 });
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert!(app.chat.error.is_none());
 }
