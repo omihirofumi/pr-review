@@ -17,6 +17,8 @@ brew install omihirofumi/tap/gh-preview
 
 The formula builds the tagged release from source and installs GitHub CLI, Jujutsu, Git, and Helix as dependencies. Update it with `brew update` followed by `brew upgrade omihirofumi/tap/gh-preview`.
 
+If you previously installed this project with Cargo, run `cargo uninstall pr-review` after the Homebrew installation succeeds. This removes the older copies from Cargo's bin directory so `gh-preview` resolves to the Homebrew installation. Check with `command -v gh-preview`.
+
 ### Cargo
 
 Install Rust, [GitHub CLI](https://cli.github.com/), [Jujutsu](https://docs.jj-vcs.dev/latest/install-and-setup/), Git, and [Helix](https://docs.helix-editor.com/install.html). Make `gh`, `jj`, `git`, and `hx` available on `PATH`.
