@@ -1,6 +1,6 @@
 #[cfg(unix)]
 mod unix {
-    use pr_review::{
+    use prpr::{
         github,
         model::{ChangedFile, PrId, PullRequest},
     };

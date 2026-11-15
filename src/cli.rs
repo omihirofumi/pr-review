@@ -21,7 +21,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use directories::ProjectDirs;
-use pr_review::{
+use prpr::{
     analysis, assistant, context, github,
     model::*,
     settings::{self, Provider},
@@ -58,7 +58,7 @@ struct Args {
     demo: bool,
     #[arg(
         long,
-        help = "Configuration file; defaults to ~/.config/gh-preview/config.toml"
+        help = "Configuration file; defaults to ~/.config/prpr/config.toml"
     )]
     config: Option<PathBuf>,
     #[arg(long, value_enum, help = "AI explanation provider for this launch")]
@@ -236,7 +236,7 @@ pub fn run() -> Result<()> {
     settings.ai.validate()?;
     let (args, target) = args.resolve()?;
     let root = args.workspace_root.clone().map(Ok).unwrap_or_else(|| {
-        ProjectDirs::from("dev", "pr-review", "pr-review")
+        ProjectDirs::from("dev", "prpr", "prpr")
             .map(|p| p.data_local_dir().to_path_buf())
             .context("Cannot find data directory; pass --workspace-root")
     })?;
@@ -717,7 +717,7 @@ fn start_analysis(
 }
 
 fn sample_context(file: &ChangedFile) -> context::FileContext {
-    let rows = pr_review::diff::parse_patch(file.patch.as_deref().unwrap_or_default());
+    let rows = prpr::diff::parse_patch(file.patch.as_deref().unwrap_or_default());
     let prefix = rows
         .iter()
         .find_map(|row| row.old_line.or(row.new_line))
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn url_sets_the_inbox_repository_without_cwd_discovery() {
         let args = Args::try_parse_from([
-            "gh-preview",
+            "prpr",
             "https://github.com/owner/repo/pull/42?diff=split#discussion",
         ])
         .unwrap();
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn numeric_target_uses_the_explicit_repository() {
-        let args = Args::try_parse_from(["gh-preview", "123", "--repo", "owner/repo"]).unwrap();
+        let args = Args::try_parse_from(["prpr", "123", "--repo", "owner/repo"]).unwrap();
         let (args, target) = args.resolve().unwrap();
         assert_eq!(args.repo.as_deref(), Some("owner/repo"));
         assert_eq!(
@@ -1211,15 +1211,15 @@ mod tests {
     #[test]
     fn malformed_targets_and_conflicting_repositories_fail_before_terminal_setup() {
         for argv in [
-            vec!["gh-preview", "0", "--repo", "owner/repo"],
-            vec!["gh-preview", "https://github.com/owner/repo/issues/42"],
+            vec!["prpr", "0", "--repo", "owner/repo"],
+            vec!["prpr", "https://github.com/owner/repo/issues/42"],
             vec![
-                "gh-preview",
+                "prpr",
                 "https://github.com/owner/repo/pull/42",
                 "--repo",
                 "other/repo",
             ],
-            vec!["gh-preview", "--repo", "../repo"],
+            vec!["prpr", "--repo", "../repo"],
         ] {
             assert!(Args::try_parse_from(argv).unwrap().resolve().is_err());
         }
@@ -1227,7 +1227,7 @@ mod tests {
 
     #[test]
     fn offline_demo_never_resolves_a_repository() {
-        let args = Args::try_parse_from(["gh-preview", "--demo"]).unwrap();
+        let args = Args::try_parse_from(["prpr", "--demo"]).unwrap();
         let (args, target) = args.resolve().unwrap();
         assert!(args.repo.is_none());
         assert!(target.is_none());

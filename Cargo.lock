@@ -1116,8 +1116,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
-name = "pr-review"
-version = "0.5.0"
+name = "prpr"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",

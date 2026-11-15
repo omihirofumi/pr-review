@@ -60,7 +60,7 @@ fn prepare_from_remote(pr: &PullRequest, root: &Path, remote: &OsStr) -> Result<
         .args(["git", "remote", operation, "origin"])
         .arg(remote))?;
     let git_dir = git_dir(&store)?;
-    let reference = format!("refs/heads/pr-review-{}", pr.id.number);
+    let reference = format!("refs/heads/prpr-{}", pr.id.number);
     let refspec = format!("+refs/pull/{}/head:{reference}", pr.id.number);
     let mut fetch = git(&git_dir);
     fetch
@@ -137,7 +137,7 @@ pub fn editor_location(
         output(jj(Some(workspace)).args(["file", "show", "-r", &pr.base_sha, "--", &fileset]))?;
     let snapshot_root = create_directories(
         workspace,
-        &Path::new(".jj").join("pr-review-base").join(&pr.base_sha),
+        &Path::new(".jj").join("prpr-base").join(&pr.base_sha),
     )?;
     let snapshot = snapshot_root.join(relative);
     create_directories(&snapshot_root, Path::new(relative).parent().unwrap())?;
@@ -580,7 +580,7 @@ mod tests {
             deletions: 1,
             patch: None,
         };
-        let parent = workspace.join(".jj/pr-review-base");
+        let parent = workspace.join(".jj/prpr-base");
         std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
         assert!(editor_location(&fixture.pr, &file, &Side::Left, 1, &workspace).is_err());
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);

@@ -10,7 +10,7 @@ mod ui;
 
 use app::App;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pr_review::model::{DraftComment, ReviewComment, Side};
+use prpr::model::{DraftComment, ReviewComment, Side};
 use ratatui::{Terminal, backend::TestBackend};
 
 fn key(character: char) -> KeyEvent {

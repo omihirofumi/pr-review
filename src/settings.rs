@@ -92,7 +92,7 @@ pub fn default_path() -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
         .context("Cannot locate the configuration directory; pass --config FILE")?;
-    Ok(root.join("gh-preview/config.toml"))
+    Ok(root.join("prpr/config.toml"))
 }
 
 pub fn load(path: &Path) -> Result<Settings> {

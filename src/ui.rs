@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-use pr_review::{
+use prpr::{
     analysis::Analysis,
     diff::{DiffLine, LineKind},
     model::{ChangedFile, Side},
@@ -743,7 +743,7 @@ fn overview_literal(
     }
 }
 
-fn reading_step_label(index: usize, step: &pr_review::analysis::ReadingStep) -> String {
+fn reading_step_label(index: usize, step: &prpr::analysis::ReadingStep) -> String {
     format!(
         "{}. {}{} · {}",
         index + 1,
@@ -1278,7 +1278,7 @@ fn draw_ask(
     frame: &mut Frame,
     app: &App,
     input: &TextInput,
-    focus: Option<&pr_review::assistant::Focus>,
+    focus: Option<&prpr::assistant::Focus>,
     scroll: u16,
 ) -> u16 {
     let inner = popup(
@@ -2576,7 +2576,7 @@ fn draw_input(frame: &mut Frame, input: &TextInput, area: Rect) {
 mod tests {
     use super::*;
     use crate::app::{App, Selection, demo_data};
-    use pr_review::model::{DraftComment, ReviewComment};
+    use prpr::model::{DraftComment, ReviewComment};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn row_text(row: &ViewRow) -> String {
@@ -2613,7 +2613,7 @@ mod tests {
                 assert!(output.contains("client.rs"));
             }
             app.dialog = Some(Dialog::Confirm {
-                event: pr_review::model::ReviewEvent::Comment,
+                event: prpr::model::ReviewEvent::Comment,
                 body: "Looks good".into(),
                 scroll: 0,
             });
@@ -2911,7 +2911,7 @@ mod tests {
             },
             Dialog::Drafts { selected: 0 },
             Dialog::Confirm {
-                event: pr_review::model::ReviewEvent::Comment,
+                event: prpr::model::ReviewEvent::Comment,
                 body: "Summary".into(),
                 scroll: 0,
             },
@@ -2923,9 +2923,9 @@ mod tests {
         }
     }
 
-    fn overview_metadata() -> pr_review::model::PrOverview {
+    fn overview_metadata() -> prpr::model::PrOverview {
         let data = demo_data();
-        pr_review::model::PrOverview {
+        prpr::model::PrOverview {
             id: data.pr.id,
             title: data.pr.title,
             body: "Bound retry waits by the remaining deadline.".into(),

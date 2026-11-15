@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pr_review::{
+use prpr::{
     analysis::Analysis,
     assistant::{self, Chat},
     context::{self, FileContext, FullFile},
@@ -839,7 +839,7 @@ impl App {
             .and_then(|line| {
                 review.lines[index]
                     .iter()
-                    .position(|row| pr_review::thread::matches_anchor(row, &step.side, line))
+                    .position(|row| prpr::thread::matches_anchor(row, &step.side, line))
             })
             .unwrap_or(0);
         review.selected_file = index;
@@ -1557,9 +1557,8 @@ impl App {
                         .repo
                         .as_deref()
                         .ok_or_else(|| anyhow::anyhow!("No repository selected"))
-                        .and_then(|repo| {
-                            pr_review::github::parse_target(input.text.trim(), Some(repo))
-                        }) {
+                        .and_then(|repo| prpr::github::parse_target(input.text.trim(), Some(repo)))
+                    {
                         Ok(id) => return Ok(Action::LoadPr(id)),
                         Err(error) => {
                             self.dialog = Some(Dialog::OpenPr { input });

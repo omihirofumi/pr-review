@@ -2,11 +2,11 @@
 mod unix {
     use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
-    use pr_review::{github, model::PrId};
+    use prpr::{github, model::PrId};
 
     #[test]
     fn staged_fixture_child() {
-        let Ok(scenario) = std::env::var("PR_REVIEW_STAGED_SCENARIO") else {
+        let Ok(scenario) = std::env::var("PRPR_STAGED_SCENARIO") else {
             return;
         };
         let id = PrId {
@@ -110,8 +110,8 @@ mod unix {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "unix::staged_fixture_child", "--nocapture"])
                 .env("PATH", std::env::join_paths(paths).unwrap())
-                .env("PR_REVIEW_STAGED_FIXTURE", fixture.path())
-                .env("PR_REVIEW_STAGED_SCENARIO", scenario)
+                .env("PRPR_STAGED_FIXTURE", fixture.path())
+                .env("PRPR_STAGED_SCENARIO", scenario)
                 .output()
                 .unwrap();
             assert!(
@@ -170,8 +170,8 @@ from pathlib import Path
 import sys
 import time
 
-root = Path(os.environ['PR_REVIEW_STAGED_FIXTURE'])
-scenario = os.environ['PR_REVIEW_STAGED_SCENARIO']
+root = Path(os.environ['PRPR_STAGED_FIXTURE'])
+scenario = os.environ['PRPR_STAGED_SCENARIO']
 args = sys.argv[1:]
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps(args) + '\n')

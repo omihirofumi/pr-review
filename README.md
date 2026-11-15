@@ -4,7 +4,7 @@
 
 A standalone Rust + Ratatui app for reviewing GitHub pull requests with Jujutsu and Helix.
 
-Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. `gh-preview` and `pr-review` remain available as compatibility aliases.
+Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal.
 
 ## Install
 
@@ -16,8 +16,6 @@ brew install omihirofumi/tap/prpr
 ```
 
 The formula builds the tagged release from source and installs GitHub CLI, Jujutsu, Git, and Helix as dependencies. Update it with `brew update` followed by `brew upgrade omihirofumi/tap/prpr`.
-
-If you previously installed this project with Cargo, run `cargo uninstall pr-review` after the Homebrew installation succeeds. This removes the older copies from Cargo's bin directory so `prpr` resolves to the Homebrew installation. Check with `command -v prpr`.
 
 ### Cargo
 
@@ -84,7 +82,7 @@ Description previews, full descriptions, Ask responses, and AI Overview use a sh
 
 ## Overview and AI reading guide
 
-Press `A` in the PR list or either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/gh-preview/config.toml` (or `$XDG_CONFIG_HOME/gh-preview/config.toml`). The commands share the existing configuration and local review data. Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+Press `A` in the PR list or either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
 
 Example configuration:
 

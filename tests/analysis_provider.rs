@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pr_review::{
+use prpr::{
     analysis, assistant,
     model::{ChangedFile, PrId, PrOverview, PullRequest, ReviewData},
     settings::{self, AiConfig, Provider, Settings},
@@ -93,20 +93,20 @@ fn settings_defaults_partial_configuration_and_atomic_roundtrip() {
 #[cfg(unix)]
 #[test]
 fn provider_fixture_child() {
-    let Ok(scenario) = std::env::var("GH_PREVIEW_AI_SCENARIO") else {
+    let Ok(scenario) = std::env::var("PRPR_AI_SCENARIO") else {
         return;
     };
-    let root = std::path::PathBuf::from(std::env::var_os("GH_PREVIEW_AI_FIXTURE").unwrap());
+    let root = std::path::PathBuf::from(std::env::var_os("PRPR_AI_FIXTURE").unwrap());
     if scenario == "config_path" {
         assert_eq!(
             settings::default_path().unwrap(),
-            root.join("xdg/gh-preview/config.toml")
+            root.join("xdg/prpr/config.toml")
         );
         return;
     }
     let (mut overview, mut review) = fixture();
     let mut config = AiConfig {
-        provider: if std::env::var("GH_PREVIEW_AI_PROVIDER").unwrap() == "claude" {
+        provider: if std::env::var("PRPR_AI_PROVIDER").unwrap() == "claude" {
             Provider::Claude
         } else {
             Provider::Codex
@@ -414,9 +414,9 @@ fn run_fixture(scenario: &str, provider: &str) -> Vec<serde_json::Value> {
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "provider_fixture_child", "--nocapture"])
         .env("PATH", std::env::join_paths(path).unwrap())
-        .env("GH_PREVIEW_AI_SCENARIO", scenario)
-        .env("GH_PREVIEW_AI_PROVIDER", provider)
-        .env("GH_PREVIEW_AI_FIXTURE", directory.path())
+        .env("PRPR_AI_SCENARIO", scenario)
+        .env("PRPR_AI_PROVIDER", provider)
+        .env("PRPR_AI_FIXTURE", directory.path())
         .env("XDG_CONFIG_HOME", directory.path().join("xdg"))
         .env("CODEX_HOME", directory.path().join("existing-codex-auth"))
         .env(
@@ -552,8 +552,8 @@ import subprocess
 import sys
 import time
 
-root = Path(os.environ['GH_PREVIEW_AI_FIXTURE'])
-scenario = os.environ['GH_PREVIEW_AI_SCENARIO']
+root = Path(os.environ['PRPR_AI_FIXTURE'])
+scenario = os.environ['PRPR_AI_SCENARIO']
 program = Path(sys.argv[0]).name
 args = sys.argv[1:]
 prompt = sys.stdin.read()

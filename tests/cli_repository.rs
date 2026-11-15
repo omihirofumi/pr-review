@@ -2,11 +2,11 @@
 mod unix {
     use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
-    use pr_review::github;
+    use prpr::github;
 
     #[test]
     fn repository_fixture_child() {
-        let Ok(scenario) = std::env::var("PR_REVIEW_CLI_SCENARIO") else {
+        let Ok(scenario) = std::env::var("PRPR_CLI_SCENARIO") else {
             return;
         };
         match scenario.as_str() {
@@ -84,8 +84,8 @@ mod unix {
                 .current_dir(&cwd)
                 .env("PATH", std::env::join_paths(path).unwrap())
                 .env("GH_REPO", "environment/wrong-repo")
-                .env("PR_REVIEW_CLI_FIXTURE", fixture.path())
-                .env("PR_REVIEW_CLI_SCENARIO", scenario)
+                .env("PRPR_CLI_FIXTURE", fixture.path())
+                .env("PRPR_CLI_SCENARIO", scenario)
                 .output()
                 .unwrap();
             assert!(
@@ -147,8 +147,8 @@ import os
 from pathlib import Path
 import sys
 
-root = Path(os.environ['PR_REVIEW_CLI_FIXTURE'])
-scenario = os.environ['PR_REVIEW_CLI_SCENARIO']
+root = Path(os.environ['PRPR_CLI_FIXTURE'])
+scenario = os.environ['PRPR_CLI_SCENARIO']
 program = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with (root / 'calls.jsonl').open('a') as log:
@@ -177,38 +177,33 @@ else:
 }
 
 #[test]
-fn primary_and_legacy_commands_expose_the_same_help_version_and_configuration() {
-    for executable in [
-        env!("CARGO_BIN_EXE_prpr"),
-        env!("CARGO_BIN_EXE_gh-preview"),
-        env!("CARGO_BIN_EXE_pr-review"),
-    ] {
-        let result = std::process::Command::new(executable)
-            .arg("--help")
-            .output()
-            .unwrap();
-        assert!(result.status.success());
-        let help = String::from_utf8(result.stdout).unwrap();
-        assert!(help.contains("Usage: prpr"));
-        assert!(help.contains("PR URL or number"));
-        assert!(help.contains("current directory"));
-        let version = std::process::Command::new(executable)
-            .arg("--version")
-            .output()
-            .unwrap();
-        assert!(version.status.success());
-        assert_eq!(
-            String::from_utf8(version.stdout).unwrap().trim(),
-            concat!("prpr ", env!("CARGO_PKG_VERSION"))
-        );
-        let path = std::process::Command::new(executable)
-            .arg("--config-path")
-            .output()
-            .unwrap();
-        assert!(path.status.success());
-        assert!(
-            std::path::Path::new(String::from_utf8(path.stdout).unwrap().trim())
-                .ends_with(std::path::Path::new("gh-preview").join("config.toml"))
-        );
-    }
+fn command_exposes_help_version_and_configuration() {
+    let executable = env!("CARGO_BIN_EXE_prpr");
+    let result = std::process::Command::new(executable)
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let help = String::from_utf8(result.stdout).unwrap();
+    assert!(help.contains("Usage: prpr"));
+    assert!(help.contains("PR URL or number"));
+    assert!(help.contains("current directory"));
+    let version = std::process::Command::new(executable)
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap().trim(),
+        concat!("prpr ", env!("CARGO_PKG_VERSION"))
+    );
+    let path = std::process::Command::new(executable)
+        .arg("--config-path")
+        .output()
+        .unwrap();
+    assert!(path.status.success());
+    assert!(
+        std::path::Path::new(String::from_utf8(path.stdout).unwrap().trim())
+            .ends_with(std::path::Path::new("prpr").join("config.toml"))
+    );
 }

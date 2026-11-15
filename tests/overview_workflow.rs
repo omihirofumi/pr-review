@@ -10,7 +10,7 @@ mod ui;
 
 use app::{Action, AiStatus, App, Dialog, Focus, PageTab};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pr_review::{
+use prpr::{
     analysis::{Analysis, Coverage, Intent, ReadingStep, Verification},
     model::{PrOverview, Side},
     settings::{self, Provider},
@@ -775,8 +775,8 @@ fn browsing_app(root: std::path::PathBuf) -> App {
     let metadata = overview();
     app.repo = Some(metadata.id.repo.clone());
     for number in [1, 2] {
-        app.inbox.push(pr_review::model::PrSummary {
-            id: pr_review::model::PrId {
+        app.inbox.push(prpr::model::PrSummary {
+            id: prpr::model::PrId {
                 repo: metadata.id.repo.clone(),
                 number,
             },
@@ -908,10 +908,10 @@ fn a_long_ai_response_opens_at_the_answer_and_remains_scrollable() {
     let mut app = App::new(directory.path().into(), false);
     app.loaded(app::demo_data()).unwrap();
     app.settings.ai.provider = Provider::Codex;
-    app.chat.turns.push(pr_review::assistant::Turn {
+    app.chat.turns.push(prpr::assistant::Turn {
         question: "Why?".into(),
         scope: "Entire PR".into(),
-        response: pr_review::assistant::Answer {
+        response: prpr::assistant::Answer {
             answer: format!("START_OF_ANSWER\n\n{}", "More explanation.\n\n".repeat(200)),
             references: vec![],
             unknowns: vec!["END_OF_RESPONSE".into()],
@@ -946,7 +946,7 @@ fn keeping_the_same_agent_preserves_chat_and_switching_agents_clears_it() {
     assert!(app.chat.error.is_none());
 }
 
-fn context_fixture(root: std::path::PathBuf) -> (App, pr_review::context::FileContext) {
+fn context_fixture(root: std::path::PathBuf) -> (App, prpr::context::FileContext) {
     let mut data = app::demo_data();
     data.comments.clear();
     data.files[0].patch = Some("@@ -9,3 +9,4 @@ first\n line 9\n-line 10\n+changed 10\n+extra 10\n line 11\n@@ -39,3 +40,3 @@ second\n line 39\n-line 40\n+changed 40\n line 41".into());
@@ -963,7 +963,7 @@ fn context_fixture(root: std::path::PathBuf) -> (App, pr_review::context::FileCo
     let mut app = App::new(root, false);
     app.loaded(data).unwrap();
     app.settings.ai.provider = Provider::Codex;
-    (app, pr_review::context::FileContext { base, head })
+    (app, prpr::context::FileContext { base, head })
 }
 
 #[test]

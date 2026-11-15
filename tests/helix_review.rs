@@ -7,7 +7,7 @@ mod store;
 
 use app::{Action, App, Dialog, Selection};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pr_review::{
+use prpr::{
     diff::validate_comment,
     model::{ChangedFile, DraftComment, Side},
 };

@@ -70,7 +70,7 @@ fn comment_visibility_never_changes_draft_or_editor_coordinates() {
     let review = app.review.as_ref().unwrap();
     let position = review.position();
     let anchor = review.anchor();
-    assert_eq!(anchor, Some((pr_review::model::Side::Left, 19)));
+    assert_eq!(anchor, Some((prpr::model::Side::Left, 19)));
     let editor = review.editor_target().unwrap();
     for _ in 0..3 {
         app.key(key(KeyCode::Char('t'))).unwrap();
@@ -162,7 +162,7 @@ fn asynchronous_editor_request_keeps_the_original_file_and_line() {
     app.key(key(KeyCode::Char('j'))).unwrap();
     assert_eq!(target.file.filename, "src/client.rs");
     assert_eq!(target.line, 18);
-    assert_eq!(target.side, pr_review::model::Side::Right);
+    assert_eq!(target.side, prpr::model::Side::Right);
     assert_eq!(
         app.review
             .as_ref()
@@ -183,7 +183,7 @@ fn removed_file_without_a_patch_opens_the_base_snapshot() {
     data.files[0].patch = None;
     app.loaded(data).unwrap();
     let target = app.review.as_ref().unwrap().editor_target().unwrap();
-    assert_eq!(target.side, pr_review::model::Side::Left);
+    assert_eq!(target.side, prpr::model::Side::Left);
     assert_eq!(target.line, 1);
 }
 
@@ -237,7 +237,7 @@ fn unresolved_submission_blocks_retry_after_restart() {
 
 #[test]
 fn marking_an_uncertain_review_sent_preserves_new_local_drafts() {
-    use pr_review::model::{DraftComment, Side};
+    use prpr::model::{DraftComment, Side};
 
     let dir = tempfile::tempdir().unwrap();
     let data = app::demo_data();
@@ -302,32 +302,32 @@ fn repository_names_cannot_collide_in_local_state_paths() {
 #[cfg(unix)]
 #[test]
 fn github_preflight_fixture_child() {
-    let Ok(scenario) = std::env::var("PR_REVIEW_GH_SCENARIO") else {
+    let Ok(scenario) = std::env::var("PRPR_GH_SCENARIO") else {
         return;
     };
-    let id = pr_review::model::PrId {
+    let id = prpr::model::PrId {
         repo: "owner/repo".into(),
         number: 42,
     };
     match scenario.as_str() {
         "changed_during_load" => {
-            let error = pr_review::github::load_review(&id).unwrap_err();
+            let error = prpr::github::load_review(&id).unwrap_err();
             assert!(error.to_string().contains("changed while loading"));
         }
         "changed_before_submit" => {
-            let data = pr_review::github::load_review(&id).unwrap();
-            let error = pr_review::github::submit_review(
+            let data = prpr::github::load_review(&id).unwrap();
+            let error = prpr::github::submit_review(
                 &data,
                 &[],
                 "Review summary",
-                pr_review::model::ReviewEvent::Comment,
+                prpr::model::ReviewEvent::Comment,
             )
             .unwrap_err();
             assert!(error.to_string().contains("head changed since loading"));
         }
         "post_success" | "post_uncertain" => {
-            use pr_review::model::{DraftComment, ReviewEvent, Side};
-            let data = pr_review::github::load_review(&id).unwrap();
+            use prpr::model::{DraftComment, ReviewEvent, Side};
+            let data = prpr::github::load_review(&id).unwrap();
             let drafts = vec![
                 DraftComment {
                     start_line: None,
@@ -346,7 +346,7 @@ fn github_preflight_fixture_child() {
                     body: "Please add a regression test.".into(),
                 },
             ];
-            let result = pr_review::github::submit_review(
+            let result = prpr::github::submit_review(
                 &data,
                 &drafts,
                 "Please address these two points.",
@@ -358,9 +358,7 @@ fn github_preflight_fixture_child() {
                     "https://github.com/owner/repo/pull/42#pullrequestreview-123"
                 );
             } else {
-                assert!(pr_review::github::is_submission_uncertain(
-                    &result.unwrap_err()
-                ));
+                assert!(prpr::github::is_submission_uncertain(&result.unwrap_err()));
             }
         }
         other => panic!("Unknown fixture scenario: {other}"),
@@ -389,8 +387,8 @@ fn github_preflight_and_submission_transport_are_verified_without_network() {
         let result = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "github_preflight_fixture_child", "--nocapture"])
             .env("PATH", std::env::join_paths(paths).unwrap())
-            .env("PR_REVIEW_GH_FIXTURE", fixture.path())
-            .env("PR_REVIEW_GH_SCENARIO", scenario)
+            .env("PRPR_GH_FIXTURE", fixture.path())
+            .env("PRPR_GH_SCENARIO", scenario)
             .output()
             .unwrap();
         assert!(
@@ -444,8 +442,8 @@ import os
 from pathlib import Path
 import sys
 
-root = Path(os.environ["PR_REVIEW_GH_FIXTURE"])
-scenario = os.environ["PR_REVIEW_GH_SCENARIO"]
+root = Path(os.environ["PRPR_GH_FIXTURE"])
+scenario = os.environ["PRPR_GH_SCENARIO"]
 args = sys.argv[1:]
 with (root / "calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")

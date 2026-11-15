@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use pr_review::model::{DraftComment, PrId, PullRequest};
+use prpr::model::{DraftComment, PrId, PullRequest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,7 +118,7 @@ pub fn clear_attempt(root: &Path, pr: &PullRequest) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pr_review::model::Side;
+    use prpr::model::Side;
 
     fn pr(sha: &str) -> PullRequest {
         PullRequest {
