@@ -32,6 +32,7 @@ fn fixture() -> (PrOverview, ReviewData) {
         deletions: 1,
     };
     let review = ReviewData {
+        source: prpr::model::ReviewSource::GitHub,
         pr: PullRequest {
             id: overview.id.clone(),
             title: overview.title.clone(),
@@ -105,6 +106,14 @@ fn provider_fixture_child() {
         return;
     }
     let (mut overview, mut review) = fixture();
+    if std::env::var("PRPR_AI_LOCAL").as_deref() == Ok("true") {
+        review.source = prpr::model::ReviewSource::Local {
+            repository: root.clone(),
+            label: "jj diff -r @".into(),
+        };
+        overview.id.repo = "local/review".into();
+        review.pr.id = overview.id.clone();
+    }
     let mut config = AiConfig {
         provider: if std::env::var("PRPR_AI_PROVIDER").unwrap() == "claude" {
             Provider::Claude
@@ -401,6 +410,8 @@ fn calls(root: &Path) -> Vec<serde_json::Value> {
 #[cfg(unix)]
 fn run_fixture(scenario: &str, provider: &str) -> Vec<serde_json::Value> {
     use std::{os::unix::fs::PermissionsExt, process::Command};
+    let local = scenario.starts_with("local_");
+    let scenario = scenario.strip_prefix("local_").unwrap_or(scenario);
     let directory = tempfile::tempdir().unwrap();
     for program in ["codex", "claude"] {
         let path = directory.path().join(program);
@@ -415,6 +426,7 @@ fn run_fixture(scenario: &str, provider: &str) -> Vec<serde_json::Value> {
         .args(["--exact", "provider_fixture_child", "--nocapture"])
         .env("PATH", std::env::join_paths(path).unwrap())
         .env("PRPR_AI_SCENARIO", scenario)
+        .env("PRPR_AI_LOCAL", local.to_string())
         .env("PRPR_AI_PROVIDER", provider)
         .env("PRPR_AI_FIXTURE", directory.path())
         .env("XDG_CONFIG_HOME", directory.path().join("xdg"))
@@ -579,7 +591,7 @@ payload = json.loads(prompt.split('\n', 1)[1])
 data = payload.get('evidence', payload)['untrusted_review_data']
 response = {
     'summary': 'Retries respect the request deadline.',
-    'intent': {'text': 'Bound retries by the deadline.', 'basis': 'author_description' if data['pr']['description'].strip() else 'inferred_from_diff'},
+    'intent': {'text': 'Bound retries by the deadline.', 'basis': 'author_description' if data.get('change', data.get('pr'))['description'].strip() else 'inferred_from_diff'},
     'changes': [{'title': 'Bound retries', 'detail': 'The delay now fits the remaining budget.', 'files': ['src/lib.rs']}],
     'reading_order': [{'path': 'src/lib.rs', 'line': 8, 'side': 'RIGHT', 'reason': 'Start with the changed delay.'}],
     'risks': [{'title': 'Exhausted budget', 'detail': 'Check the zero-budget boundary.', 'files': ['src/lib.rs']}],
@@ -643,4 +655,37 @@ fn focused_questions_preserve_both_diff_sides_and_complete_hunks() {
     assert!(both.patch.contains("later"));
     review.files[0].patch = Some("@@ -1,2 +1,2 @@\n-bad\n+incomplete".into());
     assert!(assistant::Focus::from_file(&review.files[0], 0, None).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn local_diffs_use_the_same_structured_guide_and_question_providers() {
+    for provider in ["codex", "claude"] {
+        let guide = run_fixture("local_success", provider);
+        let payload: serde_json::Value = serde_json::from_str(
+            guide[0]["prompt"]
+                .as_str()
+                .unwrap()
+                .split_once('\n')
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(payload["untrusted_review_data"]["source"]["kind"], "local");
+        let answers = run_fixture("local_ask_success", provider);
+        assert_eq!(answers.len(), 2);
+        let payload: serde_json::Value = serde_json::from_str(
+            answers[0]["prompt"]
+                .as_str()
+                .unwrap()
+                .split_once('\n')
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert_eq!(
+            payload["evidence"]["untrusted_review_data"]["source"]["kind"],
+            "local"
+        );
+    }
 }

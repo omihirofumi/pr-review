@@ -2,7 +2,7 @@
 
 > Fully vibe-coded and intended for personal use.
 
-A standalone Rust + Ratatui app for reviewing GitHub pull requests with Jujutsu and Helix.
+A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Jujutsu changes with Helix and optional Codex or Claude explanations.
 
 Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal.
 
@@ -27,6 +27,67 @@ From the source checkout:
 gh auth login
 cargo install --path . --locked
 ```
+
+## Local Jujutsu review
+
+```sh
+cd /path/to/your/repository
+prpr diff                       # Current working-copy change (@)
+prpr diff -r @-                 # Another revision or connected revset
+prpr diff --from main --to @    # Compare two revisions
+prpr diff --agent codex          # Override the AI provider for this launch
+```
+
+Local reviews open directly in Diff. Use the same `j/k`, `gg/ge`, `[/]`, `v/x`, `+/-`, `F`, and `o/gf` controls as PR reviews. `Q` asks about selected lines or the current hunk; `E` explains it. `1` opens Overview, where `a` prepares a structured reading guide. AI configuration is shared with PR reviews.
+
+Press `c` to write a local note on a line or range, then `Ctrl-s` to save. `N` lists notes: `c` replies, `o` jumps to the source, and `d` deletes the selected note and its replies. `t` toggles inline notes; `T` reads full threads. Local notes persist across restarts. After `r` refreshes a native `prpr diff` review, notes on changed files are marked outdated rather than attached to different code.
+
+`o` opens the actual working file when it still matches the reviewed right-hand source. Removed lines, historical versions, and files edited since loading open a read-only snapshot instead. Binary or oversized files remain listed without text/AI context; text is limited to 2 MiB per side and 100000 lines. Local review does not require GitHub authentication and has no GitHub submission action.
+
+### Launch from `jj diff`
+
+Register prpr as a Jujutsu external viewer:
+
+```sh
+jj config set --user merge-tools.prpr.program prpr
+jj config set --user merge-tools.prpr.diff-args '["difftool", "$left", "$right"]'
+jj diff --tool prpr
+jj diff -r @- --tool prpr
+```
+
+To make plain `jj diff` use prpr as well:
+
+```sh
+jj config set --user ui.diff-formatter prpr
+```
+
+The external viewer reads the exact temporary directories supplied by Jujutsu. Reopen `jj diff` to refresh that snapshot; use native `prpr diff` for refreshes inside the TUI. Repository association uses the launching shell's `PWD`. When a wrapper uses `jj -R` to review a different repository, add `--repo-root /absolute/repository/path` to that wrapper's `difftool` arguments.
+
+## Review with an agent
+
+Install the bundled skill for Codex and Claude:
+
+```sh
+prpr skill install
+```
+
+`prpr skill install --force` replaces an older copy when updating the skill. It installs `prpr-review/SKILL.md` under `~/.agents/skills` and `~/.claude/skills`. Start a new agent session if it has already cached its skill list. With the TUI open, ask the agent **“Use prpr-review to read my comments and reply.”**
+
+Local `jj` reviews use `c` for notes. In a GitHub PR, use `C` for an agent-facing local note; lowercase `c` retains its GitHub draft behavior. Agent replies appear inline and in `N`, and stay local.
+
+Agents communicate with the running viewer through JSON CLI commands:
+
+```sh
+prpr session list --json
+prpr session review --repo .
+prpr session review --repo . --file src/main.rs --include-patch
+prpr session context --repo .
+prpr session comment list --repo .
+prpr session comment add --repo . --reply-to note-ID --body 'Explanation' --author codex
+prpr session navigate --repo . --file src/main.rs --new-line 42
+```
+
+Use `--session ID` when several viewers share a repository. If the viewer uses `--workspace-root`, pass the same option to session commands. Sessions use private local Unix sockets; no daemon or network listener is needed. `comment list` includes local notes, GitHub comments, and saved GitHub drafts separately. Replies target local note IDs. Commands reject unknown files, invisible line ranges, and outdated note anchors. Reading comments or replying to them does not authorize an agent to edit code or publish a GitHub review.
 
 ## Quick start
 

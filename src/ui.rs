@@ -292,6 +292,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     } else if app.overview.is_some() && app.review.is_none() {
         " 1 Overview  2 Diff  Tab views  r retry  ? keys "
+    } else if app.local_spec.is_some() {
+        " v/x select  +/- context  F full  c note  N notes  Q ask  E explain  o open  ? "
     } else if app.review.is_some() && area.width < 76 {
         " +/- context  F full  B GitHub  Q ask  ? keys "
     } else if app.review.is_some() && area.width < 105 {
@@ -431,7 +433,11 @@ fn draw_overview_header(frame: &mut Frame, app: &App, overview: &OverviewState, 
         Paragraph::new(Line::from(vec![
             Span::styled(format!(" {label}"), Style::default().fg(ACCENT).bold()),
             Span::styled(
-                format!("   {} #{}", metadata.id.repo, metadata.id.number),
+                if app.local_spec.is_some() {
+                    "   local review".into()
+                } else {
+                    format!("   {} #{}", metadata.id.repo, metadata.id.number)
+                },
                 Style::default().fg(TEXT),
             ),
         ]))
@@ -572,12 +578,16 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    format!(
-                        " {} · {}{}",
-                        metadata.author,
-                        metadata.state.to_lowercase(),
-                        if metadata.draft { " · draft" } else { "" }
-                    ),
+                    if app.local_spec.is_some() {
+                        " Local changes".into()
+                    } else {
+                        format!(
+                            " {} · {}{}",
+                            metadata.author,
+                            metadata.state.to_lowercase(),
+                            if metadata.draft { " · draft" } else { "" }
+                        )
+                    },
                     Style::default().fg(TEXT),
                 ),
                 Span::styled(
@@ -593,7 +603,11 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         details,
     );
     let mut description_lines = vec![Line::from(Span::styled(
-        " AUTHOR DESCRIPTION · b opens full text",
+        if app.local_spec.is_some() {
+            " CHANGE DESCRIPTION · b opens full text"
+        } else {
+            " AUTHOR DESCRIPTION · b opens full text"
+        },
         Style::default().fg(MUTED),
     ))];
     description_lines.extend(wrapped.into_iter().take(preview).map(|mut line| {
@@ -610,7 +624,12 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
             if app.diff_loading {
                 " Waiting for the diff to prepare the AI guide…".to_owned()
             } else {
-                " AI guide is ready to generate · a explains this PR".to_owned()
+                if app.local_spec.is_some() {
+                    " AI guide is ready to generate · a explains this change"
+                } else {
+                    " AI guide is ready to generate · a explains this PR"
+                }
+                .to_owned()
             },
             ACCENT,
         ),
@@ -1525,7 +1544,7 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
         || file.filename.clone(),
         |old| format!("{old} → {}", file.filename),
     );
-    let comments = threads(&review.data.comments)
+    let comments = threads(&review.comments())
         .iter()
         .filter(|thread| thread.matches_file(file))
         .map(|thread| thread.replies.len() + 1)
@@ -1569,20 +1588,31 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
         ""
     };
     frame.render_widget(
-        Paragraph::new(format!(
-            " {} · {drafts} draft{} · {}{context_label}",
-            if comments_loading {
-                "comments loading".into()
-            } else {
-                format!("{comments} comments")
-            },
-            if drafts == 1 { "" } else { "s" },
-            if review.show_comments {
-                "shown"
-            } else {
-                "hidden"
-            }
-        ))
+        Paragraph::new(if review.data.source.is_local() {
+            format!(
+                " {comments} local notes · {}{context_label}",
+                if review.show_comments {
+                    "shown"
+                } else {
+                    "hidden"
+                }
+            )
+        } else {
+            format!(
+                " {} · {drafts} draft{} · {}{context_label}",
+                if comments_loading {
+                    "comments loading".into()
+                } else {
+                    format!("{comments} comments")
+                },
+                if drafts == 1 { "" } else { "s" },
+                if review.show_comments {
+                    "shown"
+                } else {
+                    "hidden"
+                }
+            )
+        })
         .style(Style::default().fg(MUTED)),
         metadata,
     );
@@ -1610,7 +1640,8 @@ fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
         return rows;
     };
     let lines = review.current_lines();
-    let all_threads = threads(&review.data.comments);
+    let comments = review.comments();
+    let all_threads = threads(&comments);
     let mut anchored = BTreeMap::<usize, Vec<&Thread<'_>>>::new();
     let mut unmatched = Vec::new();
     for thread in all_threads
@@ -2355,7 +2386,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 84,
                 32,
             );
-            frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nCONTEXT\n  +               Reveal 20 more lines around this hunk\n  -               Collapse this hunk's expanded context\n  F               Toggle full file / diff context\n  B               Open selected PR on GitHub\n                  Available in list, Overview, and Diff\n  Expanded lines  Read, select, ask AI, or open in Helix\n  GitHub comments Stay inside the original diff hunks\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
+            frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nCONTEXT\n  +               Reveal 20 more lines around this hunk\n  -               Collapse this hunk's expanded context\n  F               Toggle full file / diff context\n  B               Open selected PR on GitHub\n                  Available in list, Overview, and Diff\n  Expanded lines  Read, select, ask AI, or open in Helix\n  GitHub comments Stay inside the original diff hunks\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               GitHub draft (PR) / local note (jj)\n  C               Local note in either mode\n  N               Notes, replies, and outdated notes\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  jj review       c note, Q ask, E explain, a guide\n  Agent access    prpr session --help\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
         }
         Dialog::Description { scroll } => {
             draw_description(frame, app, *scroll);
@@ -2369,7 +2400,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 frame.area().height.saturating_sub(4),
             );
             let mut lines = Vec::new();
-            for thread in threads(&review.data.comments) {
+            for thread in threads(&review.comments()) {
                 let location = thread.anchor().map_or_else(
                     || {
                         format!(
@@ -2455,6 +2486,80 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                     &mut state,
                 );
             }
+        }
+        Dialog::Note {
+            anchor,
+            reply_to,
+            input,
+        } => {
+            let inner = popup(
+                frame,
+                format!(
+                    " Local {} {}:{} / Ctrl-s save / Esc cancel ",
+                    if reply_to.is_some() { "reply" } else { "note" },
+                    anchor.path,
+                    anchor.line_label()
+                ),
+                100,
+                17,
+            );
+            draw_input(frame, input, inner);
+        }
+        Dialog::Notes { selected } => {
+            let inner = popup(
+                frame,
+                " Local notes / c reply / o jump / d delete thread / Esc closes ".into(),
+                110,
+                frame.area().height.saturating_sub(4),
+            );
+            let mut lines = Vec::new();
+            if let Some(review) = &app.review {
+                for (index, note) in review.notes.iter().enumerate() {
+                    lines.push(Line::styled(
+                        format!(
+                            "{} {} · {}:{} {:?} · {}{}",
+                            if index == *selected { ">" } else { " " },
+                            note.id,
+                            note.anchor.path,
+                            note.anchor.line_label(),
+                            note.anchor.side,
+                            note.author,
+                            if note.outdated { " · outdated" } else { "" }
+                        ),
+                        Style::default()
+                            .fg(if index == *selected { ACCENT } else { TEXT })
+                            .bold(),
+                    ));
+                    if let Some(parent) = &note.reply_to {
+                        lines.push(Line::from(format!("  reply to {parent}")));
+                    }
+                    lines.extend(markdown_text(&note.anchor.body, inner.width).lines);
+                    lines.push(Line::default());
+                }
+                if review.notes.is_empty() {
+                    lines.push(Line::from(
+                        "Select lines and press c (local diff) or C (PR) to leave a local note.",
+                    ));
+                }
+            }
+            let text = Text::from(lines);
+            let selected_line = app.review.as_ref().map_or(0, |review| {
+                review
+                    .notes
+                    .iter()
+                    .take(*selected)
+                    .map(|note| {
+                        2 + markdown_text(&note.anchor.body, inner.width).lines.len()
+                            + usize::from(note.reply_to.is_some())
+                    })
+                    .sum::<usize>()
+            });
+            frame.render_widget(
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .scroll((selected_line.min(u16::MAX as usize) as u16, 0)),
+                inner,
+            );
         }
         Dialog::Compose { draft, input, .. } => {
             let inner = popup(

@@ -7,7 +7,9 @@ use prpr::{
     assistant::{self, Chat},
     context::{self, FileContext, FullFile},
     diff::{self, DiffLine, LineKind},
+    local,
     model::*,
+    notes,
     settings::{self, Provider, Settings},
 };
 
@@ -115,6 +117,14 @@ impl TextInput {
 }
 
 pub enum Dialog {
+    Note {
+        anchor: DraftComment,
+        reply_to: Option<String>,
+        input: TextInput,
+    },
+    Notes {
+        selected: usize,
+    },
     Ask {
         input: TextInput,
         focus: Option<Box<assistant::Focus>>,
@@ -229,6 +239,7 @@ pub struct OverviewState {
 }
 
 pub struct ReviewState {
+    pub notes: Vec<notes::Note>,
     pub contexts: Vec<context::FileState>,
     pub data: ReviewData,
     pub lines: Vec<Vec<DiffLine>>,
@@ -255,6 +266,44 @@ pub struct EditorTarget {
 }
 
 impl ReviewState {
+    pub fn comments(&self) -> Vec<ReviewComment> {
+        let mut comments = self.data.comments.clone();
+        comments.extend(notes::comments(&self.notes));
+        comments
+    }
+
+    pub fn validate_note(&self, anchor: &DraftComment) -> Result<()> {
+        let index = self
+            .data
+            .files
+            .iter()
+            .position(|file| file.filename == anchor.path)
+            .ok_or_else(|| anyhow::anyhow!("File is outside this review"))?;
+        let start = anchor.start_line.unwrap_or(anchor.line);
+        if start == 0
+            || start > anchor.line
+            || anchor
+                .start_side
+                .as_ref()
+                .is_some_and(|side| *side != anchor.side)
+        {
+            bail!("Invalid note range");
+        }
+        let numbers = self.lines[index]
+            .iter()
+            .filter_map(|row| match anchor.side {
+                Side::Left => row.old_line,
+                Side::Right => row.new_line,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if u64::from(anchor.line) - u64::from(start) + 1 > numbers.len() as u64
+            || !(start..=anchor.line).all(|number| numbers.contains(&number))
+        {
+            bail!("Note range is outside the visible source; expand its context first");
+        }
+        Ok(())
+    }
+
     pub fn current_file(&self) -> Option<&ChangedFile> {
         self.data.files.get(self.selected_file)
     }
@@ -489,7 +538,7 @@ impl ReviewState {
         }
     }
 
-    fn comment_target(&self) -> Result<DraftComment> {
+    fn comment_target(&self, local_note: bool) -> Result<DraftComment> {
         let file = self
             .current_file()
             .ok_or_else(|| anyhow::anyhow!("No file is selected"))?;
@@ -534,7 +583,7 @@ impl ReviewState {
             start_side: multiline.then_some(common),
             body: String::new(),
         };
-        if !diff::validate_comment(file, &draft) {
+        if !local_note && !diff::validate_comment(file, &draft) {
             bail!(
                 "GitHub comments must stay inside one original diff hunk; use Q to ask about expanded context"
             );
@@ -649,6 +698,7 @@ impl ReviewState {
 }
 
 pub enum Action {
+    RefreshLocal,
     Browse(PrId),
     LoadContext(usize),
     PreviewGuide(PrId),
@@ -681,6 +731,8 @@ pub enum Action {
 }
 
 pub struct App {
+    pub local_spec: Option<local::Spec>,
+    pub local_contents: std::collections::BTreeMap<String, FileContext>,
     pub preview: PreviewState,
     pub chat: Chat,
     pub open_on_diff: bool,
@@ -710,6 +762,8 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            local_spec: None,
+            local_contents: Default::default(),
             preview: PreviewState::default(),
             chat: Chat::default(),
             open_on_diff: false,
@@ -854,7 +908,12 @@ impl App {
     pub fn loaded(&mut self, mut data: ReviewData) -> Result<()> {
         data.files
             .sort_by(|left, right| left.filename.cmp(&right.filename));
-        let drafts = store::load(&self.root, &data.pr)?;
+        let drafts = if data.source.is_local() {
+            Vec::new()
+        } else {
+            store::load(&self.root, &data.pr)?
+        };
+        let notes = notes::load(&self.root, &data)?;
         for draft in &drafts {
             if !data.files.iter().any(|f| diff::validate_comment(f, draft)) {
                 bail!(
@@ -882,6 +941,7 @@ impl App {
             self.repo = Some(data.pr.id.repo.clone());
         }
         self.review = Some(ReviewState {
+            notes,
             contexts,
             data,
             lines,
@@ -899,7 +959,9 @@ impl App {
         });
         self.tab = PageTab::Diff;
         self.goto_pending = false;
-        let pending = store::attempt(&self.root, &self.review.as_ref().unwrap().data.pr)?.is_some();
+        let review = self.review.as_ref().unwrap();
+        let pending = !review.data.source.is_local()
+            && store::attempt(&self.root, &review.data.pr)?.is_some();
         if pending {
             self.message("An earlier submission has an unknown result. V shows published reviews; u recovers it.", true);
         } else {
@@ -908,6 +970,51 @@ impl App {
                 false,
             );
         }
+        Ok(())
+    }
+
+    pub fn add_note(
+        &mut self,
+        anchor: DraftComment,
+        reply_to: Option<String>,
+        author: String,
+    ) -> Result<String> {
+        let review = self
+            .review
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Open a review first"))?;
+        if reply_to.is_none() {
+            review.validate_note(&anchor)?;
+        }
+        let mut notes = review.notes.clone();
+        let id = notes::add(&mut notes, &review.data, anchor, reply_to, author)?;
+        notes::update(&self.root, &review.data, &review.notes, &notes)?;
+        review.notes = notes;
+        Ok(id)
+    }
+
+    pub fn navigate(&mut self, path: &str, side: &Side, line: u32) -> Result<()> {
+        let review = self
+            .review
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Open a review first"))?;
+        let index = review
+            .data
+            .files
+            .iter()
+            .position(|file| file.filename == path)
+            .ok_or_else(|| anyhow::anyhow!("File is outside this review"))?;
+        let position = review.lines[index]
+            .iter()
+            .position(|row| prpr::thread::matches_anchor(row, side, line))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Line is outside the displayed context; expand it first")
+            })?;
+        review.selected_file = index;
+        review.positions[index] = position;
+        review.focus = Focus::Diff;
+        review.selection = None;
+        self.tab = PageTab::Diff;
         Ok(())
     }
 
@@ -946,6 +1053,26 @@ impl App {
                 _ => {}
             }
             return Ok(Action::None);
+        }
+        if self.local_spec.is_some() {
+            match key.code {
+                KeyCode::Char('r') if !self.busy => return Ok(Action::RefreshLocal),
+                KeyCode::Esc
+                    if self
+                        .review
+                        .as_ref()
+                        .is_none_or(|review| review.selection.is_none()) =>
+                {
+                    return Ok(Action::Quit);
+                }
+                KeyCode::Char('B' | '#' | 'V' | 'u' | 's' | 'w')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.message("Local review. c adds a note; N shows notes; Q asks; E explains; r refreshes.", false);
+                    return Ok(Action::None);
+                }
+                _ => {}
+            }
         }
         if key.code == KeyCode::Char('B')
             && !key
@@ -1213,9 +1340,29 @@ impl App {
                     self.message("There is no unresolved submission for this PR", false);
                 }
             }
+            KeyCode::Char('N') => self.dialog = Some(Dialog::Notes { selected: 0 }),
+            KeyCode::Char('D') if review.data.source.is_local() => {
+                self.dialog = Some(Dialog::Notes { selected: 0 })
+            }
             KeyCode::Char('D') => self.dialog = Some(Dialog::Drafts { selected: 0 }),
+            KeyCode::Char('C') if !self.busy => {
+                let anchor = review.comment_target(true)?;
+                self.dialog = Some(Dialog::Note {
+                    anchor,
+                    reply_to: None,
+                    input: TextInput::default(),
+                });
+            }
+            KeyCode::Char('c') if !self.busy && review.data.source.is_local() => {
+                let anchor = review.comment_target(true)?;
+                self.dialog = Some(Dialog::Note {
+                    anchor,
+                    reply_to: None,
+                    input: TextInput::default(),
+                });
+            }
             KeyCode::Char('c') if !self.busy => {
-                let draft = review.comment_target()?;
+                let draft = review.comment_target(false)?;
                 self.dialog = Some(Dialog::Compose {
                     draft,
                     editing: None,
@@ -1354,6 +1501,9 @@ impl App {
                     true,
                 );
                 return Ok(Action::None);
+            }
+            if review.data.source.is_local() {
+                return Ok(Action::OpenEditor(review.editor_target()?));
             }
             if !prepare_only && review.workspace.is_some() {
                 return Ok(Action::OpenEditor(review.editor_target()?));
@@ -1640,6 +1790,98 @@ impl App {
                 scroll_key(&mut scroll, key);
                 Some(Dialog::Threads { scroll })
             }
+            Dialog::Note {
+                mut anchor,
+                reply_to,
+                mut input,
+            } => {
+                if save {
+                    anchor.body = input.text.trim().to_owned();
+                    match self.add_note(anchor.clone(), reply_to.clone(), "user".into()) {
+                        Ok(_) => {
+                            self.message(
+                                "Local note saved. N shows notes and replies; t toggles them.",
+                                false,
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            self.dialog = Some(Dialog::Note {
+                                anchor,
+                                reply_to,
+                                input,
+                            });
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    input.key(key);
+                    Some(Dialog::Note {
+                        anchor,
+                        reply_to,
+                        input,
+                    })
+                }
+            }
+            Dialog::Notes { mut selected } => {
+                let review = self.review.as_mut().unwrap();
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selected = (selected + 1).min(review.notes.len().saturating_sub(1))
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Char('d') if selected < review.notes.len() => {
+                        let id = review.notes[selected].id.clone();
+                        let mut notes = review.notes.clone();
+                        let mut removed = std::collections::HashSet::from([id]);
+                        loop {
+                            let old_len = removed.len();
+                            for note in &notes {
+                                if note
+                                    .reply_to
+                                    .as_ref()
+                                    .is_some_and(|id| removed.contains(id))
+                                {
+                                    removed.insert(note.id.clone());
+                                }
+                            }
+                            if removed.len() == old_len {
+                                break;
+                            }
+                        }
+                        notes.retain(|note| !removed.contains(&note.id));
+                        notes::update(&self.root, &review.data, &review.notes, &notes)?;
+                        review.notes = notes;
+                        selected = selected.min(review.notes.len().saturating_sub(1));
+                    }
+                    KeyCode::Char('c') if selected < review.notes.len() => {
+                        let note = &review.notes[selected];
+                        if note.outdated {
+                            bail!(
+                                "This note is outdated; add a note on the current source instead"
+                            );
+                        }
+                        let mut anchor = note.anchor.clone();
+                        anchor.body.clear();
+                        self.dialog = Some(Dialog::Note {
+                            anchor,
+                            reply_to: Some(note.id.clone()),
+                            input: TextInput::default(),
+                        });
+                        return Ok(Action::None);
+                    }
+                    KeyCode::Char('o') | KeyCode::Enter if selected < review.notes.len() => {
+                        let note = review.notes[selected].clone();
+                        if note.outdated {
+                            bail!("This note is outdated");
+                        }
+                        self.navigate(&note.anchor.path, &note.anchor.side, note.anchor.line)?;
+                        return Ok(Action::None);
+                    }
+                    _ => {}
+                }
+                Some(Dialog::Notes { selected })
+            }
             Dialog::Drafts { mut selected } => {
                 let review = self.review.as_mut().unwrap();
                 match key.code {
@@ -1786,6 +2028,7 @@ fn scroll_key(scroll: &mut u16, key: KeyEvent) {
 
 pub fn demo_data() -> ReviewData {
     ReviewData {
+        source: prpr::model::ReviewSource::GitHub,
         pr: PullRequest { id: PrId { repo: "example/service".into(), number: 42 }, title: "Keep request retries within the deadline".into(), body: "## Motivation\nRetries currently ignore the overall request deadline.\n\nThis change bounds retry waits by the remaining time and adds a regression test.\n\nReview the zero-budget case and the error returned to callers.".into(), url: "https://github.com/example/service/pull/42".into(), author: "alex".into(), head_sha: "0123456789abcdef0123456789abcdef01234567".into(), base_sha: "abcdef0123456789abcdef0123456789abcdef01".into(), draft: false },
         files: vec![
             ChangedFile { filename: "src/client.rs".into(), previous_filename: None, status: "modified".into(), additions: 5, deletions: 2, patch: Some("@@ -18,6 +18,9 @@ impl Client {\n     pub fn retry(&self, budget: Duration) -> Result<Response> {\n-        let delay = self.retry_delay;\n-        sleep(delay);\n+        let delay = self.retry_delay.min(budget);\n+        if delay.is_zero() {\n+            return Err(Error::DeadlineExceeded);\n+        }\n+        sleep(delay);\n         self.send()\n     }\n }".into()) },

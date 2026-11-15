@@ -1116,8 +1116,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
+name = "proc-macro2"
+version = "1.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
 name = "prpr"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1125,20 +1134,13 @@ dependencies = [
  "crossterm",
  "directories",
  "ratatui",
+ "rustix",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "toml",
  "tui-markdown",
-]
-
-[[package]]
-name = "proc-macro2"
-version = "1.0.107"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
-dependencies = [
- "unicode-ident",
 ]
 
 [[package]]
@@ -1500,6 +1502,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"

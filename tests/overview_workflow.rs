@@ -1122,3 +1122,61 @@ fn github_browser_shortcut_uses_selected_pr_in_all_views_and_does_not_intercept_
     assert!(matches!(press(&mut app, 'B').unwrap(), Action::None));
     assert_eq!(app.filter, "B");
 }
+
+#[test]
+fn local_review_keys_save_notes_reply_and_keep_github_submission_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    let mut data = app::demo_data();
+    data.source = prpr::model::ReviewSource::Local {
+        repository: directory.path().into(),
+        label: "jj diff".into(),
+    };
+    app.local_spec = Some(prpr::local::Spec::Jj {
+        repository: directory.path().into(),
+        revision: None,
+        from: None,
+        to: None,
+    });
+    app.loaded(data).unwrap();
+    let review = app.review.as_mut().unwrap();
+    review.positions[0] = review.lines[0]
+        .iter()
+        .position(|row| row.new_line.is_some())
+        .unwrap();
+    press(&mut app, 'c').unwrap();
+    for character in "Why??".chars() {
+        press(&mut app, character).unwrap();
+    }
+    app.key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))
+        .unwrap();
+    app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let review = app.review.as_ref().unwrap();
+    assert_eq!(review.notes[0].anchor.body, "Why?");
+    assert!(review.drafts.is_empty());
+    assert!(screen(&mut app).contains("Why?"));
+    press(&mut app, 'N').unwrap();
+    assert!(screen(&mut app).contains("Local notes"));
+    press(&mut app, 'c').unwrap();
+    for character in "Because.".chars() {
+        press(&mut app, character).unwrap();
+    }
+    app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.review.as_ref().unwrap().notes[1].reply_to.is_some());
+    for character in ['s', 'B', 'V', '#', 'w'] {
+        assert!(matches!(press(&mut app, character).unwrap(), Action::None));
+        assert!(app.dialog.is_none());
+    }
+    press(&mut app, 't').unwrap();
+    assert!(!screen(&mut app).contains("Because."));
+    press(&mut app, 'N').unwrap();
+    press(&mut app, 'd').unwrap();
+    assert!(app.review.as_ref().unwrap().notes.is_empty());
+    assert!(
+        prpr::notes::load(directory.path(), &app.review.as_ref().unwrap().data)
+            .unwrap()
+            .is_empty()
+    );
+}

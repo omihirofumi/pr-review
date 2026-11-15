@@ -1,7 +1,8 @@
+#[path = "session.rs"]
+mod session;
 use crate::{app, store, ui};
 
 use std::{
-    io,
     path::PathBuf,
     process::Command,
     sync::{
@@ -14,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
     execute,
@@ -22,7 +23,7 @@ use crossterm::{
 };
 use directories::ProjectDirs;
 use prpr::{
-    analysis, assistant, context, github,
+    analysis, assistant, context, github, local,
     model::*,
     settings::{self, Provider},
     workspace,
@@ -31,14 +32,54 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::{Action, App};
 
+#[derive(Subcommand)]
+enum Mode {
+    /// Review local Jujutsu changes
+    Diff(DiffArgs),
+    /// View two directories supplied by jj diff --tool
+    Difftool {
+        left: PathBuf,
+        right: PathBuf,
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+    },
+    /// Inspect and annotate a running review without opening another TUI
+    Session(session::Args),
+    /// Install the live review skill for Codex and Claude
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+    Install {
+        #[arg(long, help = "Replace an existing skill file")]
+        force: bool,
+    },
+}
+
+#[derive(ClapArgs)]
+struct DiffArgs {
+    #[arg(short = 'r', long, conflicts_with_all = ["from", "to"])]
+    revision: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    to: Option<String>,
+}
+
 #[derive(Parser)]
 #[command(
     name = "prpr",
     bin_name = "prpr",
     version,
-    about = "Review the current repository’s GitHub pull requests with Jujutsu and Helix"
+    about = "Review GitHub PRs and local Jujutsu changes with Helix and AI explanations"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Mode>,
     #[arg(help = "PR URL or number; omit to browse the current repository")]
     target: Option<String>,
     #[arg(
@@ -51,6 +92,7 @@ struct Args {
     search: Option<String>,
     #[arg(
         long,
+        global = true,
         help = "Directory for isolated review workspaces and local drafts"
     )]
     workspace_root: Option<PathBuf>,
@@ -58,12 +100,18 @@ struct Args {
     demo: bool,
     #[arg(
         long,
+        global = true,
         help = "Configuration file; defaults to ~/.config/prpr/config.toml"
     )]
     config: Option<PathBuf>,
-    #[arg(long, value_enum, help = "AI explanation provider for this launch")]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = "AI explanation provider for this launch"
+    )]
     agent: Option<Provider>,
-    #[arg(long, help = "AI model override for this launch")]
+    #[arg(long, global = true, help = "AI model override for this launch")]
     model: Option<String>,
     #[arg(long, help = "Print the configuration path and exit")]
     config_path: bool,
@@ -71,7 +119,7 @@ struct Args {
 
 impl Args {
     fn resolve(mut self) -> Result<(Self, Option<PrId>)> {
-        if self.demo {
+        if self.demo || self.command.is_some() {
             return Ok((self, None));
         }
         let target = self
@@ -88,6 +136,10 @@ impl Args {
 }
 
 pub(crate) enum JobResult {
+    Local {
+        generation: u64,
+        result: Result<local::Snapshot>,
+    },
     Inbox(Result<Vec<PrSummary>>),
     FileContext {
         generation: u64,
@@ -147,7 +199,34 @@ pub(crate) enum JobResult {
     },
 }
 
-type Tui = Terminal<CrosstermBackend<io::Stdout>>;
+type Tui = Terminal<CrosstermBackend<std::fs::File>>;
+
+fn tty() -> std::io::Result<std::fs::File> {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let name = rustix::termios::ttyname(std::io::stderr(), Vec::new())
+        .or_else(|_| rustix::termios::ttyname(std::io::stdin(), Vec::new()));
+    let path = name.as_ref().map_or_else(
+        |_| std::path::Path::new("/dev/tty"),
+        |name| std::path::Path::new(OsStr::from_bytes(name.as_bytes())),
+    );
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+}
+
+fn data_root(args: &Args) -> Result<PathBuf> {
+    let root = args.workspace_root.clone().map(Ok).unwrap_or_else(|| {
+        ProjectDirs::from("dev", "prpr", "prpr")
+            .map(|dirs| dirs.data_local_dir().to_path_buf())
+            .context("Cannot find data directory; pass --workspace-root")
+    })?;
+    Ok(if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()?.join(root)
+    })
+}
 
 #[derive(Default)]
 pub(crate) struct Runtime {
@@ -206,17 +285,56 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        );
+        if let Ok(mut output) = tty() {
+            let _ = execute!(
+                output,
+                DisableBracketedPaste,
+                LeaveAlternateScreen,
+                crossterm::cursor::Show
+            );
+        }
     }
 }
 
 pub fn run() -> Result<()> {
     let args = Args::parse();
+    if matches!(&args.command, Some(Mode::Difftool { .. })) {
+        use std::{io::IsTerminal, os::unix::process::CommandExt};
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            let error = Command::new(std::env::current_exe()?)
+                .args(std::env::args_os().skip(1))
+                .stdin(std::process::Stdio::from(tty()?))
+                .stdout(std::process::Stdio::from(tty()?))
+                .stderr(std::process::Stdio::from(tty()?))
+                .exec();
+            return Err(error).context("Cannot attach the diff viewer to the terminal");
+        }
+    }
+    if let Some(Mode::Skill {
+        command: SkillCommand::Install { force },
+    }) = &args.command
+    {
+        let home = directories::BaseDirs::new().context("Cannot find the home directory")?;
+        for relative in [".agents/skills/prpr-review", ".claude/skills/prpr-review"] {
+            let directory = home.home_dir().join(relative);
+            std::fs::create_dir_all(&directory)?;
+            let path = directory.join("SKILL.md");
+            let content = include_str!("../skills/prpr-review/SKILL.md");
+            if !force && path.exists() && std::fs::read_to_string(&path)? != content {
+                bail!(
+                    "Existing skill differs at {}; use --force to replace it",
+                    path.display()
+                );
+            }
+            std::fs::write(&path, content)?;
+            println!("Installed {}", path.display());
+        }
+        return Ok(());
+    }
+    let root = data_root(&args)?;
+    if let Some(Mode::Session(command)) = &args.command {
+        return session::run(command, &root);
+    }
     let config_path = args
         .config
         .clone()
@@ -235,20 +353,34 @@ pub fn run() -> Result<()> {
     }
     settings.ai.validate()?;
     let (args, target) = args.resolve()?;
-    let root = args.workspace_root.clone().map(Ok).unwrap_or_else(|| {
-        ProjectDirs::from("dev", "prpr", "prpr")
-            .map(|p| p.data_local_dir().to_path_buf())
-            .context("Cannot find data directory; pass --workspace-root")
-    })?;
-    let root = if root.is_absolute() {
-        root
-    } else {
-        std::env::current_dir()?.join(root)
-    };
     let mut app = App::new(root, args.demo);
     app.repo = args.repo.clone();
     app.settings = settings;
     app.config_path = Some(config_path);
+    let cwd = std::env::current_dir()?;
+    let origin = match &args.command {
+        Some(Mode::Difftool { repo_root, .. }) => repo_root
+            .clone()
+            .or_else(|| std::env::var_os("PWD").map(PathBuf::from))
+            .unwrap_or(cwd.clone()),
+        _ => cwd.clone(),
+    };
+    let repository = local::repository(&origin).unwrap_or(origin.canonicalize()?);
+    app.local_spec = match &args.command {
+        Some(Mode::Diff(options)) => Some(local::Spec::Jj {
+            repository: repository.clone(),
+            revision: options.revision.clone(),
+            from: options.from.clone(),
+            to: options.to.clone(),
+        }),
+        Some(Mode::Difftool { left, right, .. }) => Some(local::Spec::Directories {
+            repository: repository.clone(),
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => None,
+    };
+    let session = session::Server::start(&app.root, repository)?;
     if args.demo {
         let demo = app::demo_data();
         app.repo = Some(demo.pr.id.repo.clone());
@@ -267,22 +399,33 @@ pub fn run() -> Result<()> {
     let panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        );
+        if let Ok(mut output) = tty() {
+            let _ = execute!(
+                output,
+                DisableBracketedPaste,
+                LeaveAlternateScreen,
+                crossterm::cursor::Show
+            );
+        }
         panic_hook(info);
     }));
     enable_raw_mode()?;
     let _guard = TerminalGuard;
-    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    terminal.clear()?;
+    execute!(tty()?, EnterAlternateScreen, EnableBracketedPaste)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(tty()?))?;
+    terminal.resize(terminal.size()?.into())?;
     let (sender, receiver) = mpsc::channel();
     let mut runtime = Runtime::default();
-    if let Some(id) = target {
+    if app.local_spec.is_some() {
+        dispatch(
+            Action::RefreshLocal,
+            &mut app,
+            &args,
+            &sender,
+            &mut terminal,
+            &mut runtime,
+        )?;
+    } else if let Some(id) = target {
         dispatch(
             Action::LoadPr(id),
             &mut app,
@@ -302,6 +445,7 @@ pub fn run() -> Result<()> {
         )?;
     }
     loop {
+        session.poll(&mut app);
         while let Ok(result) = receiver.try_recv() {
             let Some(result) = apply_background(result, &mut app, &sender, &mut runtime) else {
                 continue;
@@ -373,7 +517,8 @@ pub fn run() -> Result<()> {
                 | JobResult::Prepared {
                     result: Err(error), ..
                 } => app.message(format!("{error:#}"), true),
-                JobResult::Overview { .. }
+                JobResult::Local { .. }
+                | JobResult::Overview { .. }
                 | JobResult::Diff { .. }
                 | JobResult::Comments { .. }
                 | JobResult::Analysis { .. }
@@ -406,7 +551,8 @@ pub fn run() -> Result<()> {
                 },
                 Event::Paste(text) => {
                     if let Some(
-                        app::Dialog::Compose { input, .. }
+                        app::Dialog::Note { input, .. }
+                        | app::Dialog::Compose { input, .. }
                         | app::Dialog::Submit { input, .. }
                         | app::Dialog::OpenPr { input }
                         | app::Dialog::Ask { input, .. },
@@ -430,6 +576,52 @@ pub(crate) fn apply_background(
     runtime: &mut Runtime,
 ) -> Option<JobResult> {
     match result {
+        JobResult::Local { generation, result } => {
+            if generation != app.generation {
+                return None;
+            }
+            app.busy = false;
+            match result {
+                Ok(snapshot) => {
+                    let previous = app.review.as_ref().map(|review| {
+                        (
+                            app.tab,
+                            review.show_comments,
+                            review.current_file().map(|file| file.filename.clone()),
+                            review.anchor(),
+                        )
+                    });
+                    let mut metadata = overview_from_review(&snapshot.data);
+                    metadata.state = "local".into();
+                    app.open_on_diff = true;
+                    app.opened(metadata);
+                    app.local_contents = snapshot.contents;
+                    if let Err(error) = app.accept_diff(snapshot.data) {
+                        app.diff_loading = false;
+                        app.diff_error = Some(format!("{error:#}"));
+                        app.message(format!("Cannot load local review: {error:#}"), true);
+                        return None;
+                    }
+                    if let Some((tab, shown, path, anchor)) = previous {
+                        if let (Some(path), Some((side, line))) = (path, anchor) {
+                            let _ = app.navigate(&path, &side, line);
+                        }
+                        if let Some(review) = &mut app.review {
+                            review.show_comments = shown;
+                        }
+                        app.tab = tab;
+                    }
+                    app.message(
+                        "Local review. c note · N notes · Q ask · E explain · a guide · r refresh",
+                        false,
+                    );
+                    if app.settings.ai.auto_explain {
+                        start_analysis(app, sender, runtime, false);
+                    }
+                }
+                Err(error) => app.message(format!("Cannot load local diff: {error:#}"), true),
+            }
+        }
         JobResult::Browser {
             generation,
             id,
@@ -762,6 +954,15 @@ fn start_context(app: &mut App, sender: &mpsc::Sender<JobResult>, index: usize) 
         .get(index)
         .context("Choose a file")?
         .clone();
+    if review.data.source.is_local() {
+        let source = app
+            .local_contents
+            .get(&file.filename)
+            .context("Full text is unavailable for this file")?
+            .clone();
+        review.accept_context(index, source)?;
+        return Ok(());
+    }
     if app.demo {
         let source = sample_context(&file);
         review.accept_context(index, source)?;
@@ -867,7 +1068,7 @@ fn start_question(
         .overview
         .as_ref()
         .map(|state| state.metadata.clone())
-        .unwrap_or_else(|| demo_overview(&review));
+        .unwrap_or_else(|| overview_from_review(&review));
     let config = app.settings.ai.clone();
     if config.provider == Provider::None {
         bail!("Choose an agent with A before asking");
@@ -875,7 +1076,7 @@ fn start_question(
     runtime.stop_ask();
     let scope = focus
         .as_ref()
-        .map_or_else(|| "Entire PR".into(), |focus| focus.label.clone());
+        .map_or_else(|| "Entire changeset".into(), |focus| focus.label.clone());
     app.chat.error = None;
     app.chat.pending = Some((question.clone(), scope));
     let generation = app.generation;
@@ -908,7 +1109,7 @@ fn start_question(
     Ok(())
 }
 
-fn demo_overview(data: &ReviewData) -> PrOverview {
+fn overview_from_review(data: &ReviewData) -> PrOverview {
     PrOverview {
         id: data.pr.id.clone(),
         title: data.pr.title.clone(),
@@ -933,6 +1134,20 @@ fn dispatch(
     terminal: &mut Tui,
     runtime: &mut Runtime,
 ) -> Result<()> {
+    if app.local_spec.is_some()
+        && matches!(
+            &action,
+            Action::Browse(_)
+                | Action::LoadPr(_)
+                | Action::LoadInbox
+                | Action::Prepare { .. }
+                | Action::Activity(_)
+                | Action::Submit { .. }
+                | Action::PreviewGuide(_)
+        )
+    {
+        bail!("This action requires a GitHub PR; local notes remain on this Mac");
+    }
     runtime.sync(app.generation);
     if runtime.provider != Some(app.settings.ai.provider) {
         runtime.stop_ai();
@@ -950,6 +1165,27 @@ fn dispatch(
         return Ok(());
     }
     match action {
+        Action::RefreshLocal => {
+            if app.busy {
+                return Ok(());
+            }
+            let spec = app.local_spec.clone().context("No local source is open")?;
+            app.generation = app.generation.wrapping_add(1);
+            runtime.sync(app.generation);
+            app.chat = Default::default();
+            app.busy = true;
+            let generation = app.generation;
+            let sender = sender.clone();
+            app.message("Loading local diff snapshot…", false);
+            thread::spawn(move || {
+                let _ = sender.send(JobResult::Local {
+                    generation,
+                    result: spec.load(),
+                });
+            });
+            return Ok(());
+        }
+
         Action::Browse(id) => {
             if app.demo {
                 app.message(
@@ -1003,6 +1239,9 @@ fn dispatch(
             runtime.pending_ai = None;
             return Ok(());
         }
+        Action::LoadDiff if app.local_spec.is_some() => {
+            return dispatch(Action::RefreshLocal, app, args, sender, terminal, runtime);
+        }
         Action::LoadDiff => {
             if let Some(overview) = &app.overview {
                 let id = overview.metadata.id.clone();
@@ -1015,7 +1254,7 @@ fn dispatch(
     if app.demo {
         if let Action::LoadPr(_) = action {
             let data = app::demo_data();
-            app.opened(demo_overview(&data));
+            app.opened(overview_from_review(&data));
             app.accept_diff(data)?;
             if let Some(overview) = &mut app.overview {
                 overview.ai = app::AiStatus::Ready(sample_guide(&app::demo_data()));
@@ -1114,7 +1353,8 @@ fn dispatch(
                 });
             });
         }
-        Action::None
+        Action::RefreshLocal
+        | Action::None
         | Action::Quit
         | Action::OpenEditor(_)
         | Action::LoadDiff
@@ -1134,26 +1374,66 @@ fn dispatch(
 fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarget) {
     let result = (|| -> Result<()> {
         let review = app.review.as_ref().context("No review is open")?;
-        let workspace = review
-            .workspace
-            .as_ref()
-            .context("Prepare the review workspace first")?;
         let line = target.line;
-        let path = workspace::editor_location(
-            &review.data.pr,
-            &target.file,
-            &target.side,
-            line,
-            workspace,
-        )?;
+        let snapshot_directory;
+        let (workspace, path) = if let ReviewSource::Local { repository, .. } = &review.data.source
+        {
+            local::validate_path(&target.file.filename)?;
+            let source = app
+                .local_contents
+                .get(&target.file.filename)
+                .context("Text source is unavailable for this file")?;
+            let text = if target.side == Side::Left {
+                &source.base
+            } else {
+                &source.head
+            };
+            let candidate = repository.join(&target.file.filename);
+            let editable = target.side == Side::Right
+                && candidate
+                    .canonicalize()
+                    .is_ok_and(|path| path.starts_with(repository))
+                && std::fs::read(&candidate).is_ok_and(|bytes| bytes == text.as_bytes());
+            if editable {
+                (repository.as_path(), candidate)
+            } else {
+                snapshot_directory = tempfile::tempdir()?;
+                let path = snapshot_directory.path().join(
+                    std::path::Path::new(&target.file.filename)
+                        .file_name()
+                        .context("Invalid filename")?,
+                );
+                std::fs::write(&path, text)?;
+                let mut permissions = std::fs::metadata(&path)?.permissions();
+                permissions.set_readonly(true);
+                std::fs::set_permissions(&path, permissions)?;
+                (repository.as_path(), path)
+            }
+        } else {
+            let workspace = review
+                .workspace
+                .as_ref()
+                .context("Prepare the review workspace first")?;
+            let path = workspace::editor_location(
+                &review.data.pr,
+                &target.file,
+                &target.side,
+                line,
+                workspace,
+            )?;
+            (workspace.as_path(), path)
+        };
         disable_raw_mode()?;
         execute!(
-            io::stdout(),
+            tty()?,
             DisableBracketedPaste,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         )?;
         let result = Command::new("hx")
+            .stdin(std::process::Stdio::from(tty()?))
+            .stdout(std::process::Stdio::from(tty()?))
+            .stderr(std::process::Stdio::from(tty()?))
             .current_dir(workspace)
             .arg(format!("+{line}"))
             .arg("--")
@@ -1162,8 +1442,8 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
             .context("Cannot start Helix; install hx and ensure it is on PATH");
         let resume = (|| -> Result<()> {
             enable_raw_mode()?;
-            execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
-            terminal.clear()?;
+            execute!(tty()?, EnterAlternateScreen, EnableBracketedPaste)?;
+            terminal.resize(terminal.size()?.into())?;
             Ok(())
         })();
         resume?;

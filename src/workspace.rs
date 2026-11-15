@@ -310,7 +310,7 @@ fn run(command: &mut Command) -> Result<String> {
     String::from_utf8(output(command)?).context("A command returned invalid UTF-8")
 }
 
-fn output(command: &mut Command) -> Result<Vec<u8>> {
+pub(crate) fn output(command: &mut Command) -> Result<Vec<u8>> {
     let name = command.get_program().to_string_lossy().into_owned();
     let result = bounded_output(command, Duration::from_secs(120))?;
     if !result.status.success() {

@@ -371,6 +371,7 @@ pub fn load_diff(overview: &PrOverview) -> Result<ReviewData> {
         overview.changed_files
     );
     Ok(ReviewData {
+        source: crate::model::ReviewSource::GitHub,
         pr: PullRequest {
             id: overview.id.clone(),
             title: overview.title.clone(),
@@ -455,6 +456,7 @@ pub fn load_review(id: &PrId) -> Result<ReviewData> {
         "PR changed while loading; reload to review its current diff"
     );
     Ok(ReviewData {
+        source: crate::model::ReviewSource::GitHub,
         pr: PullRequest {
             id: id.clone(),
             title: initial.title,
@@ -501,6 +503,10 @@ pub fn submit_review(
     body: &str,
     event: ReviewEvent,
 ) -> Result<String> {
+    ensure!(
+        !data.source.is_local(),
+        "Local reviews cannot be submitted to GitHub"
+    );
     let payload = review_payload(data, drafts, body, event)?;
     let current = fetch_pr(&data.pr.id)?;
     ensure!(current.state == "open", "This PR is no longer open");
@@ -829,6 +835,7 @@ mod tests {
 
     fn data() -> ReviewData {
         ReviewData {
+            source: crate::model::ReviewSource::GitHub,
             pr: PullRequest {
                 id: PrId {
                     repo: "owner/repo".into(),

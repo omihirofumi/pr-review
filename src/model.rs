@@ -85,9 +85,28 @@ impl ReviewComment {
 
 #[derive(Clone, Debug)]
 pub struct ReviewData {
+    pub source: ReviewSource,
     pub pr: PullRequest,
     pub files: Vec<ChangedFile>,
     pub comments: Vec<ReviewComment>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReviewSource {
+    #[default]
+    #[serde(rename = "github")]
+    GitHub,
+    Local {
+        repository: std::path::PathBuf,
+        label: String,
+    },
+}
+
+impl ReviewSource {
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
