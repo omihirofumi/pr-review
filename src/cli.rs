@@ -115,6 +115,12 @@ struct Args {
     model: Option<String>,
     #[arg(long, help = "Print the configuration path and exit")]
     config_path: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Print effective shortcut configuration and exit"
+    )]
+    print_keybindings: bool,
 }
 
 impl Args {
@@ -374,6 +380,10 @@ pub fn run() -> Result<()> {
         settings.ai.model = Some(model.clone());
     }
     settings.ai.validate()?;
+    if args.print_keybindings {
+        print!("{}", settings.keybindings.print()?);
+        return Ok(());
+    }
     let (args, target) = args.resolve()?;
     let mut app = App::new(root, args.demo);
     app.repo = args.repo.clone();
@@ -414,7 +424,7 @@ pub fn run() -> Result<()> {
             draft: false,
         }];
         app.message(
-            "Offline demo. Browse PRs; o opens Diff; a shows a sample guide. Nothing is sent.",
+            "Offline demo. Use the command palette to open Diff or prepare a sample guide. Nothing is sent.",
             false,
         );
     }
@@ -622,7 +632,7 @@ pub(crate) fn apply_background(
                         app.tab = tab;
                     }
                     app.message(
-                        "Local review. c note · N notes · Q ask · E explain · a guide · r refresh",
+                        "Local review. Use the command palette for notes, AI explanations, and refresh.",
                         false,
                     );
                     if app.settings.ai.auto_explain {
@@ -680,7 +690,7 @@ pub(crate) fn apply_background(
                     true,
                 );
             } else {
-                app.message(format!("Context ready for {filename}. +/- expands/collapses; F toggles the full file."), false);
+                app.message(format!("Context ready for {filename}. Expand or collapse context from the command palette."), false);
             }
         }
         JobResult::PreviewContext {
@@ -818,7 +828,7 @@ pub(crate) fn apply_background(
                 Err(error) => {
                     app.diff_error = Some(format!("{error:#}"));
                     app.message(
-                        "The diff could not be loaded. The overview is still available; r retries.",
+                        "The diff could not be loaded. The overview is still available; refresh to retry.",
                         true,
                     );
                 }
@@ -1081,7 +1091,7 @@ fn start_question(
         .unwrap_or_else(|| overview_from_review(&review));
     let config = app.settings.ai.clone();
     if config.provider == Provider::None {
-        bail!("Choose an agent with A before asking");
+        bail!("Choose an agent in the command palette before asking");
     }
     runtime.stop_ask();
     let scope = focus
@@ -1199,7 +1209,7 @@ fn dispatch(
         Action::Browse(id) => {
             if app.demo {
                 app.message(
-                    "Offline demo: B opens the selected real PR on GitHub.",
+                    "Offline demo: opening GitHub uses the selected real PR.",
                     false,
                 );
                 return Ok(());
@@ -1300,6 +1310,7 @@ fn dispatch(
             app.diff_error = None;
             app.comments_loading = false;
             app.goto_pending = false;
+            app.pending_keys.clear();
             app.tab = app::PageTab::Overview;
             let generation = app.generation;
             app.message(

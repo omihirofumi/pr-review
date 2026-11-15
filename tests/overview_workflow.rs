@@ -1271,7 +1271,7 @@ fn palette_handles_disabled_actions_empty_results_paste_and_modal_text_without_b
     app.settings.ai.provider = Provider::None;
     palette_run(&mut app, "explain diff");
     assert!(matches!(app.dialog, Some(Dialog::Palette { .. })));
-    assert!(screen(&mut app).contains("Choose an AI agent with A first"));
+    assert!(screen(&mut app).contains("Choose an AI agent first"));
     ctrl(&mut app, 'u').unwrap();
     app.paste("no matching command 日本語");
     app.key(key(KeyCode::Enter)).unwrap();
@@ -1459,4 +1459,174 @@ fn sidebar_and_palette_render_at_small_sizes_and_sidebar_focus_can_be_restored()
     let data = app.review.as_ref().unwrap().data.clone();
     app.loaded(data).unwrap();
     assert!(!app.file_sidebar);
+}
+
+#[test]
+fn configured_normal_shortcuts_replace_defaults_and_preserve_multi_key_navigation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    app.settings.keybindings.0.extend([
+        ("command_palette".into(), vec!["Ctrl-p".into(), "F2".into()]),
+        ("toggle_sidebar".into(), vec!["Space b".into()]),
+        ("next_hunk".into(), vec!["Alt-j".into()]),
+        ("previous_hunk".into(), vec!["g p".into()]),
+    ]);
+    app.settings.keybindings.validate().unwrap();
+    ctrl(&mut app, 'k').unwrap();
+    assert!(app.dialog.is_none());
+    ctrl(&mut app, 'p').unwrap();
+    app.paste("sidebar");
+    assert!(screen(&mut app).contains("Space b"));
+    assert!(!screen(&mut app).contains("Ctrl-b"));
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert!(!app.file_sidebar);
+    ctrl(&mut app, 'b').unwrap();
+    assert!(!app.file_sidebar);
+    press(&mut app, ' ').unwrap();
+    assert!(app.goto_pending);
+    assert!(screen(&mut app).contains("Space …"));
+    press(&mut app, 'b').unwrap();
+    assert!(app.file_sidebar);
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    press(&mut app, 'g').unwrap();
+    press(&mut app, 'p').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert!(app.pending_keys.is_empty());
+    app.key(key(KeyCode::F(2))).unwrap();
+    assert!(matches!(app.dialog, Some(Dialog::Palette { .. })));
+    app.key(key(KeyCode::Down)).unwrap();
+    ctrl(&mut app, 'p').unwrap();
+    assert!(matches!(
+        app.dialog,
+        Some(Dialog::Palette { selected: 0, .. })
+    ));
+    app.key(key(KeyCode::F(2))).unwrap();
+    assert!(app.dialog.is_none());
+}
+
+#[test]
+fn unbound_shortcuts_leave_palette_actions_available_and_canonical_keys_cannot_be_redirected() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    app.settings
+        .keybindings
+        .0
+        .insert("open_file".into(), vec![]);
+    app.settings
+        .keybindings
+        .0
+        .insert("previous_hunk".into(), vec!["g p".into()]);
+    app.settings
+        .keybindings
+        .0
+        .insert("full_file".into(), vec!["[".into()]);
+    app.settings.keybindings.validate().unwrap();
+    assert!(matches!(press(&mut app, 'o').unwrap(), Action::None));
+    assert!(matches!(press(&mut app, 'e').unwrap(), Action::None));
+    press(&mut app, 'g').unwrap();
+    assert!(matches!(press(&mut app, 'f').unwrap(), Action::None));
+    assert!(matches!(
+        palette_run(&mut app, "helix"),
+        Action::Prepare {
+            open_editor: Some(_),
+            ..
+        }
+    ));
+    app.review.as_mut().unwrap().positions[0] = 3;
+    palette_run(&mut app, "previous hunk");
+    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert!(!app.review.as_ref().unwrap().contexts[0].expansion.full);
+    app.settings
+        .keybindings
+        .0
+        .insert("open_file".into(), vec!["o".into()]);
+    app.settings.keybindings.validate().unwrap();
+    assert!(matches!(
+        press(&mut app, 'o').unwrap(),
+        Action::Prepare {
+            open_editor: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn editor_controls_and_provider_saves_preserve_custom_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    app.settings
+        .keybindings
+        .0
+        .insert("choose_agent".into(), vec!["Ctrl-a".into()]);
+    app.settings
+        .keybindings
+        .0
+        .insert("next_hunk".into(), vec!["Alt-j".into(), "Ctrl-s".into()]);
+    app.settings.keybindings.validate().unwrap();
+    app.config_path = Some(root.path().join("config.toml"));
+    ctrl(&mut app, 'a').unwrap();
+    press(&mut app, 'j').unwrap();
+    app.key(key(KeyCode::Enter)).unwrap();
+    let saved = settings::load(app.config_path.as_ref().unwrap()).unwrap();
+    assert_eq!(saved.ai.provider, Provider::Claude);
+    assert_eq!(saved.keybindings, app.settings.keybindings);
+    let mut externally_edited = saved;
+    externally_edited
+        .keybindings
+        .0
+        .insert("command_palette".into(), vec!["Ctrl-p".into()]);
+    settings::save(app.config_path.as_ref().unwrap(), &externally_edited).unwrap();
+    ctrl(&mut app, 'a').unwrap();
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        settings::load(app.config_path.as_ref().unwrap())
+            .unwrap()
+            .keybindings
+            .keys("command_palette"),
+        ["Ctrl-p"]
+    );
+    assert_eq!(app.settings.keybindings.keys("command_palette"), ["Ctrl-k"]);
+    app.key(key(KeyCode::F(1))).unwrap();
+    app.execute_binding("help").unwrap();
+    assert!(screen(&mut app).contains("Ctrl-a"));
+    app.key(key(KeyCode::Esc)).unwrap();
+    press(&mut app, 'x').unwrap();
+    press(&mut app, 'C').unwrap();
+    app.paste("Keep text");
+    app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
+        .unwrap();
+    ctrl(&mut app, 'h').unwrap();
+    assert!(matches!(&app.dialog, Some(Dialog::Note { input, .. }) if input.text == "Keep tex"));
+    ctrl(&mut app, 's').unwrap();
+    assert!(app.dialog.is_none());
+    assert_eq!(
+        app.review.as_ref().unwrap().notes[0].anchor.body,
+        "Keep tex"
+    );
+}
+
+#[test]
+fn complete_chords_take_precedence_over_global_shortcut_suffixes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    app.settings
+        .keybindings
+        .0
+        .insert("toggle_sidebar".into(), vec!["Space Ctrl-k".into()]);
+    app.settings.keybindings.validate().unwrap();
+    press(&mut app, ' ').unwrap();
+    ctrl(&mut app, 'k').unwrap();
+    assert!(!app.file_sidebar);
+    assert!(app.dialog.is_none());
+    press(&mut app, 'g').unwrap();
+    ctrl(&mut app, 'k').unwrap();
+    assert!(matches!(app.dialog, Some(Dialog::Palette { .. })));
+    assert!(app.pending_keys.is_empty());
+    app.key(key(KeyCode::Esc)).unwrap();
+    press(&mut app, 'g').unwrap();
+    assert!(matches!(press(&mut app, 'E').unwrap(), Action::Ask { .. }));
 }

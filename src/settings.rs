@@ -84,6 +84,7 @@ impl AiConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub ai: AiConfig,
+    pub keybindings: crate::keybindings::Keybindings,
 }
 
 pub fn default_path() -> Result<PathBuf> {
@@ -109,11 +110,16 @@ pub fn load(path: &Path) -> Result<Settings> {
     let settings: Settings = toml::from_str(&text)
         .with_context(|| format!("Invalid configuration {}", path.display()))?;
     settings.ai.validate()?;
+    settings
+        .keybindings
+        .validate()
+        .with_context(|| format!("Invalid configuration {}", path.display()))?;
     Ok(settings)
 }
 
 pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     settings.ai.validate()?;
+    settings.keybindings.validate()?;
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())

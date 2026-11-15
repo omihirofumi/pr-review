@@ -11,7 +11,8 @@ import sys
 import termios
 import time
 
-binary, repository, state = sys.argv[1:]
+binary, repository, state = sys.argv[1:4]
+custom = len(sys.argv) > 4 and sys.argv[4] == "custom"
 os.environ['PWD'] = repository
 os.environ['TERM'] = 'xterm-256color'
 bin_directory = pathlib.Path(state) / 'bin'
@@ -27,6 +28,13 @@ editor.chmod(0o755)
 os.environ['PATH'] = str(bin_directory) + os.pathsep + os.environ['PATH']
 
 arguments = ['difftool', '$left', '$right', '--agent', 'none', '--workspace-root', state]
+if custom:
+    config = pathlib.Path(state) / 'config.toml'
+    config.write_text('[keybindings]\ncommand_palette = ["Ctrl-p"]\ntoggle_sidebar = ["Space b"]\nnext_hunk = ["Alt-j"]\nprevious_hunk = ["Alt-k"]\nopen_file = ["Ctrl-o"]\n')
+    arguments.extend(['--config', str(config)])
+palette_key = b'\x10' if custom else b'\x0b'
+editor_key = b'\x0f' if custom else b'gf'
+
 command = ['jj', '--config', 'ui.pager=["less","-FRX"]', '--config', 'merge-tools.prpr.program=' + json.dumps(binary),
            '--config', 'merge-tools.prpr.diff-args=' + json.dumps(arguments), 'diff', '--tool', 'prpr']
 pid, terminal = pty.fork()
@@ -82,9 +90,14 @@ try:
     assert len(review['files']) == 1
     assert review['files'][0]['patch'].startswith('@@')
     client('navigate', '--repo', repository, '--file', 'a.rs', '--new-line', '1')
-    os.write(terminal, b'\x0bnext hunk\r')
+    if custom:
+        os.write(terminal, b'\x0b\x1bj')
+        wait_until(lambda: client('context', '--repo', repository)['file'] != 'a.rs')
+        os.write(terminal, b'\x1bk')
+        wait_until(lambda: client('context', '--repo', repository)['file'] == 'a.rs')
+    os.write(terminal, palette_key + b'next hunk\r')
     wait_until(lambda: client('context', '--repo', repository)['file'] != 'a.rs')
-    os.write(terminal, b'\x0bprevious hunk\r')
+    os.write(terminal, palette_key + b'previous hunk\r')
     wait_until(lambda: client('context', '--repo', repository)['file'] == 'a.rs')
     client('navigate', '--repo', repository, '--file', 'a.rs', '--new-line', '1')
 
@@ -101,10 +114,10 @@ try:
     pump()
     assert len(client('comment', 'list', '--repo', repository)['notes']) == 2
     client('navigate', '--repo', repository, '--file', 'a.rs', '--new-line', '1')
-    os.write(terminal, b'o')
+    os.write(terminal, editor_key)
     wait_until(lambda: editor_log.exists())
     client('navigate', '--repo', repository, '--file', 'a.rs', '--old-line', '1')
-    os.write(terminal, b'o')
+    os.write(terminal, editor_key)
     wait_until(lambda: len(editor_log.read_text().splitlines()) == 2)
     locations = [json.loads(line) for line in editor_log.read_text().splitlines()]
     assert pathlib.Path(locations[0]['path']).resolve() == (pathlib.Path(repository) / 'a.rs').resolve()

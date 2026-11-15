@@ -3,6 +3,7 @@ pub mod assistant;
 pub mod context;
 pub mod diff;
 pub mod github;
+pub mod keybindings;
 pub mod local;
 pub mod model;
 pub mod notes;

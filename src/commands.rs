@@ -1,11 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use prpr::settings::Provider;
+use prpr::{keybindings::Keybindings, settings::Provider};
 
 use super::{AiStatus, App, PageTab};
 
 pub struct Command {
     pub label: &'static str,
-    pub shortcut: &'static str,
+    pub shortcut: String,
+    pub id: &'static str,
     pub disabled: Option<&'static str>,
     pub key: KeyEvent,
     aliases: &'static str,
@@ -15,7 +16,8 @@ impl Command {
     fn new(label: &'static str, shortcut: &'static str, key: char, aliases: &'static str) -> Self {
         Self {
             label,
-            shortcut,
+            shortcut: shortcut.into(),
+            id: "",
             key: KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
             disabled: None,
             aliases,
@@ -78,7 +80,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             ),
             Command::new("Previous file", "p", 'p', "prev backward path")
                 .disabled_if(review.selected_file == 0, "Already at the first file"),
-            Command::new("Open file in Helix", "o / gf", 'o', "editor source")
+            Command::new("Open file in Helix", "gf / e", 'e', "editor source")
                 .disabled_if(!file, "Choose a file")
                 .disabled_if(app.busy, busy)
                 .disabled_if(
@@ -89,7 +91,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 .disabled_if(!text, "Choose a textual hunk")
                 .disabled_if(
                     app.settings.ai.provider == Provider::None,
-                    "Choose an AI agent with A first",
+                    "Choose an AI agent first",
                 ),
             Command::new(
                 "Expand hunk context",
@@ -197,7 +199,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             )
             .disabled_if(
                 app.settings.ai.provider == Provider::None,
-                "Choose an AI agent with A first",
+                "Choose an AI agent first",
             ),
         );
     }
@@ -264,6 +266,21 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
         Command::new("Show operation details", "!", '!', "status errors log"),
         Command::new("Quit prpr", "q", 'q', "exit close").disabled_if(app.busy, busy),
     ]);
+    for command in &mut commands {
+        command.id = Keybindings::default_action(app.binding_view(), command.key)
+            .expect("Palette command must have a normal-view action");
+        command.shortcut = if command.id == "local_note" && local {
+            let mut keys = app.settings.keybindings.keys("comment");
+            keys.extend(app.settings.keybindings.keys("local_note"));
+            if keys.is_empty() {
+                "Unbound".into()
+            } else {
+                keys.join(" / ")
+            }
+        } else {
+            app.shortcut(command.id)
+        };
+    }
     commands
         .into_iter()
         .filter(|command| command.matches(query))

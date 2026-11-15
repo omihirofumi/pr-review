@@ -147,7 +147,7 @@ pub fn answer(
     config.validate()?;
     ensure!(
         config.provider != Provider::None,
-        "Choose an AI agent with A before asking a question"
+        "Choose an AI agent in the command palette before asking a question"
     );
     ensure!(
         overview.id == review.pr.id && overview.head_sha == review.pr.head_sha,

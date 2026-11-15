@@ -195,3 +195,27 @@ fn jj_external_viewer_reattaches_the_terminal_and_exchanges_live_notes() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn external_viewer_uses_remapped_keys_without_changing_comment_editor_controls() {
+    let directory = fixture();
+    let state = tempfile::tempdir().unwrap();
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/difftool_pty.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_prpr"))
+        .arg(directory.path())
+        .arg(state.path())
+        .arg("custom")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

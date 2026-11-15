@@ -113,7 +113,7 @@ fn long_published_comment_tail_is_reachable_in_full_thread_view() {
     app.loaded(data).unwrap();
     app.key(key('j')).unwrap();
     let inline = screen(&mut app, 100, 32);
-    assert!(inline.contains("T opens the full thread"));
+    assert!(inline.contains("open full thread"));
     assert!(!inline.contains("TAIL-OF-PUBLISHED-COMMENT"));
     app.key(key('T')).unwrap();
     let mut tail_visible = false;

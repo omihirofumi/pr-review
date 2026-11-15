@@ -207,3 +207,31 @@ fn command_exposes_help_version_and_configuration() {
             .ends_with(std::path::Path::new("prpr").join("config.toml"))
     );
 }
+
+#[test]
+fn effective_shortcut_configuration_prints_without_repository_discovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[keybindings]\ncommand_palette = ['Ctrl-p']\nopen_file = []\n",
+    )
+    .unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_prpr"))
+        .current_dir(directory.path())
+        .arg("--config")
+        .arg(&config)
+        .arg("--print-keybindings")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let settings: prpr::settings::Settings =
+        toml::from_str(&String::from_utf8(result.stdout).unwrap()).unwrap();
+    settings.keybindings.validate().unwrap();
+    assert_eq!(settings.keybindings.keys("command_palette"), ["Ctrl-p"]);
+    assert!(settings.keybindings.keys("open_file").is_empty());
+}

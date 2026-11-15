@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use prpr::{
     analysis::Analysis,
     diff::{DiffLine, LineKind},
+    keybindings::{self, View},
     model::{ChangedFile, Side},
     settings::Provider,
     thread::{Thread, matches_anchor, threads},
@@ -283,31 +284,59 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         status,
     );
     let keys = if app.goto_pending {
-        " g: g top · e end · f open · Esc cancel "
-    } else if app.overview.is_some() && matches!(app.tab, PageTab::Overview) {
-        if area.width < 76 {
-            " j/k scroll  n/p guide  a explain  A agent  ? keys "
+        if app.pending_keys.is_empty() {
+            " Sequence pending · Esc cancels ".into()
         } else {
-            " Tab views  j/k scroll  n/p guide  Enter diff  a explain  A agent  b description  ? keys "
+            format!(
+                " {} … · Esc cancels",
+                app.pending_keys
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         }
-    } else if app.overview.is_some() && app.review.is_none() {
-        " 1 Overview  2 Diff  Tab views  r retry  ? keys "
-    } else if app.local_spec.is_some() {
-        " [/] hunk  Ctrl-b files  Q ask  E explain  c note  N notes  o open "
-    } else if app.review.is_some() && area.width < 76 {
-        " [/] hunk  Ctrl-b files  Q ask  ? "
-    } else if app.review.is_some() && area.width < 105 {
-        " [/] hunk  Ctrl-b files  +/- context  Q ask  E explain  o open "
-    } else if app.review.is_some() {
-        " [/] hunk  Ctrl-b files  v/x select  +/- context  Q ask  E explain  c note  o open "
-    } else if area.width < 76 {
-        " j/k select  o diff  B GitHub  p preview  ? "
     } else {
-        " j/k select  o diff  B GitHub  p/P preview  [/] tabs  a guide  ? keys "
+        let hints: &[(&str, &str)] = match app.binding_view() {
+            View::Inbox => &[
+                ("command_palette", "commands"),
+                ("open_pr", "diff"),
+                ("toggle_preview", "preview"),
+                ("help", "help"),
+            ],
+            View::Overview => &[
+                ("command_palette", "commands"),
+                ("diff", "diff"),
+                ("ai_guide", "guide"),
+                ("choose_agent", "agent"),
+                ("help", "help"),
+            ],
+            View::Diff => &[
+                ("command_palette", "commands"),
+                ("previous_hunk", "prev hunk"),
+                ("next_hunk", "next hunk"),
+                ("toggle_sidebar", "files"),
+                ("ask", "ask"),
+                ("explain_diff", "explain"),
+                ("help", "help"),
+            ],
+        };
+        format!(
+            " {}",
+            hints
+                .iter()
+                .filter_map(|(id, label)| app
+                    .settings
+                    .keybindings
+                    .keys(id)
+                    .first()
+                    .map(|key| format!("{key} {label}")))
+                .collect::<Vec<_>>()
+                .join("  ")
+        )
     };
     frame.render_widget(
-        Paragraph::new(format!(" Ctrl-k commands ·{}", keys))
-            .style(Style::default().fg(MUTED).bg(PANEL)),
+        Paragraph::new(keys).style(Style::default().fg(MUTED).bg(PANEL)),
         help,
     );
     if let Some(Dialog::Ask {
@@ -389,8 +418,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let subtitle = app.review.as_ref().map_or_else(
         || {
             format!(
-                " {} · o opens a review; # opens a PR by number",
-                app.repo.as_deref().unwrap_or("Your review queue")
+                " {} · {} opens a review; {} opens a PR by number",
+                app.repo.as_deref().unwrap_or("Your review queue"),
+                app.settings.keybindings.primary("open_pr"),
+                app.settings.keybindings.primary("open_pr_number")
             )
         },
         |review| {
@@ -480,15 +511,16 @@ fn draw_overview_header(frame: &mut Frame, app: &App, overview: &OverviewState, 
 }
 
 fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
-    let diff = if app.diff_loading {
-        " 2 Diff · loading "
+    let label = if app.diff_loading {
+        "Diff · loading"
     } else if app.diff_error.is_some() {
-        " 2 Diff · error "
+        "Diff · error"
     } else if app.comments_loading {
-        " 2 Diff · comments "
+        "Diff · comments"
     } else {
-        " 2 Diff "
+        "Diff"
     };
+    let diff = format!(" {} {label} ", app.settings.keybindings.primary("diff"));
     let selected = |active| {
         Style::default()
             .fg(if active { ACCENT } else { MUTED })
@@ -497,16 +529,23 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " 1 Overview ",
+                format!(
+                    " {} Overview ",
+                    app.settings.keybindings.primary("overview")
+                ),
                 selected(matches!(app.tab, PageTab::Overview)).bold(),
             ),
             Span::raw(" "),
             Span::styled(diff, selected(matches!(app.tab, PageTab::Diff)).bold()),
             Span::styled(
                 if area.width >= 85 {
-                    "    Tab / Shift-Tab switches views"
+                    format!(
+                        "    {} / {} switches views",
+                        app.settings.keybindings.primary("next_view"),
+                        app.settings.keybindings.primary("previous_view")
+                    )
                 } else {
-                    ""
+                    String::new()
                 },
                 Style::default().fg(MUTED),
             ),
@@ -548,6 +587,7 @@ fn draw_diff_placeholder(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
+    let keys = &app.settings.keybindings;
     let Some(overview) = &mut app.overview else {
         return;
     };
@@ -604,11 +644,15 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         details,
     );
     let mut description_lines = vec![Line::from(Span::styled(
-        if app.local_spec.is_some() {
-            " CHANGE DESCRIPTION · b opens full text"
-        } else {
-            " AUTHOR DESCRIPTION · b opens full text"
-        },
+        format!(
+            " {} DESCRIPTION · {} opens full text",
+            if app.local_spec.is_some() {
+                "CHANGE"
+            } else {
+                "AUTHOR"
+            },
+            keys.primary("description")
+        ),
         Style::default().fg(MUTED),
     ))];
     description_lines.extend(wrapped.into_iter().take(preview).map(|mut line| {
@@ -618,19 +662,25 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(description_lines), description);
     let (caption, color) = match &overview.ai {
         AiStatus::Disabled => (
-            " AI guide not configured · a chooses an agent".to_owned(),
+            format!(
+                " AI guide not configured · {} chooses an agent",
+                keys.primary("ai_guide")
+            ),
             MUTED,
         ),
         AiStatus::Waiting => (
             if app.diff_loading {
                 " Waiting for the diff to prepare the AI guide…".to_owned()
             } else {
-                if app.local_spec.is_some() {
-                    " AI guide is ready to generate · a explains this change"
-                } else {
-                    " AI guide is ready to generate · a explains this PR"
-                }
-                .to_owned()
+                format!(
+                    " AI guide is ready to generate · {} explains this {}",
+                    keys.primary("ai_guide"),
+                    if app.local_spec.is_some() {
+                        "change"
+                    } else {
+                        "PR"
+                    }
+                )
             },
             ACCENT,
         ),
@@ -640,13 +690,21 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         ),
         AiStatus::Ready(_) => (
             format!(
-                " AI GUIDE · {} · a regenerates · n/p reading order · Enter jumps",
-                app.settings.ai.provider
+                " AI GUIDE · {} · {} regenerates · {}/{} reading order · {} jumps",
+                app.settings.ai.provider,
+                keys.primary("ai_guide"),
+                keys.primary("next_reading_step"),
+                keys.primary("previous_reading_step"),
+                keys.primary("open_reading_step")
             ),
             ACCENT,
         ),
         AiStatus::Error(_) => (
-            " AI guide unavailable · a retries · A chooses an agent".to_owned(),
+            format!(
+                " AI guide unavailable · {} retries · {} chooses an agent",
+                keys.primary("ai_guide"),
+                keys.primary("choose_agent")
+            ),
             RED,
         ),
     };
@@ -678,7 +736,7 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         status => {
             let description = if let AiStatus::Error(error) = status {
                 format!(
-                    "> Guide unavailable: {error}. Press `a` to retry or `A` to choose an agent.\n\n{body}"
+                    "> Guide unavailable: {error}. Use the command palette to retry or choose an agent.\n\n{body}"
                 )
             } else {
                 body.to_owned()
@@ -775,7 +833,7 @@ fn reading_step_label(index: usize, step: &prpr::analysis::ReadingStep) -> Strin
 }
 
 fn overview_reading_order(rows: &mut Vec<OverviewRow>, analysis: &Analysis, width: u16) {
-    overview_heading(rows, "Reading order · n/p chooses · Enter opens diff");
+    overview_heading(rows, "Reading order");
     if analysis.reading_order.is_empty() {
         overview_text(
             rows,
@@ -985,7 +1043,7 @@ fn draw_reading_guide(frame: &mut Frame, analysis: &Analysis, selected_step: usi
     let [heading, list] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
     frame.render_widget(
-        Paragraph::new(" Reading order\n n/p chooses · Enter jumps")
+        Paragraph::new(" Reading order\n Choose a step to open in Diff")
             .style(Style::default().fg(ACCENT)),
         heading,
     );
@@ -1175,7 +1233,13 @@ fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" PREVIEW · h/l focus · p hides · P position ")
+        .title(format!(
+            " PREVIEW · {}/{} focus · {} hides · {} position ",
+            app.settings.keybindings.primary("focus_pr_list"),
+            app.settings.keybindings.primary("focus_preview"),
+            app.settings.keybindings.primary("toggle_preview"),
+            app.settings.keybindings.primary("preview_position")
+        ))
         .border_style(Style::default().fg(if app.preview.focused { ACCENT } else { BORDER }));
     let inner = block.inner(preview_area);
     frame.render_widget(block, preview_area);
@@ -1280,7 +1344,7 @@ fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
         let hint = match guide.map(|guide| &guide.status) {
             Some(AiStatus::Loading) => format!("*Preparing with {}…*", app.settings.ai.provider),
             Some(AiStatus::Error(error)) => {
-                format!("**Guide unavailable:** {error}\n\nPress `a` to retry.")
+                format!("**Guide unavailable:** {error}\n\nUse the command palette to retry.")
             }
             _ => "`a`: prepare guide · `A`: choose agent".into(),
         };
@@ -1688,7 +1752,7 @@ fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
         ));
         if !review.show_comments || (unmatched.is_empty() && unmatched_drafts.is_empty()) {
             rows.push(ViewRow::text(
-                " o opens source · T shows all comments",
+                " Source unavailable here · use the command palette",
                 BACKGROUND,
                 MUTED,
             ));
@@ -1754,11 +1818,7 @@ fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
         if !lines.is_empty() {
             rows.push(ViewRow::text("", BACKGROUND, MUTED));
         }
-        rows.push(ViewRow::text(
-            " Threads outside this diff · T opens all",
-            PANEL,
-            MUTED,
-        ));
+        rows.push(ViewRow::text(" Threads outside this diff", PANEL, MUTED));
         for thread in unmatched {
             let label = if thread.root.line.is_none() {
                 "outdated"
@@ -1769,11 +1829,7 @@ fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
         }
     }
     if review.show_comments && !unmatched_drafts.is_empty() {
-        rows.push(ViewRow::text(
-            " Drafts outside this diff · D opens all",
-            PANEL,
-            MUTED,
-        ));
+        rows.push(ViewRow::text(" Drafts outside this diff", PANEL, MUTED));
         for draft in unmatched_drafts {
             append_card(
                 &mut rows,
@@ -2096,9 +2152,9 @@ fn append_card(
     if wrapped.len() > 6 {
         rows.push(ViewRow::text(
             if draft {
-                "  │ … D then c reads full draft"
+                "  │ … open saved drafts"
             } else {
-                "  │ … T opens the full thread"
+                "  │ … open full thread"
             },
             background,
             MUTED,
@@ -2235,12 +2291,7 @@ fn draw_description(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
 fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
     match dialog {
         Dialog::Palette { input, selected } => {
-            let inner = popup(
-                frame,
-                " Command palette · Ctrl-k / Esc closes ".into(),
-                92,
-                23,
-            );
+            let inner = popup(frame, " Command palette · Esc closes ".into(), 92, 23);
             let [search, _, choices, count, hint] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -2279,7 +2330,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                         Span::raw(label),
                         Span::raw(" ".repeat(padding + 2)),
                         Span::styled(
-                            command.shortcut,
+                            command.shortcut.clone(),
                             Style::default().fg(if command.disabled.is_some() {
                                 MUTED
                             } else {
@@ -2484,7 +2535,35 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 84,
                 32,
             );
-            frame.render_widget(Paragraph::new("COMMANDS\n  Ctrl-k          Search and run commands for this view\n  Ctrl-b          Toggle the file sidebar\n  Palette         Type to filter; arrows select; Enter runs\n                  Esc closes; Ctrl-u clears the search\n\nBROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk across files\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nCONTEXT\n  +               Reveal 20 more lines around this hunk\n  -               Collapse this hunk's expanded context\n  F               Toggle full file / diff context\n  B               Open selected PR on GitHub\n                  Available in list, Overview, and Diff\n  Expanded lines  Read, select, ask AI, or open in Helix\n  GitHub comments Stay inside the original diff hunks\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               GitHub draft (PR) / local note (jj)\n  C               Local note in either mode\n  N               Notes, replies, and outdated notes\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  jj review       c note, Q ask, E explain, a guide\n  Agent access    prpr session --help\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
+            let mut text = String::from("NORMAL-VIEW SHORTCUTS\n\n");
+            for (scope, title) in [
+                (7, "GENERAL"),
+                (6, "OPEN REVIEW"),
+                (1, "PR LIST"),
+                (2, "OVERVIEW"),
+                (4, "DIFF"),
+            ] {
+                text.push_str(&format!("{title}\n"));
+                for binding in keybindings::SPECS
+                    .iter()
+                    .filter(|binding| binding.scope == scope)
+                {
+                    text.push_str(&format!(
+                        "  {:<22} {}\n",
+                        app.shortcut(binding.id),
+                        binding.label
+                    ));
+                }
+                text.push('\n');
+            }
+            text.push_str("DIALOG CONTROLS (fixed)\n  Esc              Close / cancel\n  Ctrl-s           Save, send question, or preview review\n  Ctrl-h           Backspace in text editors\n  Up/Down          Select command or dialog item\n  Ctrl-n/Ctrl-p    Select a command in the palette\n  Ctrl-u           Clear palette search\n  Enter            Run selected command or confirm preview\n  j/k, Ctrl-d/u    Scroll read-only dialogs\n\n  Ctrl-c always exits immediately.\n\nConfigure shortcuts in the [keybindings] section of your config.\nUse --print-keybindings to inspect effective action names and keys.\n\nGitHub review submission still requires its final confirmation.\nLocal notes and agent replies stay on this computer.");
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(TEXT))
+                    .wrap(Wrap { trim: false })
+                    .scroll((*scroll, 0)),
+                inner,
+            );
         }
         Dialog::Description { scroll } => {
             draw_description(frame, app, *scroll);
@@ -2944,7 +3023,7 @@ mod tests {
         assert_eq!(rows.len(), 9);
         assert!(
             rows.iter()
-                .any(|row| row_text(row).contains("T opens the full thread"))
+                .any(|row| row_text(row).contains("open full thread"))
         );
         for line in wrap_comment(&text, 27) {
             assert!(Line::from(line).width() <= 27);
@@ -2954,7 +3033,7 @@ mod tests {
         assert!(
             drafts
                 .iter()
-                .any(|row| row_text(row).contains("D then c reads full draft"))
+                .any(|row| row_text(row).contains("open saved drafts"))
         );
     }
 
@@ -3059,14 +3138,22 @@ mod tests {
     fn goto_prefix_help_is_visible_in_both_inbox_and_review() {
         let temp = tempfile::tempdir().unwrap();
         let mut app = App::new(temp.path().into(), true);
-        app.goto_pending = true;
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('g'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
         let mut terminal = Terminal::new(TestBackend::new(48, 12)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(screen(&terminal).contains("g: g top · e end · f open"));
+        assert!(screen(&terminal).contains("g … · Esc cancels"));
         app.loaded(demo_data()).unwrap();
-        app.goto_pending = true;
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('g'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        assert!(screen(&terminal).contains("g: g top · e end · f open"));
+        assert!(screen(&terminal).contains("g … · Esc cancels"));
     }
 
     #[test]

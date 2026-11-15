@@ -38,11 +38,11 @@ prpr diff --from main --to @    # Compare two revisions
 prpr diff --agent codex          # Override the AI provider for this launch
 ```
 
-Local reviews open directly in Diff. Use the same `j/k`, `gg/ge`, `[/]`, `v/x`, `+/-`, `F`, and `o/gf` controls as PR reviews. `Q` asks about selected lines or the current hunk; `E` explains it. `1` opens Overview, where `a` prepares a structured reading guide. AI configuration is shared with PR reviews.
+Local reviews open directly in Diff. Use the same `j/k`, `gg/ge`, `[/]`, `v/x`, `+/-`, `F`, and `gf/e` controls as PR reviews. `Q` asks about selected lines or the current hunk; `E` explains it. `1` opens Overview, where `a` prepares a structured reading guide. AI configuration is shared with PR reviews.
 
 Press `c` to write a local note on a line or range, then `Ctrl-s` to save. `N` lists notes: `c` replies, `o` jumps to the source, and `d` deletes the selected note and its replies. `t` toggles inline notes; `T` reads full threads. Local notes persist across restarts. After `r` refreshes a native `prpr diff` review, notes on changed files are marked outdated rather than attached to different code.
 
-`o` opens the actual working file when it still matches the reviewed right-hand source. Removed lines, historical versions, and files edited since loading open a read-only snapshot instead. Binary or oversized files remain listed without text/AI context; text is limited to 2 MiB per side and 100000 lines. Local review does not require GitHub authentication and has no GitHub submission action.
+`gf` opens the actual working file when it still matches the reviewed right-hand source. Removed lines, historical versions, and files edited since loading open a read-only snapshot instead. Binary or oversized files remain listed without text/AI context; text is limited to 2 MiB per side and 100000 lines. Local review does not require GitHub authentication and has no GitHub submission action.
 
 ### Launch from `jj diff`
 
@@ -109,7 +109,7 @@ Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr
 In Diff:
 
 1. Keep pressing `j` to read downward and continue into the next file. `k` goes backward. Use `gg` / `ge` to jump to the current file's top / bottom.
-2. Press `gf` or `o` to open the selected source line in Helix. Quit Helix to resume the review at the same position.
+2. Press `gf` or `e` to open the selected source line in Helix. Quit Helix to resume the review at the same position.
 3. Press `c` to comment on one line. For three lines, press `xxx`, then `c`; for a variable range, press `v`, move with `j` / `k`, then press `c`. In the diff view, `Esc` or `;` clears a selection. Ranges cannot combine removed and added lines or span separate hunks.
 4. Write the comment and press `Ctrl-s` to save a **local draft**. `Ctrl-h` deletes backward. Press `D` to inspect or edit saved drafts.
 5. To publish the review, press `s`, write its summary, and use `Tab` to choose comment, approve, or request changes. Press `Ctrl-s` to preview, then `Enter` to send it to GitHub. `Esc` cancels the preview.
@@ -128,6 +128,43 @@ Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. 
 
 Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
 
+## Configurable shortcuts
+
+Normal-view shortcuts are configured in the same file as AI settings: `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Run `prpr --config-path` to locate it. Add a `[keybindings]` table, then restart prpr:
+
+```toml
+[keybindings]
+command_palette = ["Ctrl-k"]
+toggle_sidebar = ["Ctrl-b"]
+previous_hunk = ["["]
+next_hunk = ["]", "Alt-j"]
+open_file = ["gf"]
+```
+
+Each array replaces **all** shortcuts for that action. Omitted actions keep their defaults. An empty array disables the action's shortcuts while keeping its command-palette action available:
+
+```toml
+[keybindings]
+command_palette = ["Ctrl-p", "F2"]
+toggle_sidebar = ["Space b"]
+open_file = []
+```
+
+Bindings apply to the PR list, Overview, and Diff. Dialog navigation and comment/question editing controls stay fixed, including `Esc`, `Ctrl-s`, and `Ctrl-h`. `o` does **not** open source files in Diff by default; `gf` and `e` do. It still opens PRs in the list and reading-guide steps in Overview.
+
+Use characters directly (`Q`, `]`, `+`), named keys (`Enter`, `Tab`, `Shift-Tab`, `Space`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F24`), and `Ctrl-`, `Alt-`, or `Shift-` combinations. Use the resulting character directly for shifted punctuation. Multi-key sequences use spaces, such as `Space b` or `g p`; familiar lowercase sequences such as `gf` also work. Sequences contain up to four keys, and `Esc` cancels a pending sequence.
+
+`Ctrl-c` remains reserved for immediate exit. Terminal aliases (`Ctrl-i`/`Tab`, `Ctrl-j` or `Ctrl-m`/`Enter`, `Ctrl-h`/`Backspace`, and `Ctrl-[`/`Esc`) are checked together. Duplicate keys and ambiguous prefixes are rejected when their actions share a view. For example, assigning `next_hunk = ["n"]` requires rebinding or disabling `next_file`, while Overview's `next_reading_step` may still use `n`.
+
+The palette, help, and footer display the effective keys. Inspect every action name and its applicable views without opening the TUI:
+
+```sh
+prpr --print-keybindings
+prpr --config /dev/null --print-keybindings  # Defaults, independent of your config
+```
+
+Changing the AI provider from the app preserves `[keybindings]`.
+
 ## Command options
 
 ```sh
@@ -142,6 +179,7 @@ prpr 123 --agent codex                     # Codex guide for this launch
 prpr 123 --agent claude --model MODEL      # Claude with a model override
 prpr 123 --agent none                      # Read without an AI guide
 prpr --config-path                        # Print the configuration path
+prpr --print-keybindings                  # Print effective shortcuts and action names
 prpr --config /path/to/config.toml 123     # Use another configuration file
 ```
 
@@ -179,7 +217,7 @@ The explanation contains:
 - **Verification:** visible test evidence, suggested checks, and unknowns. No tests are run by the explanation agent.
 - **Coverage:** which complete patches were included, omitted by the context budget, or unavailable from GitHub.
 
-In Overview, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / `p` select a reading-guide step. Press `Enter`, `o`, or `gf` to jump to that step in Diff; press `o` or `gf` again there to prepare its checkout and open Helix. `b` opens the full author description.
+In Overview, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / `p` select a reading-guide step. Press `Enter`, `o`, or `gf` to jump to that step in Diff; press `gf` or `e` again there to prepare its checkout and open Helix. `b` opens the full author description.
 
 Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
 
@@ -232,7 +270,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `t` | Toggle inline comments, replies, and local drafts |
 | `T` / `V` | Full inline thread list / published reviews |
 | `#` | Open a PR by number in the selected repository |
-| `o` | Open the selected PR, source file in Helix, or saved draft |
+| `o` | Open the selected PR or saved item |
 | `w` / `e` | Prepare checkout / open source in Helix |
 | `c` / `D` | Compose comment / manage saved drafts |
 | `s` | Preview and submit review |
@@ -253,7 +291,7 @@ Hidden regions show the number of unchanged lines. The selected source location 
 
 Source loads only when requested, using the exact PR head and diff merge-base revisions. Renames use the previous filename on the base side. Validated source is cached by repository, revisions, and file identity, so repeated expansion does not fetch it again. This uses GitHub's file APIs and does not prepare a checkout or fetch Git history. Loading context leaves the rest of the interface usable.
 
-Full-file context supports UTF-8 text without NUL bytes, up to 2 MiB and 100,000 lines per side. The patch must match both source revisions and describe the changes between them. Unsupported, incomplete, or unavailable content leaves the original diff usable; `o` can still open a review workspace in Helix.
+Full-file context supports UTF-8 text without NUL bytes, up to 2 MiB and 100,000 lines per side. The patch must match both source revisions and describe the changes between them. Unsupported, incomplete, or unavailable content leaves the original diff usable; `gf` can still open a review workspace in Helix.
 
 Expanded lines can be selected, opened in Helix, or used with `Q` / `E`. For selections within one displayed hunk, agent questions use the selected region and up to 20 nearby source rows. Selections spanning multiple hunks include those hunks and remain subject to the configured context budget. GitHub review drafts remain limited to the original patch's complete hunks.
 

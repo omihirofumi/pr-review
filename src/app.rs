@@ -9,6 +9,7 @@ use prpr::{
     assistant::{self, Chat},
     context::{self, FileContext, FullFile},
     diff::{self, DiffLine, LineKind},
+    keybindings::{self, Stroke, View},
     local,
     model::*,
     notes,
@@ -788,6 +789,7 @@ pub struct App {
     pub settings: Settings,
     pub config_path: Option<PathBuf>,
     pub goto_pending: bool,
+    pub pending_keys: Vec<Stroke>,
     pub repo: Option<String>,
     pub inbox: Vec<PrSummary>,
     pub selected_pr: usize,
@@ -820,6 +822,7 @@ impl App {
             settings: Settings::default(),
             config_path: None,
             goto_pending: false,
+            pending_keys: Vec::new(),
             repo: None,
             inbox: Vec::new(),
             selected_pr: 0,
@@ -863,6 +866,7 @@ impl App {
         self.diff_loading = true;
         self.diff_error = None;
         self.goto_pending = false;
+        self.pending_keys.clear();
         self.message(
             "Overview ready. The diff is loading in the background.",
             false,
@@ -877,7 +881,7 @@ impl App {
         self.diff_error = None;
         if !self.error {
             self.message(
-                "Diff ready. 1 Overview / 2 Diff; a prepares the AI guide.",
+                "Diff ready. Use the command palette for review actions.",
                 false,
             );
         }
@@ -907,6 +911,7 @@ impl App {
         self.comments_loading = false;
         self.generation = self.generation.wrapping_add(1);
         self.goto_pending = false;
+        self.pending_keys.clear();
         self.message("Back to PR inbox", false);
     }
 
@@ -1003,14 +1008,15 @@ impl App {
         });
         self.tab = PageTab::Diff;
         self.goto_pending = false;
+        self.pending_keys.clear();
         let review = self.review.as_ref().unwrap();
         let pending = !review.data.source.is_local()
             && store::attempt(&self.root, &review.data.pr)?.is_some();
         if pending {
-            self.message("An earlier submission has an unknown result. V shows published reviews; u recovers it.", true);
+            self.message("An earlier submission has an unknown result. Inspect published reviews and recover it from the command palette.", true);
         } else {
             self.message(
-                "Review loaded. t toggles comments; # opens a PR; ? shows keys.",
+                "Review loaded. The command palette lists available actions.",
                 false,
             );
         }
@@ -1059,6 +1065,8 @@ impl App {
         review.focus = Focus::Diff;
         review.selection = None;
         self.tab = PageTab::Diff;
+        self.goto_pending = false;
+        self.pending_keys.clear();
         Ok(())
     }
 
@@ -1095,13 +1103,132 @@ impl App {
             .collect()
     }
 
+    pub fn binding_view(&self) -> View {
+        if self.overview.is_some() && self.tab == PageTab::Overview {
+            View::Overview
+        } else if self.review.is_some() || self.local_spec.is_some() || self.overview.is_some() {
+            View::Diff
+        } else {
+            View::Inbox
+        }
+    }
+
+    pub fn shortcut(&self, id: &str) -> String {
+        self.settings.keybindings.display(id)
+    }
+
+    pub fn execute_binding(&mut self, id: &str) -> Result<Action> {
+        let binding =
+            keybindings::spec(id).ok_or_else(|| anyhow::anyhow!("Unknown shortcut action {id}"))?;
+        self.goto_pending = false;
+        self.pending_keys.clear();
+        for key in binding.canonical() {
+            let action = self.default_key(key)?;
+            if !matches!(action, Action::None) {
+                return Ok(action);
+            }
+        }
+        Ok(Action::None)
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> Result<Action> {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if Stroke::from_event(key)
+            == Stroke::from_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        {
             return Ok(Action::Quit);
         }
         if self.dialog.is_some() {
+            if matches!(self.dialog, Some(Dialog::Palette { .. }))
+                && !Stroke::from_event(key).is_text()
+                && !Stroke::from_event(key).is_palette_control()
+                && self
+                    .settings
+                    .keybindings
+                    .single_matches("command_palette", key)
+            {
+                self.dialog = None;
+                return Ok(Action::None);
+            }
             return self.dialog_key(key);
         }
+        if self.filtering {
+            if Stroke::from_event(key).modified()
+                && self
+                    .settings
+                    .keybindings
+                    .single_matches("command_palette", key)
+            {
+                return self.execute_binding("command_palette");
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.filtering = false,
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.selected_pr = 0;
+                    self.preview.scroll = 0;
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.filter.push(character);
+                    self.selected_pr = 0;
+                    self.preview.scroll = 0;
+                }
+                _ => {}
+            }
+            return Ok(Action::None);
+        }
+        if !self.pending_keys.is_empty() && Stroke::from_event(key).is_escape() {
+            self.pending_keys.clear();
+            self.goto_pending = false;
+            return Ok(Action::None);
+        }
+        let had_prefix = !self.pending_keys.is_empty();
+        self.pending_keys.push(Stroke::from_event(key));
+        match self
+            .settings
+            .keybindings
+            .resolve(self.binding_view(), &self.pending_keys)?
+        {
+            keybindings::Match::Action(id) => self.execute_binding(id),
+            keybindings::Match::Prefix => {
+                self.goto_pending = true;
+                Ok(Action::None)
+            }
+            keybindings::Match::None => {
+                self.goto_pending = false;
+                self.pending_keys.clear();
+                if had_prefix {
+                    let review_open = self.overview.is_some();
+                    for (id, enabled) in [
+                        ("command_palette", true),
+                        ("toggle_sidebar", true),
+                        ("open_github", true),
+                        ("ask", true),
+                        ("explain_diff", true),
+                        ("overview", review_open),
+                        ("diff", review_open),
+                        ("next_view", review_open),
+                        ("previous_view", review_open),
+                        ("choose_agent", review_open),
+                        ("ai_guide", review_open),
+                    ] {
+                        if enabled
+                            && keybindings::spec(id).unwrap().applies(self.binding_view())
+                            && self.settings.keybindings.single_matches(id, key)
+                        {
+                            return self.execute_binding(id);
+                        }
+                    }
+                }
+                Ok(Action::None)
+            }
+        }
+    }
+
+    fn default_key(&mut self, key: KeyEvent) -> Result<Action> {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
@@ -1109,6 +1236,7 @@ impl App {
                 KeyCode::Char('k') => {
                     self.filtering = false;
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     self.dialog = Some(Dialog::Palette {
                         input: TextInput::default(),
                         selected: 0,
@@ -1117,6 +1245,7 @@ impl App {
                 }
                 KeyCode::Char('b') => {
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     if let Some(review) = &mut self.review {
                         self.file_sidebar = !self.file_sidebar;
                         if !self.file_sidebar {
@@ -1127,23 +1256,6 @@ impl App {
                 }
                 _ => {}
             }
-        }
-        if self.filtering {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => self.filtering = false,
-                KeyCode::Backspace => {
-                    self.filter.pop();
-                    self.selected_pr = 0;
-                    self.preview.scroll = 0;
-                }
-                KeyCode::Char(c) => {
-                    self.filter.push(c);
-                    self.selected_pr = 0;
-                    self.preview.scroll = 0;
-                }
-                _ => {}
-            }
-            return Ok(Action::None);
         }
         if self.local_spec.is_some() {
             match key.code {
@@ -1159,7 +1271,7 @@ impl App {
                 KeyCode::Char('B' | '#' | 'V' | 'u' | 's' | 'w')
                     if !key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    self.message("Local review. c adds a note; N shows notes; Q asks; E explains; r refreshes.", false);
+                    self.message("Local review. The command palette offers notes, AI questions, explanations, and refresh.", false);
                     return Ok(Action::None);
                 }
                 _ => {}
@@ -1190,7 +1302,7 @@ impl App {
             && let Some(review) = &self.review
         {
             if self.settings.ai.provider == Provider::None {
-                bail!("Choose Codex or Claude with A before asking");
+                bail!("Choose Codex or Claude in the command palette before asking");
             }
             let focus = if self.tab == PageTab::Diff || self.overview.is_none() {
                 Some(review.question_focus()?)
@@ -1198,6 +1310,7 @@ impl App {
                 None
             };
             self.goto_pending = false;
+            self.pending_keys.clear();
             self.dialog = Some(Dialog::Ask {
                 input: TextInput::default(),
                 focus: focus.clone(),
@@ -1213,11 +1326,13 @@ impl App {
                 KeyCode::Char('1') => {
                     self.tab = PageTab::Overview;
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     return Ok(Action::None);
                 }
                 KeyCode::Char('2') => {
                     self.tab = PageTab::Diff;
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     return Ok(Action::None);
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
@@ -1227,10 +1342,12 @@ impl App {
                         PageTab::Overview
                     };
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     return Ok(Action::None);
                 }
                 KeyCode::Char('A') => {
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     self.dialog = Some(Dialog::AgentPicker {
                         selected: match self.settings.ai.provider {
                             Provider::Codex => 0,
@@ -1242,6 +1359,7 @@ impl App {
                 }
                 KeyCode::Char('a') => {
                     self.goto_pending = false;
+                    self.pending_keys.clear();
                     if self
                         .overview
                         .as_ref()
@@ -1274,6 +1392,7 @@ impl App {
         }
         if self.goto_pending {
             self.goto_pending = false;
+            self.pending_keys.clear();
             if key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -1464,12 +1583,12 @@ impl App {
                     input: TextInput::default(),
                 });
             }
-            KeyCode::Char('w') | KeyCode::Char('e') | KeyCode::Char('o') if !self.busy => {
+            KeyCode::Char('w') | KeyCode::Char('e') if !self.busy => {
                 return self.open_selected(key.code == KeyCode::Char('w'));
             }
             KeyCode::Char('s') if !self.busy => {
                 if store::attempt(&self.root, &review.data.pr)?.is_some() {
-                    self.message("Check published reviews with V, then press u to resolve the previous submission before retrying.", true);
+                    self.message("Inspect published reviews, then recover the previous submission from the command palette before retrying.", true);
                 } else {
                     self.dialog = Some(Dialog::Submit {
                         event: ReviewEvent::Comment,
@@ -1621,6 +1740,7 @@ impl App {
     fn overview_key(&mut self, key: KeyEvent) -> Result<Action> {
         if self.goto_pending {
             self.goto_pending = false;
+            self.pending_keys.clear();
             match key.code {
                 KeyCode::Char('g') => {
                     self.overview.as_mut().unwrap().scroll = 0;
@@ -1732,14 +1852,11 @@ impl App {
                 let commands = commands::available(self, &input.text);
                 selected = selected.min(commands.len().saturating_sub(1));
                 match key.code {
-                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(Action::None);
-                    }
                     KeyCode::Enter => {
                         if let Some(command) = commands.get(selected)
                             && command.disabled.is_none()
                         {
-                            return self.key(command.key);
+                            return self.execute_binding(command.id);
                         }
                     }
                     KeyCode::Down | KeyCode::Tab => {
@@ -1815,11 +1932,18 @@ impl App {
                             settings.ai.model = None;
                         }
                         settings.ai.provider = provider;
-                        if let Some(path) = &self.config_path
-                            && let Err(error) = settings::save(path, &settings)
-                        {
-                            self.dialog = Some(Dialog::AgentPicker { selected });
-                            return Err(error);
+                        if let Some(path) = &self.config_path {
+                            let saved = (|| -> Result<()> {
+                                let mut persisted = settings.clone();
+                                if path.exists() {
+                                    persisted.keybindings = settings::load(path)?.keybindings;
+                                }
+                                settings::save(path, &persisted)
+                            })();
+                            if let Err(error) = saved {
+                                self.dialog = Some(Dialog::AgentPicker { selected });
+                                return Err(error);
+                            }
                         }
                         if self.settings.ai.provider != provider {
                             self.chat = Chat::default();
@@ -1910,7 +2034,7 @@ impl App {
                         return Err(error);
                     }
                     self.message(
-                        "Marked as not submitted. Drafts remain; s starts a new preview.",
+                        "Marked as not submitted. Drafts remain saved; start a new review preview when ready.",
                         false,
                     );
                     None
@@ -1942,7 +2066,7 @@ impl App {
                     match self.add_note(anchor.clone(), reply_to.clone(), "user".into()) {
                         Ok(_) => {
                             self.message(
-                                "Local note saved. N shows notes and replies; t toggles them.",
+                                "Local note saved. Manage notes and replies from the command palette.",
                                 false,
                             );
                             None
@@ -2089,7 +2213,7 @@ impl App {
                         }
                         review.drafts = drafts;
                         review.selection = None;
-                        self.message("Draft saved locally. D manages drafts; s previews and submits a review.", false);
+                        self.message("Draft saved locally. Manage drafts or prepare a review from the command palette.", false);
                         None
                     }
                 } else {
@@ -2250,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn o_opens_the_selected_pr_and_file_and_is_blocked_while_busy() {
+    fn o_opens_prs_while_explicit_editor_shortcuts_open_source() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::new(dir.path().into(), false);
         let data = demo_data();
@@ -2266,7 +2390,8 @@ mod tests {
         app.key(key('j')).unwrap();
         app.key(key('j')).unwrap();
         app.review.as_mut().unwrap().focus = Focus::Files;
-        match app.key(key('o')).unwrap() {
+        assert!(matches!(app.key(key('o')).unwrap(), Action::None));
+        match app.key(key('e')).unwrap() {
             Action::Prepare {
                 open_editor: Some(target),
                 ..
@@ -2277,9 +2402,9 @@ mod tests {
             _ => panic!("Opening a file should prepare its review workspace"),
         }
         app.review.as_mut().unwrap().workspace = Some(dir.path().into());
-        assert!(matches!(app.key(key('o')).unwrap(), Action::OpenEditor(_)));
+        assert!(matches!(app.key(key('e')).unwrap(), Action::OpenEditor(_)));
         app.busy = true;
-        assert!(matches!(app.key(key('o')).unwrap(), Action::None));
+        assert!(matches!(app.key(key('e')).unwrap(), Action::None));
     }
 
     #[test]
