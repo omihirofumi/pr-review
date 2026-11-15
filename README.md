@@ -51,8 +51,8 @@ Register prpr as a Jujutsu external viewer:
 ```sh
 jj config set --user merge-tools.prpr.program prpr
 jj config set --user merge-tools.prpr.diff-args '["difftool", "$left", "$right"]'
-jj diff --tool prpr
-jj diff -r @- --tool prpr
+jj --no-pager diff --tool prpr
+jj --no-pager diff -r @- --tool prpr
 ```
 
 To make plain `jj diff` use prpr as well:
@@ -60,6 +60,8 @@ To make plain `jj diff` use prpr as well:
 ```sh
 jj config set --user ui.diff-formatter prpr
 ```
+
+`--no-pager` avoids returning to Jujutsu's own pager after closing the TUI. With prpr configured as the default formatter, use `jj --no-pager diff` for the same direct exit.
 
 The external viewer reads the exact temporary directories supplied by Jujutsu. Reopen `jj diff` to refresh that snapshot; use native `prpr diff` for refreshes inside the TUI. Repository association uses the launching shell's `PWD`. When a wrapper uses `jj -R` to review a different repository, add `--repo-root /absolute/repository/path` to that wrapper's `difftool` arguments.
 
