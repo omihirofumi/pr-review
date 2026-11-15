@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pr_review::{
     analysis::Analysis,
     assistant::{self, Chat},
+    context::{self, FileContext, FullFile},
     diff::{self, DiffLine, LineKind},
     model::*,
     settings::{self, Provider, Settings},
@@ -228,6 +229,7 @@ pub struct OverviewState {
 }
 
 pub struct ReviewState {
+    pub contexts: Vec<context::FileState>,
     pub data: ReviewData,
     pub lines: Vec<Vec<DiffLine>>,
     pub selected_file: usize,
@@ -272,6 +274,159 @@ impl ReviewState {
         let selection = self.selection?;
         let cursor = self.position();
         Some((selection.anchor.min(cursor), selection.anchor.max(cursor)))
+    }
+
+    fn current_hunks(&self, file: usize) -> Vec<usize> {
+        let position = self.positions[file];
+        if let Some(view) = &self.contexts[file].view {
+            return view.hunks_at(position);
+        }
+        vec![
+            self.lines[file]
+                .iter()
+                .take(position.saturating_add(1))
+                .filter(|row| row.kind == LineKind::Hunk)
+                .count()
+                .saturating_sub(1),
+        ]
+    }
+
+    pub fn change_context(&mut self, command: char) -> Result<Option<usize>> {
+        let file = self.selected_file;
+        if self.current_file().is_none() {
+            bail!("Select a file to expand");
+        }
+        let hunks = self.current_hunks(file);
+        let state = &mut self.contexts[file];
+        if command == '+' && state.expansion.full {
+            return Ok(None);
+        }
+        match command {
+            '+' => {
+                for hunk in hunks {
+                    let radius = state.expansion.radius.entry(hunk).or_default();
+                    *radius = radius.saturating_add(20);
+                }
+            }
+            '-' => {
+                if state.expansion.full {
+                    state.expansion = Default::default();
+                } else {
+                    for hunk in hunks {
+                        state.expansion.radius.remove(&hunk);
+                    }
+                }
+            }
+            'F' => state.expansion.full = !state.expansion.full,
+            _ => return Ok(None),
+        }
+        self.focus = Focus::Diff;
+        if state.full_file.is_some() {
+            self.rebuild_context(file);
+            return Ok(None);
+        }
+        if command != '-' && !state.loading {
+            state.loading = true;
+            return Ok(Some(file));
+        }
+        Ok(None)
+    }
+
+    pub fn accept_context(&mut self, file: usize, source: FileContext) -> Result<()> {
+        self.contexts[file].loading = false;
+        self.contexts[file].full_file = Some(FullFile::new(&self.data.files[file], &source)?);
+        self.rebuild_context(file);
+        Ok(())
+    }
+
+    fn rebuild_context(&mut self, file: usize) {
+        let position = self.positions[file];
+        let cursor = self.lines[file].get(position).cloned();
+        let hint = self.current_hunks(file).first().copied().unwrap_or(0);
+        let anchor = if file == self.selected_file {
+            self.selection.and_then(|selection| {
+                self.lines[file]
+                    .get(selection.anchor)
+                    .cloned()
+                    .map(|row| (selection, row))
+            })
+        } else {
+            None
+        };
+        let state = &mut self.contexts[file];
+        let Some(source) = &state.full_file else {
+            return;
+        };
+        let view = source.render(&state.expansion);
+        let locate = |old: &DiffLine| {
+            view.lines.iter().position(|row| {
+                row.kind == old.kind
+                    && row.old_line == old.old_line
+                    && row.new_line == old.new_line
+                    && row.text == old.text
+            })
+        };
+        let exact = cursor.as_ref().and_then(locate);
+        let target = exact.unwrap_or_else(|| {
+            cursor
+                .as_ref()
+                .and_then(DiffLine::anchor)
+                .and_then(|(side, line)| {
+                    view.lines
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            row.anchor()
+                                .filter(|(row_side, _)| row_side == &side)
+                                .map(|(_, number)| (index, number.abs_diff(line)))
+                        })
+                        .min_by_key(|(_, distance)| *distance)
+                        .map(|(index, _)| index)
+                })
+                .unwrap_or_else(|| view.position_for_hunk(hint))
+        });
+        if file == self.selected_file {
+            self.selection = anchor.and_then(|(mut selection, row)| {
+                exact?;
+                selection.anchor = locate(&row)?;
+                Some(selection)
+            });
+        }
+        self.positions[file] = target;
+        self.lines[file] = view.lines.clone();
+        state.view = Some(view);
+    }
+
+    pub fn ai_data(&self, focus: Option<&assistant::Focus>) -> ReviewData {
+        let mut data = self.data.clone();
+        if let Some(focus) = focus
+            && let Some(index) = data
+                .files
+                .iter()
+                .position(|file| file.filename == focus.path)
+            && self.contexts[index].view.is_some()
+        {
+            data.files[index].patch = Some(focus.patch.clone());
+        }
+        data
+    }
+
+    pub fn question_focus(&self) -> Result<Box<assistant::Focus>> {
+        let file = self
+            .current_file()
+            .ok_or_else(|| anyhow::anyhow!("Choose a file"))?;
+        if let Some(view) = &self.contexts[self.selected_file].view {
+            return Ok(Box::new(view.question_focus(
+                file,
+                self.position(),
+                self.selected_range(),
+            )?));
+        }
+        Ok(Box::new(assistant::Focus::from_file(
+            file,
+            self.position(),
+            self.selected_range(),
+        )?))
     }
 
     fn select_line(&mut self, extend_below: bool) -> Result<()> {
@@ -380,7 +535,9 @@ impl ReviewState {
             body: String::new(),
         };
         if !diff::validate_comment(file, &draft) {
-            bail!("Comment ranges must use numbered lines on one side of a single complete hunk");
+            bail!(
+                "GitHub comments must stay inside one original diff hunk; use Q to ask about expanded context"
+            );
         }
         Ok(draft)
     }
@@ -492,6 +649,8 @@ impl ReviewState {
 }
 
 pub enum Action {
+    Browse(PrId),
+    LoadContext(usize),
     PreviewGuide(PrId),
     Ask {
         question: String,
@@ -706,6 +865,9 @@ impl App {
             }
         }
         let positions = vec![0; data.files.len()];
+        let contexts = (0..data.files.len())
+            .map(|_| context::FileState::default())
+            .collect();
         let lines = data
             .files
             .iter()
@@ -720,6 +882,7 @@ impl App {
             self.repo = Some(data.pr.id.repo.clone());
         }
         self.review = Some(ReviewState {
+            contexts,
             data,
             lines,
             selected_file: 0,
@@ -784,6 +947,27 @@ impl App {
             }
             return Ok(Action::None);
         }
+        if key.code == KeyCode::Char('B')
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            let id = self
+                .overview
+                .as_ref()
+                .map(|state| state.metadata.id.clone())
+                .or_else(|| self.review.as_ref().map(|state| state.data.pr.id.clone()))
+                .or_else(|| {
+                    if self.busy {
+                        None
+                    } else {
+                        self.visible_prs()
+                            .get(self.selected_pr)
+                            .map(|pr| pr.id.clone())
+                    }
+                });
+            return Ok(id.map_or(Action::None, Action::Browse));
+        }
         if matches!(key.code, KeyCode::Char('Q') | KeyCode::Char('E'))
             && let Some(review) = &self.review
         {
@@ -791,13 +975,7 @@ impl App {
                 bail!("Choose Codex or Claude with A before asking");
             }
             let focus = if self.tab == PageTab::Diff || self.overview.is_none() {
-                Some(Box::new(assistant::Focus::from_file(
-                    review
-                        .current_file()
-                        .ok_or_else(|| anyhow::anyhow!("Choose a file"))?,
-                    review.position(),
-                    review.selected_range(),
-                )?))
+                Some(review.question_focus()?)
             } else {
                 None
             };
@@ -953,6 +1131,11 @@ impl App {
             return self.inbox_key(key);
         }
         let review = self.review.as_mut().unwrap();
+        if let KeyCode::Char(command @ ('+' | '-' | 'F')) = key.code {
+            return Ok(review
+                .change_context(command)?
+                .map_or(Action::None, Action::LoadContext));
+        }
         match key.code {
             KeyCode::Esc if review.selection.is_some() => {
                 review.selection = None;

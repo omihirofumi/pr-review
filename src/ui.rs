@@ -293,15 +293,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.overview.is_some() && app.review.is_none() {
         " 1 Overview  2 Diff  Tab views  r retry  ? keys "
     } else if app.review.is_some() && area.width < 76 {
-        " v select  x/X lines  c note  o open  ? keys "
+        " +/- context  F full  B GitHub  Q ask  ? keys "
     } else if app.review.is_some() && area.width < 105 {
-        " v select  c note  Q ask  E explain  o open  t threads  ? keys "
+        " + expand  - collapse  F full  B GitHub  Q ask  E explain  o open  ? keys "
     } else if app.review.is_some() {
-        " v select  x/X lines  gg/ge top/end  gf/o open  Q ask  E explain  c note  t toggle  s submit  ? keys "
+        " v/x select  +/- context  F full  B GitHub  Q ask  E explain  c note  o open  s submit  ? keys "
     } else if area.width < 76 {
-        " j/k select  o diff  p preview  ? keys "
+        " j/k select  o diff  B GitHub  p preview  ? "
     } else {
-        " j/k select  o diff  Tab focus  p/P preview  [/] tabs  a guide  ? keys "
+        " j/k select  o diff  B GitHub  p/P preview  [/] tabs  a guide  ? keys "
     };
     frame.render_widget(
         Paragraph::new(keys).style(Style::default().fg(MUTED).bg(PANEL)),
@@ -1558,9 +1558,19 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
         .right_aligned(),
         stats,
     );
+    let context = &review.contexts[review.selected_file];
+    let context_label = if context.loading {
+        " · context loading…"
+    } else if context.expansion.full {
+        " · full file"
+    } else if context.expansion.radius.values().any(|radius| *radius > 0) {
+        " · expanded"
+    } else {
+        ""
+    };
     frame.render_widget(
         Paragraph::new(format!(
-            " {} · {drafts} draft{} · {}",
+            " {} · {drafts} draft{} · {}{context_label}",
             if comments_loading {
                 "comments loading".into()
             } else {
@@ -2345,7 +2355,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 84,
                 32,
             );
-            frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
+            frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nCONTEXT\n  +               Reveal 20 more lines around this hunk\n  -               Collapse this hunk's expanded context\n  F               Toggle full file / diff context\n  B               Open selected PR on GitHub\n                  Available in list, Overview, and Diff\n  Expanded lines  Read, select, ask AI, or open in Helix\n  GitHub comments Stay inside the original diff hunks\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
         }
         Dialog::Description { scroll } => {
             draw_description(frame, app, *scroll);

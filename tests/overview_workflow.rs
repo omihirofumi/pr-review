@@ -701,6 +701,73 @@ mod cli {
             assert!(cancel.load(Ordering::Relaxed));
         }
     }
+    #[cfg(test)]
+    mod context_background {
+        use super::*;
+        #[test]
+        fn file_context_and_browser_results_do_not_unlock_mutations_or_apply_stale_revisions() {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut app, source) = crate::context_fixture(directory.path().into());
+            app.generation = 9;
+            app.busy = true;
+            let pr = app.review.as_ref().unwrap().data.pr.clone();
+            let filename = app.review.as_ref().unwrap().data.files[0].filename.clone();
+            let mut runtime = Runtime::default();
+            let (sender, _) = mpsc::channel();
+            app.review.as_mut().unwrap().contexts[0].loading = true;
+            apply_background(
+                JobResult::FileContext {
+                    generation: 8,
+                    pr: Box::new(pr.clone()),
+                    filename: filename.clone(),
+                    result: Ok(source.clone()),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(app.review.as_ref().unwrap().contexts[0].loading);
+            let mut old = pr.clone();
+            old.head_sha = "0".repeat(40);
+            apply_background(
+                JobResult::FileContext {
+                    generation: 9,
+                    pr: Box::new(old),
+                    filename: filename.clone(),
+                    result: Ok(source.clone()),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(app.review.as_ref().unwrap().contexts[0].loading);
+            apply_background(
+                JobResult::FileContext {
+                    generation: 9,
+                    pr: Box::new(pr.clone()),
+                    filename,
+                    result: Ok(source),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(!app.review.as_ref().unwrap().contexts[0].loading);
+            assert!(app.busy);
+            apply_background(
+                JobResult::Browser {
+                    generation: 9,
+                    id: pr.id,
+                    result: Ok(()),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(app.busy);
+            assert!(app.status.contains("on GitHub"));
+        }
+    }
 }
 
 fn browsing_app(root: std::path::PathBuf) -> App {
@@ -877,4 +944,181 @@ fn keeping_the_same_agent_preserves_chat_and_switching_agents_clears_it() {
     app.dialog = Some(Dialog::AgentPicker { selected: 1 });
     app.key(key(KeyCode::Enter)).unwrap();
     assert!(app.chat.error.is_none());
+}
+
+fn context_fixture(root: std::path::PathBuf) -> (App, pr_review::context::FileContext) {
+    let mut data = app::demo_data();
+    data.comments.clear();
+    data.files[0].patch = Some("@@ -9,3 +9,4 @@ first\n line 9\n-line 10\n+changed 10\n+extra 10\n line 11\n@@ -39,3 +40,3 @@ second\n line 39\n-line 40\n+changed 40\n line 41".into());
+    data.files[0].additions = 3;
+    data.files[0].deletions = 2;
+    let base = (1..=60).map(|line| format!("line {line}\n")).collect();
+    let head = (1..=60)
+        .map(|line| match line {
+            10 => "changed 10\nextra 10\n".into(),
+            40 => "changed 40\n".into(),
+            _ => format!("line {line}\n"),
+        })
+        .collect();
+    let mut app = App::new(root, false);
+    app.loaded(data).unwrap();
+    app.settings.ai.provider = Provider::Codex;
+    (app, pr_review::context::FileContext { base, head })
+}
+
+#[test]
+fn expanded_context_preserves_selection_editor_coordinates_and_original_review_patch() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, source) = context_fixture(directory.path().into());
+    let review = app.review.as_mut().unwrap();
+    let original = review.data.files[0].patch.clone();
+    review.positions[0] = review.lines[0]
+        .iter()
+        .position(|row| row.old_line == Some(40) && row.new_line.is_none())
+        .unwrap();
+    let anchor = review.lines[0]
+        .iter()
+        .position(|row| row.old_line == Some(39))
+        .unwrap();
+    review.selection = Some(app::Selection {
+        anchor,
+        extending: true,
+    });
+    assert!(matches!(
+        press(&mut app, '+').unwrap(),
+        Action::LoadContext(0)
+    ));
+    app.review
+        .as_mut()
+        .unwrap()
+        .accept_context(0, source)
+        .unwrap();
+    let review = app.review.as_ref().unwrap();
+    assert_eq!(review.anchor(), Some((Side::Left, 40)));
+    let (start, _) = review.selected_range().unwrap();
+    assert_eq!(review.current_lines()[start].old_line, Some(39));
+    assert_eq!(review.editor_target().unwrap().line, 40);
+    assert_eq!(review.data.files[0].patch, original);
+    press(&mut app, 'c').unwrap();
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Compose { draft, .. }) if draft.start_line == Some(39) && draft.line == 40 && draft.side == Side::Left)
+    );
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(matches!(
+        press(&mut app, 'E').unwrap(),
+        Action::Ask { focus: Some(_), .. }
+    ));
+    app.key(key(KeyCode::Esc)).unwrap();
+    press(&mut app, '-').unwrap();
+    assert_eq!(
+        app.review.as_ref().unwrap().anchor(),
+        Some((Side::Left, 40))
+    );
+    press(&mut app, 'F').unwrap();
+    assert_eq!(
+        app.review.as_ref().unwrap().anchor(),
+        Some((Side::Left, 40))
+    );
+    for (width, height) in [(48, 12), (80, 24), (140, 40)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+    }
+    assert!(screen(&mut app).contains("full file"));
+}
+
+#[test]
+fn unchanged_expanded_lines_allow_ai_and_helix_but_not_github_review_drafts() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, source) = context_fixture(directory.path().into());
+    assert!(matches!(
+        press(&mut app, 'F').unwrap(),
+        Action::LoadContext(0)
+    ));
+    app.review
+        .as_mut()
+        .unwrap()
+        .accept_context(0, source)
+        .unwrap();
+    let review = app.review.as_mut().unwrap();
+    review.positions[0] = review.lines[0]
+        .iter()
+        .position(|row| row.new_line == Some(1))
+        .unwrap();
+    assert_eq!(review.editor_target().unwrap().line, 1);
+    press(&mut app, 'x').unwrap();
+    assert!(
+        press(&mut app, 'c')
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("original diff")
+    );
+    let Action::Ask {
+        focus: Some(focus), ..
+    } = press(&mut app, 'E').unwrap()
+    else {
+        panic!("Missing AI focus")
+    };
+    assert_eq!(focus.selected_lines[0].new_line, Some(1));
+    let review = app.review.as_ref().unwrap();
+    assert!(
+        review.ai_data(Some(&focus)).files[0]
+            .patch
+            .as_ref()
+            .unwrap()
+            .contains(&focus.patch)
+    );
+    assert!(review.drafts.is_empty());
+    app.key(key(KeyCode::Esc)).unwrap();
+    press(&mut app, 'F').unwrap();
+    let review = app.review.as_ref().unwrap();
+    assert!(review.position() < review.current_lines().len());
+    assert!(review.selection.is_none());
+}
+
+#[test]
+fn context_loading_keeps_other_files_navigable_and_reuses_loaded_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, source) = context_fixture(directory.path().into());
+    assert!(matches!(
+        press(&mut app, '+').unwrap(),
+        Action::LoadContext(0)
+    ));
+    assert!(matches!(press(&mut app, '+').unwrap(), Action::None));
+    press(&mut app, 'n').unwrap();
+    let review = app.review.as_mut().unwrap();
+    review.positions[1] = 3;
+    review.accept_context(0, source).unwrap();
+    assert_eq!(review.selected_file, 1);
+    assert_eq!(review.position(), 3);
+    press(&mut app, 'p').unwrap();
+    assert!(matches!(press(&mut app, '+').unwrap(), Action::None));
+    assert!(!app.review.as_ref().unwrap().contexts[0].loading);
+}
+
+#[test]
+fn github_browser_shortcut_uses_selected_pr_in_all_views_and_does_not_intercept_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = browsing_app(directory.path().into());
+    assert!(matches!(press(&mut app, 'B').unwrap(), Action::Browse(id) if id.number == 1));
+    press(&mut app, 'j').unwrap();
+    assert!(matches!(press(&mut app, 'B').unwrap(), Action::Browse(id) if id.number == 2));
+    app.opened(overview());
+    assert!(matches!(press(&mut app, 'B').unwrap(), Action::Browse(id) if id.number == 42));
+    app.accept_diff(app::demo_data()).unwrap();
+    app.tab = PageTab::Diff;
+    assert!(
+        matches!(press(&mut app, 'B').unwrap(), Action::Browse(id) if id.repo == "example/service")
+    );
+    app.dialog = Some(Dialog::Ask {
+        input: Default::default(),
+        focus: None,
+        scroll: 0,
+    });
+    assert!(matches!(press(&mut app, 'B').unwrap(), Action::None));
+    assert!(matches!(&app.dialog, Some(Dialog::Ask { input, .. }) if input.text == "B"));
+    app.dialog = None;
+    app.filtering = true;
+    assert!(matches!(press(&mut app, 'B').unwrap(), Action::None));
+    assert_eq!(app.filter, "B");
 }

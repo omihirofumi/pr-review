@@ -155,7 +155,9 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `;` | Collapse the selection at the cursor |
 | `Ctrl-d` / `Ctrl-u`, PageDown / PageUp | Move through the diff |
 | left / right | Scroll long diff lines horizontally |
-| `b` | PR description |
+| `b` / `B` | PR description / open PR on GitHub |
+| `+` / `-` | Expand 20 context lines / collapse current context |
+| `F` | Toggle full-file context |
 | `t` | Toggle inline comments, replies, and local drafts |
 | `T` / `V` | Full inline thread list / published reviews |
 | `#` | Open a PR by number in the selected repository |
@@ -171,6 +173,20 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 The Hunk Review-inspired layout uses a compact file sidebar, separate hunk headers, and shaded addition/deletion rows. The selected source line is highlighted across its full width, with distinct selection colors for added and deleted lines. Comment counts remain visible when the inline threads are hidden. Toggling threads preserves the selected source line, including its comment and Helix coordinates. Long inline cards show a preview; use `T` to read the full published thread, or `D` and `o` to open the full draft.
 
 The terminal needs at least 48 columns and 12 rows; 100 columns or more gives the diff more space. Paste is supported in comment, summary, and PR-number editors. Arrow keys, Home, End, Backspace, `Ctrl-h` (backspace), and Delete edit text.
+
+## Expand unchanged context and open GitHub
+
+Diff starts with GitHub's original patch. Press `+` to reveal 20 more unchanged lines before and after the current hunk or visible hunk group. Nearby hunks merge when their expanded context overlaps. Press `-` to collapse that group's extra context. `F` toggles the full file; toggling it off restores the previous expansion. Pressing `-` in full-file mode returns to the collapsed diff.
+
+Hidden regions show the number of unchanged lines. The selected source location and selection endpoints stay tied to their original line numbers as context expands. `j` / `k`, `gg` / `ge`, hunk navigation, comments, and Helix opening continue to use those coordinates. If collapse hides the cursor's line, the cursor moves to the nearest visible source line.
+
+Source loads only when requested, using the exact PR head and diff merge-base revisions. Renames use the previous filename on the base side. Validated source is cached by repository, revisions, and file identity, so repeated expansion does not fetch it again. This uses GitHub's file APIs and does not prepare a checkout or fetch Git history. Loading context leaves the rest of the interface usable.
+
+Full-file context supports UTF-8 text without NUL bytes, up to 2 MiB and 100,000 lines per side. The patch must match both source revisions and describe the changes between them. Unsupported, incomplete, or unavailable content leaves the original diff usable; `o` can still open a review workspace in Helix.
+
+Expanded lines can be selected, opened in Helix, or used with `Q` / `E`. For selections within one displayed hunk, agent questions use the selected region and up to 20 nearby source rows. Selections spanning multiple hunks include those hunks and remain subject to the configured context budget. GitHub review drafts remain limited to the original patch's complete hunks.
+
+Press `B` in the PR list, Overview, or Diff to open the selected PR in your configured browser through GitHub CLI. The shortcut follows the selected repository and PR number. In text editors and the list filter, `B` remains ordinary text input.
 
 ## Local workspaces and drafts
 

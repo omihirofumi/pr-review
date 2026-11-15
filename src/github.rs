@@ -1,5 +1,7 @@
 use std::{
-    fmt,
+    collections::hash_map::DefaultHasher,
+    fmt, fs,
+    hash::{Hash, Hasher},
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
@@ -8,10 +10,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, de::DeserializeOwned};
+use base64::Engine;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::{
+    context::{FileContext, FullFile},
     diff::validate_comment,
     model::{
         ChangedFile, DraftComment, PrId, PrOverview, PrSummary, PullRequest, ReviewComment,
@@ -20,6 +24,176 @@ use crate::{
 };
 
 const GH_TIMEOUT: Duration = Duration::from_secs(90);
+const MAX_CONTEXT_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Deserialize, Serialize)]
+struct CachedContext {
+    identity: String,
+    source: FileContext,
+}
+
+pub fn open_in_browser(id: &PrId) -> Result<()> {
+    validate_id(id)?;
+    gh(
+        &[
+            "pr",
+            "view",
+            &id.number.to_string(),
+            "--repo",
+            &id.repo,
+            "--web",
+        ],
+        None,
+    )?;
+    Ok(())
+}
+
+pub fn load_file_context(
+    pr: &PullRequest,
+    file: &ChangedFile,
+    cache_root: &Path,
+) -> Result<FileContext> {
+    validate_id(&pr.id)?;
+    validate_sha(&pr.base_sha)?;
+    validate_sha(&pr.head_sha)?;
+    let identity = serde_json::to_string(
+        &json!({"repo": pr.id.repo, "base": pr.base_sha, "head": pr.head_sha, "file": file}),
+    )?;
+    let mut hasher = DefaultHasher::new();
+    identity.hash(&mut hasher);
+    let path = cache_root
+        .join(&pr.id.repo)
+        .join(format!("{:016x}.json", hasher.finish()));
+    if let Ok(bytes) = fs::read(&path)
+        && bytes.len() <= MAX_CONTEXT_BYTES * 4
+        && let Ok(entry) = serde_json::from_slice::<CachedContext>(&bytes)
+        && entry.identity == identity
+        && FullFile::new(file, &entry.source).is_ok()
+    {
+        return Ok(entry.source);
+    }
+    let source = thread::scope(|scope| -> Result<FileContext> {
+        let base = scope.spawn(|| {
+            if file.status == "added" {
+                Ok(String::new())
+            } else {
+                file_at(
+                    &pr.id.repo,
+                    file.previous_filename.as_deref().unwrap_or(&file.filename),
+                    &pr.base_sha,
+                )
+            }
+        });
+        let head = scope.spawn(|| {
+            if file.status == "removed" {
+                Ok(String::new())
+            } else {
+                file_at(&pr.id.repo, &file.filename, &pr.head_sha)
+            }
+        });
+        let base = base
+            .join()
+            .map_err(|_| anyhow::anyhow!("Base file worker failed"))?;
+        let head = head
+            .join()
+            .map_err(|_| anyhow::anyhow!("Head file worker failed"))?;
+        Ok(FileContext {
+            base: base?,
+            head: head?,
+        })
+    })?;
+    FullFile::new(file, &source)?;
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_ok()
+        && let Ok(mut temporary) = tempfile::NamedTempFile::new_in(parent)
+        && serde_json::to_writer(
+            &mut temporary,
+            &CachedContext {
+                identity,
+                source: source.clone(),
+            },
+        )
+        .is_ok()
+        && temporary.as_file().sync_all().is_ok()
+    {
+        let _ = temporary.persist(path);
+    }
+    Ok(source)
+}
+
+fn file_at(repo: &str, path: &str, revision: &str) -> Result<String> {
+    ensure!(
+        !path.is_empty()
+            && !path.contains('\0')
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && !matches!(part, "." | "..")),
+        "Invalid source file path"
+    );
+    let encoded = path
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect::<String>();
+    let endpoint = format!("repos/{repo}/contents/{encoded}?ref={revision}");
+    let mut value: Value = gh_json(&[
+        "api",
+        "--method",
+        "GET",
+        "-H",
+        "Accept: application/vnd.github.object+json",
+        &endpoint,
+    ])?;
+    ensure!(
+        value["type"] == "file" && value.get("submodule_git_url").is_none_or(Value::is_null),
+        "Only regular text files can be expanded"
+    );
+    let size = value["size"]
+        .as_u64()
+        .context("GitHub did not return a file size")?;
+    ensure!(
+        size <= MAX_CONTEXT_BYTES as u64,
+        "File exceeds the 2 MiB context limit; open it in Helix"
+    );
+    if value["encoding"] == "none" {
+        let sha = value["sha"].as_str().context("Missing file blob SHA")?;
+        validate_sha(sha)?;
+        value = gh_json(&[
+            "api",
+            "--method",
+            "GET",
+            &format!("repos/{repo}/git/blobs/{sha}"),
+        ])?;
+    }
+    ensure!(
+        value["encoding"] == "base64",
+        "GitHub did not return readable file content"
+    );
+    let content = value["content"]
+        .as_str()
+        .context("GitHub did not return file content")?;
+    ensure!(
+        content.len() <= MAX_CONTEXT_BYTES * 2,
+        "Encoded file content exceeds the context limit"
+    );
+    let encoded = content
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("GitHub returned invalid file encoding")?;
+    ensure!(
+        bytes.len() == size as usize && !bytes.contains(&0),
+        "Binary or incomplete file content cannot be expanded"
+    );
+    String::from_utf8(bytes).context("The file is not UTF-8 text; open it in Helix")
+}
 
 #[derive(Debug)]
 pub struct SubmissionUncertain(anyhow::Error);

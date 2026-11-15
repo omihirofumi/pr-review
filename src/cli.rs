@@ -22,7 +22,7 @@ use crossterm::{
 };
 use directories::ProjectDirs;
 use pr_review::{
-    analysis, assistant, github,
+    analysis, assistant, context, github,
     model::*,
     settings::{self, Provider},
     workspace,
@@ -89,6 +89,17 @@ impl Args {
 
 pub(crate) enum JobResult {
     Inbox(Result<Vec<PrSummary>>),
+    FileContext {
+        generation: u64,
+        pr: Box<PullRequest>,
+        filename: String,
+        result: Result<context::FileContext>,
+    },
+    Browser {
+        generation: u64,
+        id: PrId,
+        result: Result<()>,
+    },
     PreviewContext {
         generation: u64,
         request: u64,
@@ -368,7 +379,9 @@ pub fn run() -> Result<()> {
                 | JobResult::Analysis { .. }
                 | JobResult::PreviewContext { .. }
                 | JobResult::PreviewGuide { .. }
-                | JobResult::Answer { .. } => {}
+                | JobResult::Answer { .. }
+                | JobResult::FileContext { .. }
+                | JobResult::Browser { .. } => {}
             }
         }
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
@@ -417,6 +430,57 @@ pub(crate) fn apply_background(
     runtime: &mut Runtime,
 ) -> Option<JobResult> {
     match result {
+        JobResult::Browser {
+            generation,
+            id,
+            result,
+        } => {
+            if generation != app.generation {
+                return None;
+            }
+            match result {
+                Ok(()) => app.message(
+                    format!("Opened {} #{} on GitHub", id.repo, id.number),
+                    false,
+                ),
+                Err(error) => app.message(format!("Could not open GitHub: {error:#}"), true),
+            }
+        }
+        JobResult::FileContext {
+            generation,
+            pr,
+            filename,
+            result,
+        } => {
+            if generation != app.generation {
+                return None;
+            }
+            let Some(review) = &mut app.review else {
+                return None;
+            };
+            if review.data.pr.id != pr.id
+                || review.data.pr.head_sha != pr.head_sha
+                || review.data.pr.base_sha != pr.base_sha
+            {
+                return None;
+            }
+            let index = review
+                .data
+                .files
+                .iter()
+                .position(|file| file.filename == filename)?;
+            review.contexts[index].loading = false;
+            let result = result.and_then(|source| review.accept_context(index, source));
+            if let Err(error) = result {
+                review.contexts[index].expansion = Default::default();
+                app.message(
+                    format!("Cannot expand {filename}: {error:#}. + or F retries.",),
+                    true,
+                );
+            } else {
+                app.message(format!("Context ready for {filename}. +/- expands/collapses; F toggles the full file."), false);
+            }
+        }
         JobResult::PreviewContext {
             generation,
             request,
@@ -652,6 +716,79 @@ fn start_analysis(
     }));
 }
 
+fn sample_context(file: &ChangedFile) -> context::FileContext {
+    let rows = pr_review::diff::parse_patch(file.patch.as_deref().unwrap_or_default());
+    let prefix = rows
+        .iter()
+        .find_map(|row| row.old_line.or(row.new_line))
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let prefix = (0..prefix)
+        .map(|index| format!("// unchanged before hunk {}\n", index + 1))
+        .collect::<String>();
+    let suffix = if file.status == "modified" {
+        (1..=30)
+            .map(|index| format!("// unchanged after hunk {index}\n"))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+    let source = |left| {
+        prefix.clone()
+            + &rows
+                .iter()
+                .filter(|row| {
+                    if left {
+                        row.old_line.is_some()
+                    } else {
+                        row.new_line.is_some()
+                    }
+                })
+                .map(|row| format!("{}\n", &row.text[1..]))
+                .collect::<String>()
+            + &suffix
+    };
+    context::FileContext {
+        base: source(true),
+        head: source(false),
+    }
+}
+
+fn start_context(app: &mut App, sender: &mpsc::Sender<JobResult>, index: usize) -> Result<()> {
+    let review = app.review.as_mut().context("Open a diff first")?;
+    let file = review
+        .data
+        .files
+        .get(index)
+        .context("Choose a file")?
+        .clone();
+    if app.demo {
+        let source = sample_context(&file);
+        review.accept_context(index, source)?;
+        return Ok(());
+    }
+    let pr = review.data.pr.clone();
+    let filename = file.filename.clone();
+    review.contexts[index].loading = true;
+    let generation = app.generation;
+    let root = app.root.join("file-context");
+    let sender = sender.clone();
+    app.message(
+        format!("Loading exact base/head context for {filename}…"),
+        false,
+    );
+    thread::spawn(move || {
+        let result = github::load_file_context(&pr, &file, &root);
+        let _ = sender.send(JobResult::FileContext {
+            generation,
+            pr: Box::new(pr),
+            filename,
+            result,
+        });
+    });
+    Ok(())
+}
+
 fn sample_guide(data: &ReviewData) -> Box<analysis::Analysis> {
     Box::new(analysis::Analysis {
         summary: "Offline sample: keep **retry waits** within the caller’s `budget`.".into(),
@@ -725,8 +862,7 @@ fn start_question(
         .review
         .as_ref()
         .context("Wait for the diff before asking a question")?
-        .data
-        .clone();
+        .ai_data(focus.as_deref());
     let overview = app
         .overview
         .as_ref()
@@ -814,6 +950,30 @@ fn dispatch(
         return Ok(());
     }
     match action {
+        Action::Browse(id) => {
+            if app.demo {
+                app.message(
+                    "Offline demo: B opens the selected real PR on GitHub.",
+                    false,
+                );
+                return Ok(());
+            }
+            let generation = app.generation;
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let result = github::open_in_browser(&id);
+                let _ = sender.send(JobResult::Browser {
+                    generation,
+                    id,
+                    result,
+                });
+            });
+            return Ok(());
+        }
+        Action::LoadContext(index) => {
+            start_context(app, sender, index)?;
+            return Ok(());
+        }
         Action::PreviewGuide(id) => {
             start_preview(app, sender, runtime, id);
             return Ok(());
@@ -962,7 +1122,9 @@ fn dispatch(
         | Action::DisableAi
         | Action::PreviewGuide(_)
         | Action::Ask { .. }
-        | Action::CancelAsk => {
+        | Action::CancelAsk
+        | Action::Browse(_)
+        | Action::LoadContext(_) => {
             app.busy = false;
         }
     }

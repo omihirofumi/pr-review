@@ -145,7 +145,7 @@ fn append_hunk(result: &mut Vec<DiffLine>, raw: &[&str]) {
 
 type HunkRange = (u32, u32);
 
-fn parse_header(header: &str) -> Option<(HunkRange, HunkRange)> {
+pub(crate) fn parse_header(header: &str) -> Option<(HunkRange, HunkRange)> {
     let (ranges, suffix) = header.strip_prefix("@@ ")?.split_once(" @@")?;
     if !suffix.is_empty() && !suffix.starts_with(' ') {
         return None;
