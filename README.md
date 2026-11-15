@@ -15,16 +15,27 @@ brew tap omihirofumi/tap
 brew install omihirofumi/tap/prpr
 ```
 
-The formula builds the tagged release from source and installs GitHub CLI, Jujutsu, Git, and Helix as dependencies. Update it with `brew update` followed by `brew upgrade omihirofumi/tap/prpr`.
+The formula builds the tagged release from source using Rust as a build dependency. It does not install runtime tools; prpr uses the executables already on your `PATH`. Update it with `brew update` followed by `brew upgrade omihirofumi/tap/prpr`.
+
+Install only the tools needed for the features you use, using your preferred installation method:
+
+| Feature | Tools on `PATH` |
+| --- | --- |
+| GitHub PR browsing and reviews | [GitHub CLI](https://cli.github.com/) (`gh`), authenticated with `gh auth login`; Git (`git`) for repository discovery |
+| Local Jujutsu review | [Jujutsu](https://docs.jj-vcs.dev/latest/install-and-setup/) (`jj`) |
+| Isolated PR checkout | Jujutsu (`jj`) and Git (`git`) |
+| Open source in Helix | [Helix](https://docs.helix-editor.com/install.html) (`hx`) |
+| AI explanations | Codex or Claude CLI, installed and authenticated separately |
+
+Opening GitHub source also requires the isolated PR checkout tools. When using a custom [`HELIX_RUNTIME`](https://docs.helix-editor.com/building-from-source.html), keep it compatible with the `hx` binary on your `PATH`.
 
 ### Cargo
 
-Install Rust, [GitHub CLI](https://cli.github.com/), [Jujutsu](https://docs.jj-vcs.dev/latest/install-and-setup/), Git, and [Helix](https://docs.helix-editor.com/install.html). Make `gh`, `jj`, `git`, and `hx` available on `PATH`.
+Install Rust to build prpr, then install the runtime tools for your chosen features from the table above.
 
 From the source checkout:
 
 ```sh
-gh auth login
 cargo install --path . --locked
 ```
 
