@@ -1180,3 +1180,283 @@ fn local_review_keys_save_notes_reply_and_keep_github_submission_unavailable() {
             .is_empty()
     );
 }
+
+fn ctrl(app: &mut App, character: char) -> anyhow::Result<Action> {
+    app.key(KeyEvent::new(
+        KeyCode::Char(character),
+        KeyModifiers::CONTROL,
+    ))
+}
+
+fn palette_app(root: &std::path::Path) -> App {
+    let mut app = App::new(root.into(), false);
+    app.settings.ai.provider = Provider::Codex;
+    app.opened(overview());
+    let mut data = app::demo_data();
+    data.files = vec![
+        prpr::model::ChangedFile {
+            filename: "a.rs".into(),
+            previous_filename: None,
+            status: "modified".into(),
+            additions: 2,
+            deletions: 2,
+            patch: Some("@@ -1 +1 @@\n-old\n+new\n@@ -10 +10 @@\n-before\n+after".into()),
+        },
+        prpr::model::ChangedFile {
+            filename: "b.bin".into(),
+            previous_filename: None,
+            status: "modified".into(),
+            additions: 0,
+            deletions: 0,
+            patch: None,
+        },
+        prpr::model::ChangedFile {
+            filename: "c.rs".into(),
+            previous_filename: None,
+            status: "modified".into(),
+            additions: 1,
+            deletions: 1,
+            patch: Some("@@ -3 +3 @@\n-a\n+b".into()),
+        },
+    ];
+    app.accept_diff(data).unwrap();
+    app.tab = PageTab::Diff;
+    app
+}
+
+fn palette_run(app: &mut App, query: &str) -> Action {
+    ctrl(app, 'k').unwrap();
+    app.paste(query);
+    app.key(key(KeyCode::Enter)).unwrap()
+}
+
+#[test]
+fn palette_search_uses_shared_actions_and_never_submits_without_the_existing_preview() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    press(&mut app, 'x').unwrap();
+    let position = app.review.as_ref().unwrap().position();
+    assert!(matches!(
+        palette_run(&mut app, "file sidebar"),
+        Action::None
+    ));
+    assert!(!app.file_sidebar);
+    assert_eq!(app.review.as_ref().unwrap().position(), position);
+    assert!(app.review.as_ref().unwrap().selection.is_some());
+    assert!(!screen(&mut app).contains("CHANGES"));
+    assert!(matches!(palette_run(&mut app, "next hunk"), Action::None));
+    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    assert!(matches!(palette_run(&mut app, "prev hunk"), Action::None));
+    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert!(matches!(
+        palette_run(&mut app, "Explain diff"),
+        Action::Ask { .. }
+    ));
+    assert!(matches!(app.dialog, Some(Dialog::Ask { .. })));
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(matches!(
+        palette_run(&mut app, "review summary"),
+        Action::None
+    ));
+    assert!(matches!(app.dialog, Some(Dialog::Submit { .. })));
+    app.paste("A review summary");
+    assert!(matches!(ctrl(&mut app, 's').unwrap(), Action::None));
+    assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
+}
+
+#[test]
+fn palette_handles_disabled_actions_empty_results_paste_and_modal_text_without_binding_conflicts() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    app.settings.ai.provider = Provider::None;
+    palette_run(&mut app, "explain diff");
+    assert!(matches!(app.dialog, Some(Dialog::Palette { .. })));
+    assert!(screen(&mut app).contains("Choose an AI agent with A first"));
+    ctrl(&mut app, 'u').unwrap();
+    app.paste("no matching command 日本語");
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert!(screen(&mut app).contains("No matching commands"));
+    ctrl(&mut app, 'h').unwrap();
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Palette { input, .. }) if input.text.ends_with("日本"))
+    );
+    ctrl(&mut app, 'k').unwrap();
+    assert!(app.dialog.is_none());
+    ctrl(&mut app, 'k').unwrap();
+    app.key(key(KeyCode::Down)).unwrap();
+    app.paste("NEXT\nHUNK");
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Palette { input, selected: 0 }) if input.text == "NEXT HUNK")
+    );
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    press(&mut app, 'x').unwrap();
+    press(&mut app, 'C').unwrap();
+    app.paste("Keep this text");
+    ctrl(&mut app, 'b').unwrap();
+    ctrl(&mut app, 'k').unwrap();
+    assert!(app.file_sidebar);
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Note { input, .. }) if input.text == "Keep this text")
+    );
+}
+
+#[test]
+fn palette_tracks_inbox_overview_local_and_busy_contexts() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    app.tab = PageTab::Overview;
+    assert!(app::commands::available(&app, "hunk").is_empty());
+    assert!(matches!(palette_run(&mut app, "show diff"), Action::None));
+    assert_eq!(app.tab, PageTab::Diff);
+    app.busy = true;
+    palette_run(&mut app, "helix");
+    assert!(matches!(app.dialog, Some(Dialog::Palette { .. })));
+    assert!(screen(&mut app).contains("Wait for the current operation"));
+    app.key(key(KeyCode::Esc)).unwrap();
+    app.busy = false;
+    app.local_spec = Some(prpr::local::Spec::Jj {
+        repository: root.path().into(),
+        revision: None,
+        from: None,
+        to: None,
+    });
+    app.review.as_mut().unwrap().data.source = prpr::model::ReviewSource::Local {
+        repository: root.path().into(),
+        label: "local".into(),
+    };
+    assert!(app::commands::available(&app, "github").is_empty());
+    assert!(app::commands::available(&app, "checkout").is_empty());
+    assert!(matches!(
+        palette_run(&mut app, "refresh"),
+        Action::RefreshLocal
+    ));
+    let mut inbox = App::new(root.path().into(), false);
+    inbox.inbox = vec![prpr::model::PrSummary {
+        id: prpr::model::PrId {
+            repo: "owner/repo".into(),
+            number: 4,
+        },
+        title: "Fix behavior".into(),
+        body: String::new(),
+        author: "someone".into(),
+        draft: false,
+    }];
+    inbox.filtering = true;
+    inbox.filter = "fix".into();
+    assert!(matches!(palette_run(&mut inbox, "selected pr"), Action::LoadPr(id) if id.number == 4));
+    assert!(!inbox.filtering);
+    assert_eq!(inbox.filter, "fix");
+}
+
+#[test]
+fn hunk_navigation_crosses_files_skips_missing_patches_and_stays_with_active_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    press(&mut app, 'v').unwrap();
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+    press(&mut app, ';').unwrap();
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 2);
+    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 2);
+    press(&mut app, '[').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    press(&mut app, '[').unwrap();
+    press(&mut app, '[').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+}
+
+#[test]
+fn original_hunks_remain_navigable_when_context_merges_them_or_shows_the_full_file() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    let source = prpr::context::FileContext {
+        base: (1..=10)
+            .map(|line| match line {
+                1 => "old\n".to_owned(),
+                10 => "before\n".into(),
+                _ => format!("same {line}\n"),
+            })
+            .collect(),
+        head: (1..=10)
+            .map(|line| match line {
+                1 => "new\n".to_owned(),
+                10 => "after\n".into(),
+                _ => format!("same {line}\n"),
+            })
+            .collect(),
+    };
+    app.key(key(KeyCode::Char('F'))).unwrap();
+    app.review
+        .as_mut()
+        .unwrap()
+        .accept_context(0, source)
+        .unwrap();
+    let positions = app.review.as_ref().unwrap().contexts[0]
+        .view
+        .as_ref()
+        .unwrap()
+        .hunk_positions
+        .clone();
+    assert_eq!(positions.len(), 2);
+    assert!(positions[0] < positions[1]);
+    app.review.as_mut().unwrap().positions[0] = 0;
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), positions[0]);
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), positions[1]);
+    press(&mut app, '-').unwrap();
+    app.review.as_mut().unwrap().positions[0] = 0;
+    press(&mut app, '+').unwrap();
+    let review = app.review.as_ref().unwrap();
+    assert_eq!(
+        review
+            .current_lines()
+            .iter()
+            .filter(|row| row.kind == prpr::diff::LineKind::Hunk)
+            .count(),
+        1
+    );
+    let second = review.contexts[0].view.as_ref().unwrap().hunk_positions[1];
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), second);
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+}
+
+#[test]
+fn sidebar_and_palette_render_at_small_sizes_and_sidebar_focus_can_be_restored() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = palette_app(root.path());
+    ctrl(&mut app, 'b').unwrap();
+    press(&mut app, 'h').unwrap();
+    assert!(app.file_sidebar);
+    assert_eq!(app.review.as_ref().unwrap().focus, Focus::Files);
+    ctrl(&mut app, 'b').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().focus, Focus::Diff);
+    for (width, height) in [(140, 40), (80, 24), (45, 14), (20, 5)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        ctrl(&mut app, 'k').unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        for _ in 0..50 {
+            app.key(key(KeyCode::Down)).unwrap();
+        }
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+        app.key(key(KeyCode::Esc)).unwrap();
+    }
+    ctrl(&mut app, 'k').unwrap();
+    app.paste("sidebar");
+    let text = screen(&mut app);
+    assert!(text.contains("Toggle file sidebar"));
+    assert!(text.contains("Ctrl-b"));
+    app.key(key(KeyCode::Esc)).unwrap();
+    let data = app.review.as_ref().unwrap().data.clone();
+    app.loaded(data).unwrap();
+    assert!(!app.file_sidebar);
+}

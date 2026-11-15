@@ -1,3 +1,5 @@
+#[path = "commands.rs"]
+pub mod commands;
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Result, bail};
@@ -117,6 +119,10 @@ impl TextInput {
 }
 
 pub enum Dialog {
+    Palette {
+        input: TextInput,
+        selected: usize,
+    },
     Note {
         anchor: DraftComment,
         reply_to: Option<String>,
@@ -670,27 +676,63 @@ impl ReviewState {
         self.horizontal = 0;
     }
 
-    fn hunk(&mut self, forward: bool) {
-        let position = self.position();
-        let target = if forward {
-            self.current_lines()
-                .iter()
-                .enumerate()
-                .skip(position + 1)
-                .find(|(_, line)| line.kind == LineKind::Hunk)
-                .map(|(i, _)| i)
-        } else {
-            self.current_lines()
-                .iter()
-                .enumerate()
-                .take(position)
-                .rev()
-                .find(|(_, line)| line.kind == LineKind::Hunk)
-                .map(|(i, _)| i)
-        };
-        if let (Some(target), Some(pos)) = (target, self.positions.get_mut(self.selected_file)) {
-            *pos = target;
+    fn hunk_positions(&self, file: usize) -> Vec<usize> {
+        if let Some(view) = &self.contexts[file].view {
+            return view.hunk_positions.clone();
         }
+        self.lines[file]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| (row.kind == LineKind::Hunk).then_some(index))
+            .collect()
+    }
+
+    fn hunk_target(&self, forward: bool) -> Option<(usize, usize)> {
+        if self.selected_file >= self.lines.len() {
+            return None;
+        }
+        let positions = self.hunk_positions(self.selected_file);
+        let same_file = if forward {
+            positions
+                .into_iter()
+                .find(|position| *position > self.position())
+        } else {
+            positions
+                .into_iter()
+                .rev()
+                .find(|position| *position < self.position())
+        };
+        if let Some(position) = same_file {
+            return Some((self.selected_file, position));
+        }
+        if self.selection.is_some_and(|selection| selection.extending) {
+            return None;
+        }
+        if forward {
+            (self.selected_file + 1..self.lines.len()).find_map(|file| {
+                self.hunk_positions(file)
+                    .first()
+                    .map(|&position| (file, position))
+            })
+        } else {
+            (0..self.selected_file).rev().find_map(|file| {
+                self.hunk_positions(file)
+                    .last()
+                    .map(|&position| (file, position))
+            })
+        }
+    }
+
+    fn hunk(&mut self, forward: bool) {
+        if let Some((file, position)) = self.hunk_target(forward) {
+            if file != self.selected_file {
+                self.selection = None;
+                self.horizontal = 0;
+            }
+            self.selected_file = file;
+            self.positions[file] = position;
+        }
+        self.focus = Focus::Diff;
         if self.selection.is_some_and(|selection| !selection.extending) {
             self.selection = None;
         }
@@ -731,6 +773,7 @@ pub enum Action {
 }
 
 pub struct App {
+    pub file_sidebar: bool,
     pub local_spec: Option<local::Spec>,
     pub local_contents: std::collections::BTreeMap<String, FileContext>,
     pub preview: PreviewState,
@@ -762,6 +805,7 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            file_sidebar: true,
             local_spec: None,
             local_contents: Default::default(),
             preview: PreviewState::default(),
@@ -1018,6 +1062,27 @@ impl App {
         Ok(())
     }
 
+    pub fn paste(&mut self, text: &str) {
+        let mut text = text.to_owned();
+        let input = match &mut self.dialog {
+            Some(Dialog::Palette { input, selected }) => {
+                *selected = 0;
+                text = text.replace(['\r', '\n'], " ");
+                input
+            }
+            Some(
+                Dialog::Note { input, .. }
+                | Dialog::Compose { input, .. }
+                | Dialog::Submit { input, .. }
+                | Dialog::OpenPr { input }
+                | Dialog::Ask { input, .. },
+            ) => input,
+            _ => return,
+        };
+        input.text.insert_str(input.cursor, &text);
+        input.cursor += text.len();
+    }
+
     pub fn visible_prs(&self) -> Vec<&PrSummary> {
         let filter = self.filter.to_lowercase();
         self.inbox
@@ -1036,6 +1101,32 @@ impl App {
         }
         if self.dialog.is_some() {
             return self.dialog_key(key);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            match key.code {
+                KeyCode::Char('k') => {
+                    self.filtering = false;
+                    self.goto_pending = false;
+                    self.dialog = Some(Dialog::Palette {
+                        input: TextInput::default(),
+                        selected: 0,
+                    });
+                    return Ok(Action::None);
+                }
+                KeyCode::Char('b') => {
+                    self.goto_pending = false;
+                    if let Some(review) = &mut self.review {
+                        self.file_sidebar = !self.file_sidebar;
+                        if !self.file_sidebar {
+                            review.focus = Focus::Diff;
+                        }
+                    }
+                    return Ok(Action::None);
+                }
+                _ => {}
+            }
         }
         if self.filtering {
             match key.code {
@@ -1274,10 +1365,14 @@ impl App {
                 review.focus = if review.focus == Focus::Files {
                     Focus::Diff
                 } else {
+                    self.file_sidebar = true;
                     Focus::Files
                 }
             }
-            KeyCode::Char('h') => review.focus = Focus::Files,
+            KeyCode::Char('h') => {
+                self.file_sidebar = true;
+                review.focus = Focus::Files;
+            }
             KeyCode::Char('l') | KeyCode::Enter => review.focus = Focus::Diff,
             KeyCode::Char('j') | KeyCode::Down => {
                 if review.focus == Focus::Files {
@@ -1630,6 +1725,53 @@ impl App {
         }
         let save = key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.dialog = match dialog {
+            Dialog::Palette {
+                mut input,
+                mut selected,
+            } => {
+                let commands = commands::available(self, &input.text);
+                selected = selected.min(commands.len().saturating_sub(1));
+                match key.code {
+                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(Action::None);
+                    }
+                    KeyCode::Enter => {
+                        if let Some(command) = commands.get(selected)
+                            && command.disabled.is_none()
+                        {
+                            return self.key(command.key);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Tab => {
+                        selected = (selected + 1).min(commands.len().saturating_sub(1))
+                    }
+                    KeyCode::Up | KeyCode::BackTab => selected = selected.saturating_sub(1),
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        selected = (selected + 1).min(commands.len().saturating_sub(1))
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        selected = selected.saturating_sub(1)
+                    }
+                    KeyCode::PageDown => {
+                        selected = selected
+                            .saturating_add(10)
+                            .min(commands.len().saturating_sub(1))
+                    }
+                    KeyCode::PageUp => selected = selected.saturating_sub(10),
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        input = TextInput::default();
+                        selected = 0;
+                    }
+                    _ => {
+                        let previous = input.text.clone();
+                        input.key(key);
+                        if previous != input.text {
+                            selected = 0;
+                        }
+                    }
+                }
+                Some(Dialog::Palette { input, selected })
+            }
             Dialog::Ask {
                 mut input,
                 focus,

@@ -293,20 +293,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.overview.is_some() && app.review.is_none() {
         " 1 Overview  2 Diff  Tab views  r retry  ? keys "
     } else if app.local_spec.is_some() {
-        " v/x select  +/- context  F full  c note  N notes  Q ask  E explain  o open  ? "
+        " [/] hunk  Ctrl-b files  Q ask  E explain  c note  N notes  o open "
     } else if app.review.is_some() && area.width < 76 {
-        " +/- context  F full  B GitHub  Q ask  ? keys "
+        " [/] hunk  Ctrl-b files  Q ask  ? "
     } else if app.review.is_some() && area.width < 105 {
-        " + expand  - collapse  F full  B GitHub  Q ask  E explain  o open  ? keys "
+        " [/] hunk  Ctrl-b files  +/- context  Q ask  E explain  o open "
     } else if app.review.is_some() {
-        " v/x select  +/- context  F full  B GitHub  Q ask  E explain  c note  o open  s submit  ? keys "
+        " [/] hunk  Ctrl-b files  v/x select  +/- context  Q ask  E explain  c note  o open "
     } else if area.width < 76 {
         " j/k select  o diff  B GitHub  p preview  ? "
     } else {
         " j/k select  o diff  B GitHub  p/P preview  [/] tabs  a guide  ? keys "
     };
     frame.render_widget(
-        Paragraph::new(keys).style(Style::default().fg(MUTED).bg(PANEL)),
+        Paragraph::new(format!(" Ctrl-k commands ·{}", keys))
+            .style(Style::default().fg(MUTED).bg(PANEL)),
         help,
     );
     if let Some(Dialog::Ask {
@@ -1473,51 +1474,55 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         16
     };
-    let [files_area, diff_area] =
-        Layout::horizontal([Constraint::Length(width), Constraint::Min(20)]).areas(area);
-    let sidebar = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(BORDER))
-        .style(Style::default().bg(SIDEBAR));
-    let inner = sidebar.inner(files_area);
-    frame.render_widget(sidebar, files_area);
-    let [files_header, files_body] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
-    frame.render_widget(
-        Paragraph::new(format!(
-            " {}CHANGES · {}",
-            if review.focus == Focus::Files {
-                "› "
+    let [files_area, diff_area] = if app.file_sidebar {
+        Layout::horizontal([Constraint::Length(width), Constraint::Min(20)]).areas(area)
+    } else {
+        [Rect::default(), area]
+    };
+    if app.file_sidebar {
+        let sidebar = Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(BORDER))
+            .style(Style::default().bg(SIDEBAR));
+        let inner = sidebar.inner(files_area);
+        frame.render_widget(sidebar, files_area);
+        let [files_header, files_body] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+        frame.render_widget(
+            Paragraph::new(format!(
+                " {}CHANGES · {}",
+                if review.focus == Focus::Files {
+                    "› "
+                } else {
+                    ""
+                },
+                review.data.files.len()
+            ))
+            .style(Style::default().fg(if review.focus == Focus::Files {
+                ACCENT
             } else {
-                ""
-            },
-            review.data.files.len()
-        ))
-        .style(Style::default().fg(if review.focus == Focus::Files {
-            ACCENT
-        } else {
-            MUTED
-        })),
-        files_header,
-    );
-    let rows = sidebar_rows(review, files_body.width);
-    let selected = rows
-        .iter()
-        .position(|row| row.file == Some(review.selected_file))
-        .unwrap_or(0);
-    let mut state = ListState::default().with_selected(Some(selected));
-    frame.render_stateful_widget(
-        List::new(
-            rows.into_iter()
-                .map(|row| ListItem::new(row.line))
-                .collect::<Vec<_>>(),
-        )
-        .highlight_style(Style::default().bg(PANEL))
-        .highlight_symbol(""),
-        files_body,
-        &mut state,
-    );
-
+                MUTED
+            })),
+            files_header,
+        );
+        let rows = sidebar_rows(review, files_body.width);
+        let selected = rows
+            .iter()
+            .position(|row| row.file == Some(review.selected_file))
+            .unwrap_or(0);
+        let mut state = ListState::default().with_selected(Some(selected));
+        frame.render_stateful_widget(
+            List::new(
+                rows.into_iter()
+                    .map(|row| ListItem::new(row.line))
+                    .collect::<Vec<_>>(),
+            )
+            .highlight_style(Style::default().bg(PANEL))
+            .highlight_symbol(""),
+            files_body,
+            &mut state,
+        );
+    }
     let [file_header, content] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(diff_area);
     draw_file_header(frame, review, app.comments_loading, file_header);
@@ -2229,6 +2234,99 @@ fn draw_description(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
 
 fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
     match dialog {
+        Dialog::Palette { input, selected } => {
+            let inner = popup(
+                frame,
+                " Command palette · Ctrl-k / Esc closes ".into(),
+                92,
+                23,
+            );
+            let [search, _, choices, count, hint] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+            let [prompt, field] =
+                Layout::horizontal([Constraint::Length(2), Constraint::Min(0)]).areas(search);
+            frame.render_widget(
+                Paragraph::new("> ").style(Style::default().fg(ACCENT)),
+                prompt,
+            );
+            if input.text.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("Type to filter commands…").style(Style::default().fg(MUTED)),
+                    field,
+                );
+                if field.width > 0 && field.height > 0 {
+                    frame.set_cursor_position((field.x, field.y));
+                }
+            } else {
+                draw_input(frame, input, field);
+            }
+            let commands = crate::app::commands::available(app, &input.text);
+            let selected = (*selected).min(commands.len().saturating_sub(1));
+            let items = commands
+                .iter()
+                .map(|command| {
+                    let label_width =
+                        usize::from(choices.width).saturating_sub(command.shortcut.len() + 4);
+                    let label = truncate(command.label, label_width);
+                    let padding = label_width.saturating_sub(Line::from(label.as_str()).width());
+                    ListItem::new(Line::from(vec![
+                        Span::raw(label),
+                        Span::raw(" ".repeat(padding + 2)),
+                        Span::styled(
+                            command.shortcut,
+                            Style::default().fg(if command.disabled.is_some() {
+                                MUTED
+                            } else {
+                                ACCENT
+                            }),
+                        ),
+                    ]))
+                    .style(Style::default().fg(
+                        if command.disabled.is_some() {
+                            MUTED
+                        } else {
+                            TEXT
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if items.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("No matching commands.").style(Style::default().fg(MUTED)),
+                    choices,
+                );
+            } else {
+                let mut state = ListState::default().with_selected(Some(selected));
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .highlight_style(Style::default().bg(SELECTED))
+                        .highlight_symbol("› "),
+                    choices,
+                    &mut state,
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} command{} · ↑/↓ select · Enter run",
+                    commands.len(),
+                    if commands.len() == 1 { "" } else { "s" }
+                ))
+                .style(Style::default().fg(MUTED)),
+                count,
+            );
+            let reason = commands.get(selected).and_then(|command| command.disabled);
+            frame.render_widget(
+                Paragraph::new(reason.unwrap_or("Esc closes · Ctrl-u clears the search"))
+                    .style(Style::default().fg(if reason.is_some() { ACCENT } else { MUTED })),
+                hint,
+            );
+        }
         Dialog::Ask { .. } => {}
         Dialog::AgentPicker { selected } => {
             let inner = popup(
@@ -2386,7 +2484,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 84,
                 32,
             );
-            frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nCONTEXT\n  +               Reveal 20 more lines around this hunk\n  -               Collapse this hunk's expanded context\n  F               Toggle full file / diff context\n  B               Open selected PR on GitHub\n                  Available in list, Overview, and Diff\n  Expanded lines  Read, select, ask AI, or open in Helix\n  GitHub comments Stay inside the original diff hunks\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               GitHub draft (PR) / local note (jj)\n  C               Local note in either mode\n  N               Notes, replies, and outdated notes\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  jj review       c note, Q ask, E explain, a guide\n  Agent access    prpr session --help\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
+            frame.render_widget(Paragraph::new("COMMANDS\n  Ctrl-k          Search and run commands for this view\n  Ctrl-b          Toggle the file sidebar\n  Palette         Type to filter; arrows select; Enter runs\n                  Esc closes; Ctrl-u clears the search\n\nBROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk across files\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nCONTEXT\n  +               Reveal 20 more lines around this hunk\n  -               Collapse this hunk's expanded context\n  F               Toggle full file / diff context\n  B               Open selected PR on GitHub\n                  Available in list, Overview, and Diff\n  Expanded lines  Read, select, ask AI, or open in Helix\n  GitHub comments Stay inside the original diff hunks\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               GitHub draft (PR) / local note (jj)\n  C               Local note in either mode\n  N               Notes, replies, and outdated notes\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  jj review       c note, Q ask, E explain, a guide\n  Agent access    prpr session --help\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
         }
         Dialog::Description { scroll } => {
             draw_description(frame, app, *scroll);

@@ -571,19 +571,7 @@ pub fn run() -> Result<()> {
                     }
                     Err(error) => app.message(format!("{error:#}"), true),
                 },
-                Event::Paste(text) => {
-                    if let Some(
-                        app::Dialog::Note { input, .. }
-                        | app::Dialog::Compose { input, .. }
-                        | app::Dialog::Submit { input, .. }
-                        | app::Dialog::OpenPr { input }
-                        | app::Dialog::Ask { input, .. },
-                    ) = &mut app.dialog
-                    {
-                        input.text.insert_str(input.cursor, &text);
-                        input.cursor += text.len();
-                    }
-                }
+                Event::Paste(text) => app.paste(&text),
                 _ => {}
             }
         }

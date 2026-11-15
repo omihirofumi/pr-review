@@ -120,6 +120,14 @@ Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to
 
 To learn the controls without contacting GitHub, run `prpr --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
 
+## Command palette and file sidebar
+
+Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. Type words such as `sidebar`, `next hunk`, `explain diff`, or `checkout` to filter actions. Use arrows (or `Ctrl-n` / `Ctrl-p`) to select, `Enter` to run, and `Esc` or `Ctrl-k` to close. `Ctrl-u` clears the search; `Ctrl-h` deletes backward. Available actions follow the current view. Disabled actions show why they cannot run. Review submission still uses its existing summary and final confirmation screens.
+
+`Ctrl-b` hides or shows the file sidebar. Hiding it gives the diff the full width and preserves the current file, cursor, and selection. The setting lasts for the current app session, including file changes and refreshes. Press `h` to show and focus the file tree again. These shortcuts leave comment/question editors unchanged while you are typing.
+
+Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
+
 ## Command options
 
 ```sh
@@ -204,10 +212,12 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `1` / `2`, `Tab` / `Shift-Tab` | Overview / Diff tabs |
 | `h` / `l` | Focus files / diff pane in Diff |
 | `a` / `A` | Prepare AI guide / choose and save an agent |
+| `Ctrl-k` | Search and run commands for the current view |
+| `Ctrl-b` | Toggle the file sidebar |
 | `Q` / `E` | Ask the agent / explain selected diff lines or the current hunk |
 | `j` / `k`, up / down | Move through lines and continue into adjacent files |
 | `n` / `p` | Next / previous file |
-| `]` / `[` | Next / previous hunk |
+| `]` / `[` | Next / previous hunk, continuing across files |
 | `gg` / `ge` | Top / end of current file, or first / last item in lists |
 | `gf` | Open selected source location in Helix |
 | `G`, Home / End | Legacy file or list boundary shortcuts |

@@ -82,6 +82,12 @@ try:
     assert len(review['files']) == 1
     assert review['files'][0]['patch'].startswith('@@')
     client('navigate', '--repo', repository, '--file', 'a.rs', '--new-line', '1')
+    os.write(terminal, b'\x0bnext hunk\r')
+    wait_until(lambda: client('context', '--repo', repository)['file'] != 'a.rs')
+    os.write(terminal, b'\x0bprevious hunk\r')
+    wait_until(lambda: client('context', '--repo', repository)['file'] == 'a.rs')
+    client('navigate', '--repo', repository, '--file', 'a.rs', '--new-line', '1')
+
     os.write(terminal, b'c')
     wait_until(lambda: b'Ctrl-s save' in output)
     os.write(terminal, b'Why??\x08\x13')
