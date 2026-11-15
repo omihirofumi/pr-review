@@ -33,8 +33,8 @@ use app::{Action, App};
 
 #[derive(Parser)]
 #[command(
-    name = "gh-preview",
-    bin_name = "gh-preview",
+    name = "prpr",
+    bin_name = "prpr",
     version,
     about = "Review the current repository’s GitHub pull requests with Jujutsu and Helix"
 )]
@@ -654,9 +654,9 @@ fn start_analysis(
 
 fn sample_guide(data: &ReviewData) -> Box<analysis::Analysis> {
     Box::new(analysis::Analysis {
-        summary: "Offline sample: add a timeout to retry requests so a stalled connection does not block indefinitely.".into(),
+        summary: "Offline sample: keep **retry waits** within the caller’s `budget`.".into(),
         intent: analysis::Intent { text: "Bound request latency while preserving retries.".into(), basis: "author_description".into() },
-        changes: vec![analysis::Change { title: "Request deadline".into(), detail: "Inspect the retry path and timeout coverage.".into(), files: vec![data.files[0].filename.clone()] }],
+        changes: vec![analysis::Change { title: "Request deadline".into(), detail: "Clamp `self.retry_delay` to `budget`, then reject a zero delay before calling `sleep`.\n\n```rust\nlet delay = self.retry_delay.min(budget);\nif delay.is_zero() {\n    return Err(Error::DeadlineExceeded);\n}\nsleep(delay);\n```".into(), files: vec![data.files[0].filename.clone()] }],
         reading_order: vec![analysis::ReadingStep { path: data.files[0].filename.clone(), line: None, side: Side::Right, reason: "Start with the request implementation.".into() }],
         risks: Vec::new(), verification: analysis::Verification { existing_tests: Vec::new(), suggested_checks: vec!["Run the timeout tests.".into()], unknowns: vec!["This is an offline example, not a generated analysis.".into()] },
         coverage: analysis::Coverage { included_files: data.files.iter().map(|file| file.filename.clone()).collect(), ..Default::default() },

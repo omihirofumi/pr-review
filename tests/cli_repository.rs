@@ -177,8 +177,9 @@ else:
 }
 
 #[test]
-fn both_installed_commands_expose_the_canonical_help() {
+fn primary_and_legacy_commands_expose_the_same_help_version_and_configuration() {
     for executable in [
+        env!("CARGO_BIN_EXE_prpr"),
         env!("CARGO_BIN_EXE_gh-preview"),
         env!("CARGO_BIN_EXE_pr-review"),
     ] {
@@ -188,8 +189,26 @@ fn both_installed_commands_expose_the_canonical_help() {
             .unwrap();
         assert!(result.status.success());
         let help = String::from_utf8(result.stdout).unwrap();
-        assert!(help.contains("Usage: gh-preview"));
+        assert!(help.contains("Usage: prpr"));
         assert!(help.contains("PR URL or number"));
         assert!(help.contains("current directory"));
+        let version = std::process::Command::new(executable)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8(version.stdout).unwrap().trim(),
+            concat!("prpr ", env!("CARGO_PKG_VERSION"))
+        );
+        let path = std::process::Command::new(executable)
+            .arg("--config-path")
+            .output()
+            .unwrap();
+        assert!(path.status.success());
+        assert!(
+            std::path::Path::new(String::from_utf8(path.stdout).unwrap().trim())
+                .ends_with(std::path::Path::new("gh-preview").join("config.toml"))
+        );
     }
 }

@@ -1,10 +1,10 @@
-# gh-preview
+# prpr
 
 > Fully vibe-coded and intended for personal use.
 
 A standalone Rust + Ratatui app for reviewing GitHub pull requests with Jujutsu and Helix.
 
-Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. `pr-review` remains available as an alias.
+Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. `gh-preview` and `pr-review` remain available as compatibility aliases.
 
 ## Install
 
@@ -12,12 +12,12 @@ Run it inside a repository to browse that repository's PRs, understand a change 
 
 ```sh
 brew tap omihirofumi/tap
-brew install omihirofumi/tap/gh-preview
+brew install omihirofumi/tap/prpr
 ```
 
-The formula builds the tagged release from source and installs GitHub CLI, Jujutsu, Git, and Helix as dependencies. Update it with `brew update` followed by `brew upgrade omihirofumi/tap/gh-preview`.
+The formula builds the tagged release from source and installs GitHub CLI, Jujutsu, Git, and Helix as dependencies. Update it with `brew update` followed by `brew upgrade omihirofumi/tap/prpr`.
 
-If you previously installed this project with Cargo, run `cargo uninstall pr-review` after the Homebrew installation succeeds. This removes the older copies from Cargo's bin directory so `gh-preview` resolves to the Homebrew installation. Check with `command -v gh-preview`.
+If you previously installed this project with Cargo, run `cargo uninstall pr-review` after the Homebrew installation succeeds. This removes the older copies from Cargo's bin directory so `prpr` resolves to the Homebrew installation. Check with `command -v prpr`.
 
 ### Cargo
 
@@ -36,14 +36,14 @@ Run the app from the repository you want to review, not necessarily this project
 
 ```sh
 cd /path/to/your/repository
-gh-preview
+prpr
 ```
 
-Select a PR with `j` / `k` and press `o`. If you already know its number, open it directly with `gh-preview 123`. Subdirectories work too; the app detects the containing repository.
+Select a PR with `j` / `k` and press `o`. If you already know its number, open it directly with `prpr 123`. Subdirectories work too; the app detects the containing repository.
 
 The PR list has a compact table and a preview pane showing the selected PR's Markdown description. `j` / `k` changes the selected PR; `h` / `l` or `Tab` focuses the table / preview. Press `p` to hide or show the preview, `P` to switch its position, and `[` / `]` or `1` / `2` to switch between **Description** and **AI guide**. Narrow terminals place the preview below the table. `Ctrl-d` / `Ctrl-u` scroll the preview. Descriptions arrive with the list; browsing them does not load diffs or start an AI agent. Press `a` to prepare or reuse a guide for the selected PR.
 
-Press `o` or `Enter` in the list to open **Diff**. A direct target such as `gh-preview 123` opens **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Diff and comments load independently in the background. Inside an opened PR, press `2` for Diff, `1` for Overview, or `Tab` / `Shift-Tab` to switch. With an AI agent configured, a structured reading guide appears in Overview without blocking navigation.
+Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr 123` opens **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Diff and comments load independently in the background. Inside an opened PR, press `2` for Diff, `1` for Overview, or `Tab` / `Shift-Tab` to switch. With an AI agent configured, a structured reading guide appears in Overview without blocking navigation.
 
 In Diff:
 
@@ -57,32 +57,34 @@ In Diff:
 
 Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to read published review summaries. Press `#` to open another PR by number, `?` for the keyboard guide, or `q` to quit. After installing an update, restart the app to use the new version.
 
-To learn the controls without contacting GitHub, run `gh-preview --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
+To learn the controls without contacting GitHub, run `prpr --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
 
 ## Command options
 
 ```sh
-gh-preview                                      # Open PRs in the current repository
-gh-preview 123                                  # PR #123 in the current repository
-gh-preview --search 'author:@me'                 # Filter PRs in the current repository
-gh-preview --repo owner/repo                     # Explicit repository override
-gh-preview --repo owner/repo 123
-gh-preview https://github.com/owner/repo/pull/123
-gh-preview --demo                               # Offline example; never posts
-gh-preview 123 --agent codex                     # Codex guide for this launch
-gh-preview 123 --agent claude --model MODEL      # Claude with a model override
-gh-preview 123 --agent none                      # Read without an AI guide
-gh-preview --config-path                        # Print the configuration path
-gh-preview --config /path/to/config.toml 123     # Use another configuration file
+prpr                                      # Open PRs in the current repository
+prpr 123                                  # PR #123 in the current repository
+prpr --search 'author:@me'                 # Filter PRs in the current repository
+prpr --repo owner/repo                     # Explicit repository override
+prpr --repo owner/repo 123
+prpr https://github.com/owner/repo/pull/123
+prpr --demo                               # Offline example; never posts
+prpr 123 --agent codex                     # Codex guide for this launch
+prpr 123 --agent claude --model MODEL      # Claude with a model override
+prpr 123 --agent none                      # Read without an AI guide
+prpr --config-path                        # Print the configuration path
+prpr --config /path/to/config.toml 123     # Use another configuration file
 ```
 
 A repository is detected from the current directory, including subdirectories. A PR URL supplies its own repository. The inbox, refresh, search, and direct number entry stay scoped to that selected repository; there is no account-wide review queue. Outside a repository, use `--repo` or a PR URL.
 
 The inbox shows up to 100 open PRs. `/` filters the loaded inbox locally; `--search` queries GitHub within the selected repository. Press `#` from the inbox or review screen to open a PR by number without restarting.
 
+Description previews, full descriptions, Ask responses, and AI Overview use a shared dark Markdown theme. Headings, emphasis, links, tables, and inline code are styled; fenced code keeps its indentation in a shaded block. Prose wraps to a comfortable reading width, and scrollbars show the position in long content. AI guide sections use distinct headings and spacing.
+
 ## Overview and AI reading guide
 
-Press `A` in the PR list or either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/gh-preview/config.toml` (or `$XDG_CONFIG_HOME/gh-preview/config.toml`). A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+Press `A` in the PR list or either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/gh-preview/config.toml` (or `$XDG_CONFIG_HOME/gh-preview/config.toml`). The commands share the existing configuration and local review data. Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
 
 Example configuration:
 

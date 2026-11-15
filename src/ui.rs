@@ -18,6 +18,8 @@ use ratatui::{
     },
 };
 
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+
 use crate::app::{
     AiStatus, App, Dialog, Focus, OverviewState, PageTab, PreviewTab, ReviewState, TextInput,
 };
@@ -39,6 +41,188 @@ const SELECTED_DELETION: Color = Color::Rgb(83, 48, 43);
 const COMMENT: Color = Color::Rgb(35, 36, 38);
 const COMMENT_ACCENT: Color = Color::Rgb(155, 174, 199);
 const DRAFT: Color = Color::Rgb(44, 39, 29);
+const CODE_BACKGROUND: Color = Color::Rgb(32, 35, 39);
+
+#[derive(Clone)]
+struct ReviewMarkdown;
+
+impl tui_markdown::StyleSheet for ReviewMarkdown {
+    fn heading(&self, level: u8) -> Style {
+        Style::default()
+            .fg(if level <= 2 { ACCENT } else { TEXT })
+            .bold()
+    }
+
+    fn heading_marker(&self, _: u8) -> &str {
+        ""
+    }
+    fn code_block_fence(&self) -> &str {
+        ""
+    }
+    fn code(&self) -> Style {
+        Style::default().fg(COMMENT_ACCENT).bg(CODE_BACKGROUND)
+    }
+    fn link(&self) -> Style {
+        Style::default().fg(COMMENT_ACCENT).underlined()
+    }
+    fn blockquote(&self) -> Style {
+        Style::default().fg(MUTED).italic()
+    }
+    fn list_marker(&self) -> Style {
+        Style::default().fg(ACCENT)
+    }
+    fn table_header(&self) -> Style {
+        Style::default().fg(ACCENT).bold()
+    }
+    fn table_border(&self) -> Style {
+        Style::default().fg(BORDER)
+    }
+    fn alert_icon(&self, _: tui_markdown::AlertKind) -> &str {
+        ""
+    }
+    fn alert(&self, kind: tui_markdown::AlertKind) -> Style {
+        use tui_markdown::AlertKind;
+        Style::default().fg(match kind {
+            AlertKind::Warning | AlertKind::Caution => RED,
+            AlertKind::Tip => GREEN,
+            _ => COMMENT_ACCENT,
+        })
+    }
+}
+
+fn wrap_styled(
+    line: &Line<'_>,
+    width: usize,
+    continuation: usize,
+    preserve_spaces: bool,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let graphemes = line.styled_graphemes(Style::default()).collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < graphemes.len() {
+        let indent = if start == 0 {
+            0
+        } else {
+            continuation.min(width.saturating_sub(2))
+        };
+        let mut used = indent;
+        let mut end = start;
+        let mut space = None;
+        while end < graphemes.len() {
+            let next = Span::raw(graphemes[end].symbol).width();
+            if used + next > width && end > start {
+                break;
+            }
+            if graphemes[end].is_whitespace() && end > start {
+                space = Some(end);
+            }
+            used += next;
+            end += 1;
+        }
+        if !preserve_spaces
+            && end < graphemes.len()
+            && let Some(space) = space
+        {
+            end = space;
+        }
+        let mut spans = vec![Span::raw(" ".repeat(indent))];
+        for grapheme in &graphemes[start..end] {
+            if let Some(last) = spans.last_mut()
+                && last.style == grapheme.style
+            {
+                last.content.to_mut().push_str(grapheme.symbol);
+            } else {
+                spans.push(Span::styled(grapheme.symbol.to_owned(), grapheme.style));
+            }
+        }
+        rows.push(Line::from(spans).style(line.style));
+        start = end;
+        if !preserve_spaces {
+            while start < graphemes.len() && graphemes[start].is_whitespace() {
+                start += 1;
+            }
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::from("").style(line.style));
+    }
+    rows
+}
+
+fn expand_tabs(line: Line<'_>) -> Line<'static> {
+    let mut column = 0;
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let mut expanded = String::new();
+            for part in span.content.split_inclusive('\t') {
+                let text = part.strip_suffix('\t').unwrap_or(part);
+                expanded.push_str(text);
+                column += Span::raw(text).width();
+                if part.ends_with('\t') {
+                    let padding = 4 - column % 4;
+                    expanded.push_str(&" ".repeat(padding));
+                    column += padding;
+                }
+            }
+            Span::styled(expanded, span.style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans).style(line.style)
+}
+
+fn markdown_text(body: &str, width: u16) -> Text<'static> {
+    let width = usize::from(width.max(1));
+    let options = tui_markdown::Options::new(ReviewMarkdown).table_width(width as u16);
+    let text = tui_markdown::from_str_with_options(body, &options);
+    let mut rows = Vec::new();
+    for line in text.lines {
+        let line = if line.spans.iter().any(|span| span.content.contains('\t')) {
+            expand_tabs(line)
+        } else {
+            line
+        };
+        let code = line.style.bg == Some(CODE_BACKGROUND);
+        let plain = line.to_string();
+        let leading = plain.len() - plain.trim_start().len();
+        let marker = plain[leading..]
+            .split_once(' ')
+            .map(|(marker, _)| marker)
+            .unwrap_or("");
+        let list = marker == "-"
+            || marker == "*"
+            || marker
+                .trim_end_matches(['.', ')'])
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                && !marker.is_empty();
+        let continuation = if code {
+            0
+        } else if list || marker == ">" {
+            Span::raw(&plain[..leading + marker.len() + 1]).width()
+        } else {
+            Span::raw(&plain[..leading]).width()
+        };
+        let content_width = width.saturating_sub(if code { 2 } else { 0 }).max(1);
+        for mut row in wrap_styled(&line, content_width, continuation, code) {
+            if code {
+                row.spans.insert(
+                    0,
+                    Span::styled("│ ", Style::default().fg(BORDER).bg(CODE_BACKGROUND)),
+                );
+                let padding = width.saturating_sub(row.width());
+                row.spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().bg(CODE_BACKGROUND),
+                ));
+            }
+            rows.push(row);
+        }
+    }
+    Text::from(rows)
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -133,6 +317,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(Dialog::Ask { scroll, .. }) = &mut app.dialog {
             *scroll = actual;
         }
+    } else if let Some(Dialog::Description { scroll }) = &app.dialog {
+        let actual = draw_description(frame, app, *scroll);
+        if let Some(Dialog::Description { scroll }) = &mut app.dialog {
+            *scroll = actual;
+        }
     } else if let Some(dialog) = &app.dialog {
         draw_dialog(frame, app, dialog);
     }
@@ -147,11 +336,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         || app.repo.clone().unwrap_or_else(|| "Pull requests".into()),
         |review| format!("{}  #{}", review.data.pr.id.repo, review.data.pr.id.number),
     );
-    let mode = if app.demo {
-        "gh-preview · demo"
-    } else {
-        "gh-preview"
-    };
+    let mode = if app.demo { "prpr · demo" } else { "prpr" };
     let right = app.review.as_ref().map_or_else(
         || format!("{} pull requests", app.inbox.len()),
         |review| {
@@ -241,11 +426,7 @@ fn draw_overview_header(frame: &mut Frame, app: &App, overview: &OverviewState, 
         Constraint::Length(if area.width >= 90 { 36 } else { 17 }),
     ])
     .areas(first);
-    let label = if app.demo {
-        "gh-preview · demo"
-    } else {
-        "gh-preview"
-    };
+    let label = if app.demo { "prpr · demo" } else { "prpr" };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!(" {label}"), Style::default().fg(ACCENT).bold()),
@@ -369,13 +550,15 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         metadata.body.as_str()
     };
-    let wrapped = wrap_comment(body, usize::from(area.width).saturating_sub(4).max(1));
+    let wrapped = if matches!(overview.ai, AiStatus::Ready(_)) {
+        markdown_text(body, area.width.saturating_sub(4).max(1)).lines
+    } else {
+        Vec::new()
+    };
     let preview = if !matches!(overview.ai, AiStatus::Ready(_)) {
         0
-    } else if area.height >= 22 {
-        3
     } else {
-        2
+        1
     };
     let description_height = wrapped.len().min(preview) as u16 + 1;
     let [details, description, state, content] = Layout::vertical([
@@ -413,12 +596,10 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         " AUTHOR DESCRIPTION · b opens full text",
         Style::default().fg(MUTED),
     ))];
-    description_lines.extend(
-        wrapped
-            .into_iter()
-            .take(preview)
-            .map(|line| Line::from(format!("  {line}"))),
-    );
+    description_lines.extend(wrapped.into_iter().take(preview).map(|mut line| {
+        line.spans.insert(0, Span::raw("  "));
+        line
+    }));
     frame.render_widget(Paragraph::new(description_lines), description);
     let (caption, color) = match &overview.ai {
         AiStatus::Disabled => (
@@ -463,6 +644,10 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 [content, Rect::default()]
             };
+            let narrative = Rect {
+                width: narrative.width.min(98),
+                ..narrative
+            };
             let rows = overview_rows(analysis, narrative.width, !wide);
             let scroll = draw_overview_rows(frame, &rows, overview, narrative);
             if wide {
@@ -471,27 +656,13 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
             overview.scroll = scroll;
         }
         status => {
-            let note = match status {
-                AiStatus::Disabled => {
-                    "Choose an agent with A, or read the description below.".to_owned()
-                }
-                AiStatus::Waiting => {
-                    if app.diff_loading {
-                        "The guide will be prepared when the diff is ready.".to_owned()
-                    } else {
-                        "Press a to prepare the AI guide.".to_owned()
-                    }
-                }
-                AiStatus::Loading => format!(
-                    "{} is preparing the guide. Read the description below, or switch to Diff.",
-                    app.settings.ai.provider
-                ),
-                AiStatus::Error(error) => {
-                    format!("Guide unavailable: {error}. Press a to retry or A to choose an agent.")
-                }
-                AiStatus::Ready(_) => unreachable!(),
+            let description = if let AiStatus::Error(error) = status {
+                format!(
+                    "> Guide unavailable: {error}. Press `a` to retry or `A` to choose an agent.\n\n{body}"
+                )
+            } else {
+                body.to_owned()
             };
-            let description = format!("*{note}*\n\n---\n\n{body}");
             overview.scroll = markdown(frame, &description, content, overview.scroll);
         }
     }
@@ -502,18 +673,37 @@ struct OverviewRow {
     step: Option<usize>,
 }
 
-fn overview_heading(rows: &mut Vec<OverviewRow>, heading: &str) {
-    if !rows.is_empty() {
+fn overview_gap(rows: &mut Vec<OverviewRow>) {
+    if rows
+        .last()
+        .is_some_and(|row| !row.line.to_string().trim().is_empty())
+    {
         rows.push(OverviewRow {
             line: Line::from(""),
             step: None,
         });
     }
+}
+
+fn overview_heading(rows: &mut Vec<OverviewRow>, heading: &str) {
+    overview_gap(rows);
+    let (title, hint) = heading.split_once(" · ").unwrap_or((heading, ""));
+    let mut spans = vec![
+        Span::styled("─ ", Style::default().fg(BORDER)),
+        Span::styled(title.to_owned(), Style::default().fg(ACCENT).bold()),
+    ];
+    if !hint.is_empty() {
+        spans.push(Span::styled(
+            format!("  {hint}"),
+            Style::default().fg(MUTED),
+        ));
+    }
     rows.push(OverviewRow {
-        line: Line::from(Span::styled(
-            format!(" {heading}"),
-            Style::default().fg(ACCENT).bold(),
-        )),
+        line: Line::from(spans),
+        step: None,
+    });
+    rows.push(OverviewRow {
+        line: Line::from(""),
         step: None,
     });
 }
@@ -526,14 +716,30 @@ fn overview_text(
     color: Color,
     step: Option<usize>,
 ) {
-    for line in wrap_comment(text, usize::from(width).saturating_sub(indent + 1).max(1)) {
-        rows.push(OverviewRow {
-            line: Line::from(Span::styled(
-                format!("{}{line}", " ".repeat(indent)),
-                Style::default().fg(color),
-            )),
-            step,
-        });
+    let available = usize::from(width.min(96)).saturating_sub(indent + 1).max(1) as u16;
+    for mut line in markdown_text(text, available).lines {
+        line.spans.insert(0, Span::raw(" ".repeat(indent)));
+        line.style = line.style.patch(Style::default().fg(color));
+        if color == ACCENT {
+            line.style = line.style.bold();
+        }
+        rows.push(OverviewRow { line, step });
+    }
+}
+
+fn overview_literal(
+    rows: &mut Vec<OverviewRow>,
+    text: &str,
+    width: u16,
+    indent: usize,
+    color: Color,
+    step: Option<usize>,
+) {
+    let available = usize::from(width.min(96)).saturating_sub(indent + 1).max(1);
+    for mut line in wrap_styled(&Line::from(text), available, 0, false) {
+        line.spans.insert(0, Span::raw(" ".repeat(indent)));
+        line.style = Style::default().fg(color);
+        rows.push(OverviewRow { line, step });
     }
 }
 
@@ -549,7 +755,7 @@ fn reading_step_label(index: usize, step: &pr_review::analysis::ReadingStep) -> 
 }
 
 fn overview_reading_order(rows: &mut Vec<OverviewRow>, analysis: &Analysis, width: u16) {
-    overview_heading(rows, "READING ORDER · n/p chooses · Enter opens diff");
+    overview_heading(rows, "Reading order · n/p chooses · Enter opens diff");
     if analysis.reading_order.is_empty() {
         overview_text(
             rows,
@@ -561,7 +767,7 @@ fn overview_reading_order(rows: &mut Vec<OverviewRow>, analysis: &Analysis, widt
         );
     }
     for (index, step) in analysis.reading_order.iter().enumerate() {
-        overview_text(
+        overview_literal(
             rows,
             &reading_step_label(index, step),
             width,
@@ -579,16 +785,16 @@ fn overview_reading_order(rows: &mut Vec<OverviewRow>, analysis: &Analysis, widt
 
 fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<OverviewRow> {
     let mut rows = Vec::new();
-    overview_heading(&mut rows, "SUMMARY");
+    overview_heading(&mut rows, "Summary");
     overview_text(&mut rows, &analysis.summary, width, 2, TEXT, None);
     let basis = match analysis.intent.basis.as_str() {
         "author_description" => "from author description",
         "inferred_from_diff" => "inferred from diff",
         _ => "unknown basis",
     };
-    overview_heading(&mut rows, &format!("INTENT · {basis}"));
+    overview_heading(&mut rows, &format!("Intent · {basis}"));
     overview_text(&mut rows, &analysis.intent.text, width, 2, TEXT, None);
-    overview_heading(&mut rows, "MAIN CHANGES");
+    overview_heading(&mut rows, "Main changes");
     if analysis.changes.is_empty() {
         overview_text(
             &mut rows,
@@ -600,10 +806,11 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
         );
     }
     for change in &analysis.changes {
+        overview_gap(&mut rows);
         overview_text(&mut rows, &change.title, width, 2, ACCENT, None);
         overview_text(&mut rows, &change.detail, width, 4, TEXT, None);
         if !change.files.is_empty() {
-            overview_text(
+            overview_literal(
                 &mut rows,
                 &format!("Files: {}", change.files.join(", ")),
                 width,
@@ -616,15 +823,16 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
     if include_guide {
         overview_reading_order(&mut rows, analysis, width);
     }
-    overview_heading(&mut rows, "REVIEW RISKS");
+    overview_heading(&mut rows, "Review risks");
     if analysis.risks.is_empty() {
         overview_text(&mut rows, "No risks were listed.", width, 2, MUTED, None);
     }
     for risk in &analysis.risks {
+        overview_gap(&mut rows);
         overview_text(&mut rows, &risk.title, width, 2, ACCENT, None);
         overview_text(&mut rows, &risk.detail, width, 4, TEXT, None);
         if !risk.files.is_empty() {
-            overview_text(
+            overview_literal(
                 &mut rows,
                 &format!("Files: {}", risk.files.join(", ")),
                 width,
@@ -634,7 +842,7 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
             );
         }
     }
-    overview_heading(&mut rows, "VERIFICATION");
+    overview_heading(&mut rows, "Verification");
     overview_text(&mut rows, "Existing tests", width, 2, GREEN, None);
     if analysis.verification.existing_tests.is_empty() {
         overview_text(
@@ -647,7 +855,14 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
         );
     }
     for test in &analysis.verification.existing_tests {
-        overview_text(&mut rows, &format!("- {test}"), width, 4, TEXT, None);
+        overview_literal(
+            &mut rows,
+            &format!("- {test}"),
+            width,
+            4,
+            COMMENT_ACCENT,
+            None,
+        );
     }
     overview_text(&mut rows, "Suggested checks", width, 2, GREEN, None);
     if analysis.verification.suggested_checks.is_empty() {
@@ -663,14 +878,14 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
     for check in &analysis.verification.suggested_checks {
         overview_text(&mut rows, &format!("- {check}"), width, 4, TEXT, None);
     }
-    overview_heading(&mut rows, "UNKNOWNS");
+    overview_heading(&mut rows, "Unknowns");
     if analysis.verification.unknowns.is_empty() {
         overview_text(&mut rows, "No unknowns were listed.", width, 2, MUTED, None);
     }
     for unknown in &analysis.verification.unknowns {
         overview_text(&mut rows, &format!("- {unknown}"), width, 2, TEXT, None);
     }
-    overview_heading(&mut rows, "CONTEXT COVERAGE");
+    overview_heading(&mut rows, "Context coverage");
     overview_text(
         &mut rows,
         &format!(
@@ -685,7 +900,7 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
         None,
     );
     for file in &analysis.coverage.omitted_files {
-        overview_text(
+        overview_literal(
             &mut rows,
             &format!("Omitted: {file}"),
             width,
@@ -695,7 +910,7 @@ fn overview_rows(analysis: &Analysis, width: u16, include_guide: bool) -> Vec<Ov
         );
     }
     for file in &analysis.coverage.unavailable_files {
-        overview_text(
+        overview_literal(
             &mut rows,
             &format!("No text diff: {file}"),
             width,
@@ -736,6 +951,7 @@ fn draw_overview_rows(
             Rect::new(area.x, area.y + offset as u16, area.width, 1),
         );
     }
+    draw_scrollbar(frame, area, rows.len(), start);
     start.min(u16::MAX as usize) as u16
 }
 
@@ -749,7 +965,7 @@ fn draw_reading_guide(frame: &mut Frame, analysis: &Analysis, selected_step: usi
     let [heading, list] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
     frame.render_widget(
-        Paragraph::new(" READING ORDER\n n/p chooses · Enter jumps")
+        Paragraph::new(" Reading order\n n/p chooses · Enter jumps")
             .style(Style::default().fg(ACCENT)),
         heading,
     );
@@ -778,12 +994,13 @@ fn draw_reading_guide(frame: &mut Frame, analysis: &Analysis, selected_step: usi
             })
             .collect::<Vec<_>>();
             lines.extend(
-                wrap_comment(
-                    &step.reason,
-                    usize::from(list.width).saturating_sub(3).max(1),
-                )
-                .into_iter()
-                .map(|line| Line::from(format!(" {line}"))),
+                markdown_text(&step.reason, list.width.saturating_sub(3).max(1))
+                    .lines
+                    .into_iter()
+                    .map(|mut line| {
+                        line.spans.insert(0, Span::raw(" "));
+                        line
+                    }),
             );
             lines.push(Line::from(""));
             ListItem::new(lines)
@@ -816,17 +1033,48 @@ fn selection_label(review: &ReviewState) -> Option<String> {
     )
 }
 
+fn markdown_area(area: Rect) -> Rect {
+    let inset = if area.width >= 8 { 1 } else { 0 };
+    Rect::new(
+        area.x + inset,
+        area.y,
+        area.width.saturating_sub(inset + 1).min(96),
+        area.height,
+    )
+}
+
+fn draw_scrollbar(frame: &mut Frame, area: Rect, content: usize, position: usize) {
+    if content <= usize::from(area.height) || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .thumb_symbol("┃")
+        .track_symbol(Some("│"))
+        .thumb_style(Style::default().fg(ACCENT))
+        .track_style(Style::default().fg(BORDER));
+    let mut state = ScrollbarState::new(content)
+        .position(position)
+        .viewport_content_length(usize::from(area.height));
+    frame.render_stateful_widget(scrollbar, area, &mut state);
+}
+
 fn markdown(frame: &mut Frame, body: &str, area: Rect, scroll: u16) -> u16 {
-    let text = tui_markdown::from_str(body);
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(TEXT))
-        .wrap(Wrap { trim: false });
-    let limit = paragraph
-        .line_count(area.width)
-        .saturating_sub(usize::from(area.height))
+    let content = markdown_area(area);
+    let text = markdown_text(body, content.width);
+    let total = text.lines.len();
+    let limit = total
+        .saturating_sub(usize::from(content.height))
         .min(u16::MAX as usize) as u16;
     let scroll = scroll.min(limit);
-    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().fg(TEXT))
+            .scroll((scroll, 0)),
+        content,
+    );
+    draw_scrollbar(frame, area, total, usize::from(scroll));
     scroll
 }
 
@@ -1006,6 +1254,7 @@ fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
                 Rect::new(content.x, content.y + offset as u16, content.width, 1),
             );
         }
+        draw_scrollbar(frame, content, rows.len(), start);
         start.min(u16::MAX as usize) as u16
     } else {
         let hint = match guide.map(|guide| &guide.status) {
@@ -1107,9 +1356,9 @@ fn draw_ask(
         text.push_str("Ask about the behavior, intent, risks, or tests. The selected lines and surrounding hunks are supplied as context.\n\nCtrl-d / Ctrl-u scroll the conversation. Follow-up questions retain previous turns.");
     }
     let requested = if scroll == u16::MAX {
-        Paragraph::new(tui_markdown::from_str(&text[..latest_start]))
-            .wrap(Wrap { trim: false })
-            .line_count(transcript.width)
+        markdown_text(&text[..latest_start], markdown_area(transcript).width)
+            .lines
+            .len()
             .min(u16::MAX as usize) as u16
     } else {
         scroll
@@ -1905,6 +2154,38 @@ fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
     inner
 }
 
+fn draw_description(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
+    let inner = popup(
+        frame,
+        " PR description / j,k scroll / Esc closes ".into(),
+        100,
+        frame.area().height.saturating_sub(4),
+    );
+    let details = app
+        .overview
+        .as_ref()
+        .map(|state| {
+            let pr = &state.metadata;
+            (&pr.title, &pr.url, &pr.author, pr.draft, &pr.body)
+        })
+        .or_else(|| {
+            app.review.as_ref().map(|state| {
+                let pr = &state.data.pr;
+                (&pr.title, &pr.url, &pr.author, pr.draft, &pr.body)
+            })
+        });
+    let body = details.map_or_else(
+        || "No pull request is selected.".into(),
+        |(title, url, author, draft, body)| {
+            format!(
+                "# {title}\n\nby {author}{}\n\n{url}\n\n{body}",
+                if draft { " (draft)" } else { "" }
+            )
+        },
+    );
+    markdown(frame, &body, inner, scroll)
+}
+
 fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
     match dialog {
         Dialog::Ask { .. } => {}
@@ -2067,41 +2348,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
             frame.render_widget(Paragraph::new("BROWSE\n  j/k             Select PR; scroll when preview focused\n  h/l or Tab      Focus PR list / preview\n  p / P           Toggle preview / change position\n  [ / ] or 1 / 2  Description / AI guide preview\n  Ctrl-d/Ctrl-u   Scroll preview\n  a / A           Prepare guide / choose agent\n  o               Open Diff\n\nAI QUESTIONS\n  Q               Ask about this PR or selected diff\n  E               Explain selection or current hunk\n  Ctrl-s          Send question or follow-up\n  Ctrl-d/Ctrl-u   Scroll conversation\n  Esc             Close question panel and cancel request\n\nNAVIGATE\n  j/k, arrows     Move through PRs, files, or diff lines\n  Tab / Shift-Tab Overview / Diff views\n  1 / 2           Jump to Overview / Diff\n  h / l           Focus file tree / diff pane\n  n / p           Next / previous file\n  ] / [           Next / previous hunk\n  gg / ge         First / last item\n  gf / o          Open the selected file in Helix\n  Ctrl-d / Ctrl-u Half-page down / up\n  Normal j/k      Continue into adjacent files\n  Left / Right    Scroll diff horizontally\n\nOVERVIEW\n  j/k             Scroll explanation\n  n/p             Choose reading-guide step\n  Enter / o / gf  Open selected step in Diff\n  a               Generate or regenerate AI guide\n  A               Choose Codex, Claude, or no AI\n  b               Full author description\n\nSELECT\n  v               Toggle selection extension\n  x               Select line; repeat to grow downward\n  X               Extend selection to whole-line bounds\n  ;               Collapse selection to the cursor\n  Esc             Clear selection before leaving review\n\nREVIEW\n  b               PR description\n  t               Toggle inline comments and drafts\n  T               Full comment threads and replies\n  o               Open selected PR, file, or draft\n  Ctrl-h          Backspace in text editors\n  #               Open a PR by number\n  V               Published review summaries\n  u               Recover an uncertain submission\n  c               Comment on selected diff lines\n  D               Inspect, edit, or delete saved drafts\n  s               Write summary, preview, and submit review\n  * / +           Line has a local draft / existing comment\n\nLOCAL CODE\n  w               Prepare isolated Jujutsu workspace\n  o / gf          Prepare if needed, then open file in Helix\n                  Deleted lines open a base-revision snapshot\n\n  !               Full operation details\n\n  r refresh       Esc inbox       q quit\n  Ctrl-c exits immediately; saved drafts remain on disk").style(Style::default().fg(TEXT)).wrap(Wrap { trim: false }).scroll((*scroll, 0)), inner);
         }
         Dialog::Description { scroll } => {
-            let inner = popup(
-                frame,
-                " PR description / j,k scroll / Esc closes ".into(),
-                100,
-                frame.area().height.saturating_sub(4),
-            );
-            let body = if let Some(overview) = &app.overview {
-                let metadata = &overview.metadata;
-                format!(
-                    "{}\n{}\nby {}{}\n\n{}",
-                    metadata.title,
-                    metadata.url,
-                    metadata.author,
-                    if metadata.draft { " (draft)" } else { "" },
-                    metadata.body
-                )
-            } else if let Some(review) = &app.review {
-                let pr = &review.data.pr;
-                format!(
-                    "{}\n{}\nby {}{}\n\n{}",
-                    pr.title,
-                    pr.url,
-                    pr.author,
-                    if pr.draft { " (draft)" } else { "" },
-                    pr.body
-                )
-            } else {
-                "No pull request is selected.".into()
-            };
-            frame.render_widget(
-                Paragraph::new(body)
-                    .wrap(Wrap { trim: false })
-                    .scroll((*scroll, 0)),
-                inner,
-            );
+            draw_description(frame, app, *scroll);
         }
         Dialog::Threads { scroll } => {
             let review = app.review.as_ref().unwrap();
@@ -2747,14 +2994,14 @@ mod tests {
             .flat_map(|row| row.line.spans.iter().map(|span| span.content.as_ref()))
             .collect::<String>();
         for section in [
-            "SUMMARY",
-            "INTENT",
-            "MAIN CHANGES",
-            "READING ORDER",
-            "REVIEW RISKS",
-            "VERIFICATION",
-            "UNKNOWNS",
-            "CONTEXT COVERAGE",
+            "Summary",
+            "Intent",
+            "Main changes",
+            "Reading order",
+            "Review risks",
+            "Verification",
+            "Unknowns",
+            "Context coverage",
         ] {
             assert!(text.contains(section), "Missing overview section {section}");
         }
@@ -2770,7 +3017,7 @@ mod tests {
             app.overview.as_mut().unwrap().scroll = u16::MAX;
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let output = screen(&terminal);
-            assert!(output.contains("CONTEXT COVERAGE"));
+            assert!(output.contains("Context coverage"));
             assert!(output.contains("diagram.png"));
             let end = app.overview.as_ref().unwrap().scroll;
             assert!(end > 0 && end < u16::MAX);
@@ -2826,5 +3073,135 @@ mod tests {
         assert!(output.contains("Network connection is unavailable"));
         assert!(output.contains("r retries"));
         assert!(output.contains("Keep request retries within the deadline"));
+    }
+    #[test]
+    fn markdown_has_readable_headings_inline_code_and_indented_code_blocks() {
+        use ratatui::style::Modifier;
+        let text = markdown_text(
+            "# Read this\n\nUse **bounded retries** with `budget`.\n\n```rust\n    sleep(delay);\n```\n\n[Guide](https://example.com)",
+            60,
+        );
+        let plain = text.to_string();
+        assert!(plain.contains("Read this") && !plain.contains("# Read"));
+        assert!(!plain.contains("**") && !plain.contains("```"));
+        assert!(text.lines.iter().any(|line| line.style.fg == Some(ACCENT)
+            && line.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(
+            text.lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("budget")
+                    && span.style.bg == Some(CODE_BACKGROUND))
+        );
+        let block = text
+            .lines
+            .iter()
+            .find(|line| line.to_string().contains("sleep(delay)"))
+            .unwrap();
+        assert!(block.to_string().starts_with("│     sleep"));
+        assert_eq!(block.width(), 60);
+        assert!(
+            markdown_text("```rust\n\tlet delay = budget;\n```", 60)
+                .to_string()
+                .contains("│     let delay")
+        );
+        assert!(text.lines.iter().flat_map(|line| &line.spans).any(|span| span.content.contains("Guide") && span.style.fg == Some(COMMENT_ACCENT)));
+        assert!(markdown_text("\\-\\-\\-", 24).to_string().contains("---"));
+    }
+
+    #[test]
+    fn markdown_wraps_unicode_lists_and_tables_without_losing_styles_or_content() {
+        let text = "説明を読みながら変更箇所を確認するe\u{301}検証";
+        let rows = wrap_styled(&Line::from(text), 8, 0, false);
+        assert_eq!(
+            rows.iter().map(ToString::to_string).collect::<String>(),
+            text
+        );
+        assert!(rows.iter().all(|line| line.width() <= 8));
+        let list = markdown_text(
+            "- **A lengthy item** continues over several lines with `code` in it.",
+            24,
+        );
+        assert!(list.lines.len() > 2);
+        assert!(
+            list.lines
+                .iter()
+                .skip(1)
+                .filter(|line| !line.to_string().is_empty())
+                .all(|line| line.to_string().starts_with("  "))
+        );
+        let table = markdown_text(
+            "| Behavior | Why |\n| --- | --- |\n| 長い説明の文章がここに入ります | Preserve the deadline |",
+            32,
+        );
+        assert!(table.lines.iter().all(|line| line.width() <= 32));
+        assert!(table.to_string().contains("Behavior"));
+        assert!(
+            table
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.style.fg == Some(ACCENT))
+        );
+    }
+
+    #[test]
+    fn ai_overview_renders_markdown_and_keeps_file_names_literal() {
+        let mut analysis = analysis_fixture();
+        analysis.summary = "Review **bounded waits** using `budget`.".into();
+        analysis.changes[0].detail = "- Keep the **deadline**.\n- Return an error.\n\n```rust\nreturn Err(Error::DeadlineExceeded);\n```".into();
+        analysis.changes[0].files = vec!["src/*literal*.rs".into()];
+        let rows = overview_rows(&analysis, 80, true);
+        let plain = rows
+            .iter()
+            .map(|row| row.line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("bounded waits") && !plain.contains("**bounded"));
+        assert!(!plain.contains("```"));
+        assert!(plain.contains("src/*literal*.rs"));
+        assert!(
+            rows.iter()
+                .flat_map(|row| &row.line.spans)
+                .any(|span| span.content.contains("budget")
+                    && span.style.bg == Some(CODE_BACKGROUND))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.line.to_string().contains("│ return Err"))
+        );
+    }
+
+    #[test]
+    fn full_markdown_description_clamps_scrolling_and_shows_a_scrollbar() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(directory.path().into(), true);
+        let mut metadata = overview_metadata();
+        metadata.body =
+            "# Description\n\n".to_owned() + &"- A long description item.\n".repeat(150);
+        app.opened(metadata);
+        app.dialog = Some(Dialog::Description { scroll: u16::MAX });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let end = match app.dialog {
+            Some(Dialog::Description { scroll }) => scroll,
+            _ => panic!("Description closed"),
+        };
+        assert!(end > 0 && end < u16::MAX);
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "┃")
+        );
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('k'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(matches!(app.dialog, Some(Dialog::Description { scroll }) if scroll == end - 1));
     }
 }

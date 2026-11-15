@@ -1,10 +1,14 @@
 [package]
 name = "pr-review"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Review GitHub pull requests in the terminal with Jujutsu and Helix"
 license = "MIT"
-default-run = "gh-preview"
+default-run = "prpr"
+
+[[bin]]
+name = "prpr"
+path = "src/bin/prpr.rs"
 
 [[bin]]
 name = "gh-preview"
