@@ -27,7 +27,7 @@ editor.chmod(0o755)
 os.environ['PATH'] = str(bin_directory) + os.pathsep + os.environ['PATH']
 
 arguments = ['difftool', '$left', '$right', '--agent', 'none', '--workspace-root', state]
-command = ['jj', '--no-pager', '--config', 'merge-tools.prpr.program=' + json.dumps(binary),
+command = ['jj', '--config', 'ui.pager=["less","-FRX"]', '--config', 'merge-tools.prpr.program=' + json.dumps(binary),
            '--config', 'merge-tools.prpr.diff-args=' + json.dumps(arguments), 'diff', '--tool', 'prpr']
 pid, terminal = pty.fork()
 if pid == 0:

@@ -203,16 +203,38 @@ type Tui = Terminal<CrosstermBackend<std::fs::File>>;
 
 fn tty() -> std::io::Result<std::fs::File> {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let open = |path: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+    };
     let name = rustix::termios::ttyname(std::io::stderr(), Vec::new())
         .or_else(|_| rustix::termios::ttyname(std::io::stdin(), Vec::new()));
-    let path = name.as_ref().map_or_else(
-        |_| std::path::Path::new("/dev/tty"),
-        |name| std::path::Path::new(OsStr::from_bytes(name.as_bytes())),
-    );
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
+    if let Ok(name) = name {
+        let path = std::path::Path::new(OsStr::from_bytes(name.as_bytes()));
+        if path != std::path::Path::new("/dev/tty") {
+            return open(path);
+        }
+    }
+    // Pagers can redirect every standard stream, and macOS kqueue cannot monitor the /dev/tty alias.
+    let output = Command::new("/bin/ps")
+        .args(["-o", "tty=", "-p", &std::process::id().to_string()])
+        .output()?;
+    let name = String::from_utf8(output.stdout).map_err(std::io::Error::other)?;
+    let name = name.trim();
+    if !output.status.success()
+        || name.is_empty()
+        || name.contains('?')
+        || !std::path::Path::new(name)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(std::io::Error::other(
+            "Cannot find the controlling terminal; an interactive terminal is required",
+        ));
+    }
+    open(&std::path::Path::new("/dev").join(name))
 }
 
 fn data_root(args: &Args) -> Result<PathBuf> {
