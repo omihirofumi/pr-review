@@ -8,6 +8,7 @@ pub mod keybindings;
 pub mod local;
 pub mod model;
 pub mod notes;
+pub mod review;
 pub mod settings;
 pub mod thread;
 pub mod workspace;

@@ -2,7 +2,7 @@
 pub mod commands;
 use std::{collections::HashMap, path::PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use prpr::{
     analysis::Analysis,
@@ -159,6 +159,9 @@ pub enum Dialog {
     Description {
         scroll: u16,
     },
+    AiReview {
+        scroll: u16,
+    },
     Threads {
         scroll: u16,
     },
@@ -198,6 +201,24 @@ impl PageTab {
             (Self::Diff, true) | (Self::Guide, false) => Self::Overview,
         }
     }
+}
+
+pub enum AiReviewStatus {
+    Running(Provider),
+    Ready {
+        provider: Provider,
+        text: String,
+        notes: usize,
+        unanchored: usize,
+        /// False when the checkout was not at the PR head, so line numbers were not trusted.
+        anchored: bool,
+    },
+    Error(String),
+}
+
+/// Reviews are tied to the PR head they inspected, so a new push needs a new review.
+pub fn ai_review_key(pr: &PullRequest) -> String {
+    format!("{}#{}@{}", pr.id.repo, pr.id.number, pr.head_sha)
 }
 
 pub enum ActivityStatus {
@@ -280,6 +301,8 @@ pub struct ReviewState {
     pub workspace: Option<PathBuf>,
     pub viewport: Viewport,
     pub marks: Vec<Mark>,
+    /// File shown when the sidebar took focus, so returning to another file can start at its top.
+    pub sidebar_origin: Option<usize>,
 }
 
 /// Diff scroll position, updated while drawing so it follows the rendered row layout.
@@ -670,6 +693,116 @@ impl ReviewState {
         self.positions[self.selected_file] = self.position().saturating_add_signed(delta).min(max);
     }
 
+    fn copied_rows(&self) -> &[DiffLine] {
+        let (start, end) = self
+            .selected_range()
+            .unwrap_or((self.position(), self.position()));
+        let lines = self.current_lines();
+        &lines[start.min(lines.len())..(end + 1).min(lines.len())]
+    }
+
+    /// Selected lines (or the cursor line) as a Markdown diff block headed by their location.
+    pub fn copy_text(&self) -> Result<String> {
+        let file = self.current_file().context("No file is selected")?;
+        let rows = self.copied_rows();
+        ensure!(
+            rows.iter().any(|row| row.anchor().is_some()),
+            "Move to a numbered source line to copy it"
+        );
+        let numbers = rows
+            .iter()
+            .filter_map(|row| row.new_line.or(row.old_line))
+            .collect::<Vec<_>>();
+        let (first, last) = (numbers[0], numbers[numbers.len() - 1]);
+        let location = if first == last {
+            format!("{}:{first}", file.filename)
+        } else {
+            format!("{}:{first}-{last}", file.filename)
+        };
+        let body = rows
+            .iter()
+            .filter(|row| row.anchor().is_some())
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!("`{location}`\n\n```diff\n{body}\n```\n"))
+    }
+
+    /// GitHub link pinned to the reviewed revision: the PR head for new and unchanged lines, the
+    /// diff base when the selection holds only deleted lines.
+    pub fn permalink(&self) -> Result<String> {
+        ensure!(
+            !self.data.source.is_local(),
+            "Permalinks need a GitHub PR; local reviews have no GitHub revision"
+        );
+        let file = self.current_file().context("No file is selected")?;
+        let rows = self.copied_rows();
+        let new = rows
+            .iter()
+            .filter_map(|row| row.new_line)
+            .collect::<Vec<_>>();
+        let old = rows
+            .iter()
+            .filter_map(|row| row.old_line)
+            .collect::<Vec<_>>();
+        let (revision, path, numbers) = if !new.is_empty() {
+            (&self.data.pr.head_sha, file.filename.as_str(), new)
+        } else if !old.is_empty() {
+            (
+                &self.data.pr.base_sha,
+                file.previous_filename.as_deref().unwrap_or(&file.filename),
+                old,
+            )
+        } else {
+            bail!("Move to a numbered source line to link it");
+        };
+        let encoded = path
+            .split('/')
+            .map(|part| {
+                part.bytes()
+                    .map(|byte| {
+                        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+                            (byte as char).to_string()
+                        } else {
+                            format!("%{byte:02X}")
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let (first, last) = (numbers[0], numbers[numbers.len() - 1]);
+        let lines = if first == last {
+            format!("L{first}")
+        } else {
+            format!("L{first}-L{last}")
+        };
+        Ok(format!(
+            "https://github.com/{}/blob/{revision}/{encoded}#{lines}",
+            self.data.pr.id.repo
+        ))
+    }
+
+    pub fn focus_files(&mut self) {
+        if self.focus != Focus::Files {
+            self.sidebar_origin = Some(self.selected_file);
+        }
+        self.focus = Focus::Files;
+    }
+
+    pub fn leave_files(&mut self) {
+        if self.focus == Focus::Files
+            && self
+                .sidebar_origin
+                .is_some_and(|origin| origin != self.selected_file)
+        {
+            self.positions[self.selected_file] = 0;
+            self.selection = None;
+        }
+        self.sidebar_origin = None;
+        self.focus = Focus::Diff;
+    }
+
     fn move_file(&mut self, delta: isize) {
         self.selection = None;
         self.selected_file = self
@@ -745,6 +878,11 @@ impl ReviewState {
 pub enum Action {
     RefreshLocal,
     Browse(PrId),
+    Copy {
+        text: String,
+        label: &'static str,
+    },
+    AiReview,
     LoadContext(usize),
     PreviewGuide(PrId),
     Ask {
@@ -776,6 +914,7 @@ pub enum Action {
 }
 
 pub struct App {
+    pub ai_reviews: HashMap<String, AiReviewStatus>,
     /// Action requested outside the key loop, such as an agent asking to reload.
     pub requested: Option<Action>,
     /// Local checkout root and the GitHub repository it belongs to.
@@ -813,6 +952,7 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            ai_reviews: HashMap::new(),
             requested: None,
             checkout: None,
             file_sidebar: true,
@@ -1017,6 +1157,7 @@ impl App {
             workspace: None,
             viewport: Viewport::default(),
             marks: Vec::new(),
+            sidebar_origin: None,
         });
         self.tab = PageTab::Diff;
         self.goto_pending = false;
@@ -1264,7 +1405,7 @@ impl App {
                     if let Some(review) = &mut self.review {
                         self.file_sidebar = !self.file_sidebar;
                         if !self.file_sidebar {
-                            review.focus = Focus::Diff;
+                            review.leave_files();
                         }
                     }
                     return Ok(Action::None);
@@ -1374,6 +1515,11 @@ impl App {
                     });
                     return Ok(Action::None);
                 }
+                KeyCode::Char('R') => {
+                    self.goto_pending = false;
+                    self.pending_keys.clear();
+                    return self.ai_review_key_pressed();
+                }
                 KeyCode::Char('a') => {
                     self.goto_pending = false;
                     self.pending_keys.clear();
@@ -1418,6 +1564,14 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('f') => return self.open_selected(false),
+                KeyCode::Char('y') => {
+                    if let Some(review) = &self.review {
+                        return Ok(Action::Copy {
+                            text: review.permalink()?,
+                            label: "GitHub permalink",
+                        });
+                    }
+                }
                 KeyCode::Char('g') | KeyCode::Char('e') => {
                     let end = key.code == KeyCode::Char('e');
                     if let Some(review) = &mut self.review {
@@ -1498,18 +1652,19 @@ impl App {
                 self.leave_pr();
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                review.focus = if review.focus == Focus::Files {
-                    Focus::Diff
+                if review.focus == Focus::Files {
+                    review.leave_files();
                 } else {
                     self.file_sidebar = true;
-                    Focus::Files
+                    review.focus_files();
                 }
             }
             KeyCode::Char('h') => {
                 self.file_sidebar = true;
-                review.focus = Focus::Files;
+                review.focus_files();
             }
-            KeyCode::Char('l') | KeyCode::Enter => review.focus = Focus::Diff,
+            KeyCode::Char('l') | KeyCode::Enter => review.leave_files(),
+            KeyCode::Right if review.focus == Focus::Files => review.leave_files(),
             KeyCode::Char('j') | KeyCode::Down => {
                 if review.focus == Focus::Files {
                     review.move_file(1);
@@ -1571,6 +1726,18 @@ impl App {
             KeyCode::Char(';') => review.selection = None,
             KeyCode::Char('V') if !self.busy => {
                 return Ok(Action::Activity(review.data.pr.id.clone()));
+            }
+            KeyCode::Char('y') => {
+                return Ok(Action::Copy {
+                    text: review.copy_text()?,
+                    label: "selected lines",
+                });
+            }
+            KeyCode::Char('Y') => {
+                return Ok(Action::Copy {
+                    text: review.permalink()?,
+                    label: "GitHub permalink",
+                });
             }
             KeyCode::Char('u') if !self.busy => {
                 if let Some(attempt) = store::attempt(&self.root, &review.data.pr)? {
@@ -1862,6 +2029,35 @@ impl App {
         Ok(Action::None)
     }
 
+    fn ai_review_key_pressed(&mut self) -> Result<Action> {
+        ensure!(
+            self.local_spec.is_none(),
+            "AI review runs the provider's review of a GitHub PR; it is not available for local diffs"
+        );
+        ensure!(
+            self.settings.ai.provider != Provider::None,
+            "Choose Codex or Claude in the command palette before running an AI review"
+        );
+        let review = self
+            .review
+            .as_ref()
+            .context("Wait for the diff to load before running an AI review")?;
+        match self.ai_reviews.get(&ai_review_key(&review.data.pr)) {
+            Some(AiReviewStatus::Running(provider)) => {
+                self.message(
+                    format!("The {provider} review is still running; keep reviewing meanwhile."),
+                    false,
+                );
+                Ok(Action::None)
+            }
+            Some(AiReviewStatus::Ready { .. } | AiReviewStatus::Error(_)) => {
+                self.dialog = Some(Dialog::AiReview { scroll: 0 });
+                Ok(Action::None)
+            }
+            None => Ok(Action::AiReview),
+        }
+    }
+
     fn dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
         let dialog = self.dialog.take().unwrap();
         if key.code == KeyCode::Esc {
@@ -2079,6 +2275,13 @@ impl App {
             Dialog::Description { mut scroll } => {
                 scroll_key(&mut scroll, key);
                 Some(Dialog::Description { scroll })
+            }
+            Dialog::AiReview { .. } if key.code == KeyCode::Char('r') => {
+                return Ok(Action::AiReview);
+            }
+            Dialog::AiReview { mut scroll } => {
+                scroll_key(&mut scroll, key);
+                Some(Dialog::AiReview { scroll })
             }
             Dialog::Threads { mut scroll } => {
                 scroll_key(&mut scroll, key);

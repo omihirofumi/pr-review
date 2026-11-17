@@ -25,6 +25,7 @@ use directories::ProjectDirs;
 use prpr::{
     analysis, assistant, context, github, local,
     model::*,
+    review,
     settings::{self, OpenIn, Provider},
     workspace,
 };
@@ -192,6 +193,12 @@ pub(crate) enum JobResult {
         generation: u64,
         result: Result<PrActivity>,
     },
+    AiReview {
+        key: String,
+        provider: Provider,
+        anchored: bool,
+        result: Result<review::ReviewOutput>,
+    },
     Analysis {
         generation: u64,
         request: u64,
@@ -272,6 +279,8 @@ pub(crate) struct Runtime {
     ai_request: u64,
     ai_cancel: Option<Arc<AtomicBool>>,
     ai_handle: Option<thread::JoinHandle<()>>,
+    /// Provider reviews outlive PR reloads because they take minutes; quitting stops them.
+    review_cancels: Vec<Arc<AtomicBool>>,
 }
 
 impl Runtime {
@@ -308,6 +317,9 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        for cancel in &self.review_cancels {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.stop_ai();
         self.stop_ask();
     }
@@ -581,6 +593,7 @@ pub fn run() -> Result<()> {
                 | JobResult::Diff { .. }
                 | JobResult::Comments { .. }
                 | JobResult::PrActivity { .. }
+                | JobResult::AiReview { .. }
                 | JobResult::Analysis { .. }
                 | JobResult::PreviewContext { .. }
                 | JobResult::PreviewGuide { .. }
@@ -885,6 +898,73 @@ pub(crate) fn apply_background(
                 ),
             }
         }
+        JobResult::AiReview {
+            key,
+            provider,
+            anchored,
+            result,
+        } => {
+            let status = match result {
+                Ok(output) => {
+                    let current = app
+                        .review
+                        .as_ref()
+                        .is_some_and(|review| app::ai_review_key(&review.data.pr) == key);
+                    let mut notes = 0;
+                    if current && anchored {
+                        for finding in &output.findings {
+                            let body = match &finding.detail {
+                                Some(detail) => format!("**{}**\n\n{detail}", finding.summary),
+                                None => finding.summary.clone(),
+                            };
+                            let anchor = DraftComment {
+                                path: finding.file.clone(),
+                                side: Side::Right,
+                                line: finding.line,
+                                start_line: None,
+                                start_side: None,
+                                body,
+                            };
+                            if app
+                                .add_note(anchor, None, format!("{provider} review"))
+                                .is_ok()
+                            {
+                                notes += 1;
+                            }
+                        }
+                    }
+                    app.message(
+                        if anchored {
+                            format!(
+                                "{provider} review ready: {} findings, {notes} placed as notes (t shows, N lists). R opens the full review.",
+                                output.findings.len()
+                            )
+                        } else {
+                            format!(
+                                "{provider} review ready: {} findings. Your checkout is not at the PR head, so they stay text-only. R opens the review.",
+                                output.findings.len()
+                            )
+                        },
+                        false,
+                    );
+                    app::AiReviewStatus::Ready {
+                        provider,
+                        unanchored: output.findings.len() - notes,
+                        text: output.text,
+                        notes,
+                        anchored,
+                    }
+                }
+                Err(error) => {
+                    app.message(
+                        format!("{provider} review failed. R shows the error and r retries."),
+                        true,
+                    );
+                    app::AiReviewStatus::Error(format!("{error:#}"))
+                }
+            };
+            app.ai_reviews.insert(key, status);
+        }
         JobResult::PrActivity { generation, result } => {
             if generation != app.generation {
                 return None;
@@ -914,6 +994,59 @@ pub(crate) fn apply_background(
         foreground => return Some(foreground),
     }
     None
+}
+
+fn start_ai_review(app: &mut App, sender: &mpsc::Sender<JobResult>, runtime: &mut Runtime) {
+    app.dialog = None;
+    if app.demo {
+        app.message("Offline demo: AI review needs a real PR.", false);
+        return;
+    }
+    let Some(review) = &app.review else {
+        return;
+    };
+    let pr = review.data.pr.clone();
+    let Some(checkout) = app
+        .checkout
+        .as_ref()
+        .filter(|(_, repo)| *repo == pr.id.repo)
+        .map(|(root, _)| root.clone())
+    else {
+        app.message(
+            format!(
+                "Launch prpr inside a checkout of {} to run its AI review.",
+                pr.id.repo
+            ),
+            true,
+        );
+        return;
+    };
+    let config = app.settings.ai.clone();
+    let provider = config.provider;
+    let key = app::ai_review_key(&pr);
+    app.ai_reviews
+        .insert(key.clone(), app::AiReviewStatus::Running(provider));
+    let cancel = Arc::new(AtomicBool::new(false));
+    runtime.review_cancels.push(cancel.clone());
+    let anchored = review::at_pr_head(&checkout, &pr);
+    let sender = sender.clone();
+    thread::spawn(move || {
+        let result = review::run(&config, &pr, &checkout, &cancel);
+        let _ = sender.send(JobResult::AiReview {
+            key,
+            provider,
+            anchored,
+            result,
+        });
+    });
+    app.message(
+        if anchored {
+            format!("{provider} review started at the PR head. It can take minutes; keep reviewing. R opens it when ready.")
+        } else {
+            format!("{provider} review started, but your checkout is not at the PR head, so line numbers may not match; findings will stay text-only. R opens it when ready.")
+        },
+        false,
+    );
 }
 
 fn spawn_activity(sender: &mpsc::Sender<JobResult>, generation: u64, id: PrId) {
@@ -1283,6 +1416,17 @@ fn dispatch(
             start_context(app, sender, index)?;
             return Ok(());
         }
+        Action::AiReview => {
+            start_ai_review(app, sender, runtime);
+            return Ok(());
+        }
+        Action::Copy { text, label } => {
+            match copy_to_clipboard(&text) {
+                Ok(()) => app.message(format!("Copied {label} to the clipboard."), false),
+                Err(error) => app.message(format!("Could not copy {label}: {error:#}"), true),
+            }
+            return Ok(());
+        }
         Action::PreviewGuide(id) => {
             start_preview(app, sender, runtime, id);
             return Ok(());
@@ -1439,11 +1583,43 @@ fn dispatch(
         | Action::Ask { .. }
         | Action::CancelAsk
         | Action::Browse(_)
+        | Action::Copy { .. }
+        | Action::AiReview
         | Action::LoadContext(_) => {
             app.busy = false;
         }
     }
     Ok(())
+}
+
+/// Writes OSC 52 so terminals (including over SSH) set the clipboard, and also uses `pbcopy`
+/// when present because some terminals ignore OSC 52.
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    use base64::Engine;
+    use std::io::Write;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let osc = tty().and_then(|mut terminal| {
+        write!(terminal, "\x1b]52;c;{encoded}\x07")?;
+        terminal.flush()
+    });
+    let native = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .expect("piped stdin")
+                .write_all(text.as_bytes())?;
+            child.wait()
+        });
+    match (osc, native) {
+        (_, Ok(status)) if status.success() => Ok(()),
+        (Ok(()), _) => Ok(()),
+        (Err(error), _) => Err(error.into()),
+    }
 }
 
 fn read_only_snapshot(directory: &Path, filename: &str, text: &str) -> Result<PathBuf> {

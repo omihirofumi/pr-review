@@ -87,6 +87,13 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                     app.demo,
                     "Source opening is unavailable in the offline demo",
                 ),
+            Command::new(
+                "Copy selected lines as Markdown",
+                "y",
+                'y',
+                "clipboard yank snippet",
+            )
+            .disabled_if(!text, "Choose a textual hunk"),
             Command::new("Explain diff or selection", "E", 'E', "ai hunk code")
                 .disabled_if(!text, "Choose a textual hunk")
                 .disabled_if(
@@ -136,6 +143,13 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
         ]);
         if !local {
             commands.extend([
+                Command::new(
+                    "Copy GitHub permalink to selected lines",
+                    "gy / Y",
+                    'Y',
+                    "clipboard url link share",
+                )
+                .disabled_if(!text, "Choose a textual hunk"),
                 Command::new(
                     "Checkout PR in Jujutsu workspace",
                     "w",
@@ -220,6 +234,19 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
         ]);
     }
     if app.overview.is_some() && !local {
+        commands.push(
+            Command::new(
+                "Run or open AI code review",
+                "R",
+                'R',
+                "provider code-review findings claude codex",
+            )
+            .disabled_if(
+                app.settings.ai.provider == Provider::None,
+                "Choose an AI agent first",
+            )
+            .disabled_if(app.review.is_none(), "Wait for the diff to load"),
+        );
         commands.push(
             Command::new(
                 "Read PR conversation and reviews",

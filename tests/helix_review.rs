@@ -5,7 +5,7 @@ mod app;
 #[path = "../src/store.rs"]
 mod store;
 
-use app::{Action, App, Dialog, Selection};
+use app::{Action, App, Dialog, Focus, Selection};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use prpr::{
     diff::validate_comment,
@@ -474,4 +474,83 @@ fn legacy_single_line_draft_json_remains_compatible_and_omits_range_fields() {
     let encoded = serde_json::to_value(&draft).unwrap();
     assert!(encoded.get("start_line").is_none());
     assert!(encoded.get("start_side").is_none());
+}
+
+#[test]
+fn returning_from_the_sidebar_starts_other_files_at_the_top_and_keeps_the_same_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    load(
+        &mut app,
+        vec![
+            fixture_file("a.rs", Some("@@ -1,3 +1,3 @@\n one\n two\n three")),
+            fixture_file("b.rs", Some("@@ -1,2 +1,2 @@\n four\n five")),
+        ],
+    );
+    let review = app.review.as_mut().unwrap();
+    review.positions = vec![2, 1];
+    app.key(key('h')).unwrap();
+    app.key(key('l')).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 2);
+    app.key(key('h')).unwrap();
+    app.key(key('j')).unwrap();
+    app.key(key('l')).unwrap();
+    let review = app.review.as_ref().unwrap();
+    assert_eq!((review.selected_file, review.position()), (1, 0));
+    app.review.as_mut().unwrap().positions[0] = 2;
+    app.key(key('h')).unwrap();
+    app.key(key('k')).unwrap();
+    app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    let review = app.review.as_ref().unwrap();
+    assert_eq!(review.focus, Focus::Diff);
+    assert_eq!((review.selected_file, review.position()), (0, 0));
+    assert_eq!(review.horizontal, 0);
+}
+
+#[test]
+fn copy_formats_markdown_and_permalinks_pin_the_reviewed_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    load(
+        &mut app,
+        vec![fixture_file(
+            "src/a b.rs",
+            Some("@@ -10,3 +20,3 @@\n keep\n-old\n+new\n tail"),
+        )],
+    );
+    app.review.as_mut().unwrap().positions[0] = 1;
+    range(&mut app, 1, 3);
+    let review = app.review.as_ref().unwrap();
+    assert_eq!(
+        review.copy_text().unwrap(),
+        "`src/a b.rs:20-21`\n\n```diff\n keep\n-old\n+new\n```\n"
+    );
+    let head = &review.data.pr.head_sha;
+    assert_eq!(
+        review.permalink().unwrap(),
+        format!("https://github.com/example/service/blob/{head}/src/a%20b.rs#L20-L21")
+    );
+    range(&mut app, 2, 2);
+    let review = app.review.as_ref().unwrap();
+    let base = &review.data.pr.base_sha;
+    assert_eq!(
+        review.permalink().unwrap(),
+        format!("https://github.com/example/service/blob/{base}/src/a%20b.rs#L11")
+    );
+    assert!(matches!(
+        app.key(key('y')).unwrap(),
+        Action::Copy {
+            label: "selected lines",
+            ..
+        }
+    ));
+    app.key(key('g')).unwrap();
+    assert!(matches!(
+        app.key(key('y')).unwrap(),
+        Action::Copy {
+            label: "GitHub permalink",
+            ..
+        }
+    ));
 }

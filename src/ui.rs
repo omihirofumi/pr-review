@@ -22,8 +22,8 @@ use ratatui::{
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::{
-    ActivityStatus, AiStatus, App, Dialog, Focus, OverviewState, PageTab, PreviewTab, ReviewState,
-    TextInput,
+    ActivityStatus, AiReviewStatus, AiStatus, App, Dialog, Focus, OverviewState, PageTab,
+    PreviewTab, ReviewState, TextInput,
 };
 
 const BACKGROUND: Color = Color::Rgb(24, 24, 23);
@@ -429,6 +429,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if let Some(Dialog::Description { scroll }) = &app.dialog {
         let actual = draw_description(frame, app, *scroll);
         if let Some(Dialog::Description { scroll }) = &mut app.dialog {
+            *scroll = actual;
+        }
+    } else if let Some(Dialog::AiReview { scroll }) = &app.dialog {
+        let actual = draw_ai_review(frame, app, *scroll);
+        if let Some(Dialog::AiReview { scroll }) = &mut app.dialog {
             *scroll = actual;
         }
     } else if let Some(dialog) = &app.dialog {
@@ -2664,6 +2669,47 @@ fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
     inner
 }
 
+fn draw_ai_review(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
+    let status = app.review.as_ref().and_then(|review| {
+        app.ai_reviews
+            .get(&crate::app::ai_review_key(&review.data.pr))
+    });
+    let (title, body) = match status {
+        Some(AiReviewStatus::Ready {
+            provider,
+            text,
+            notes,
+            unanchored,
+            anchored,
+        }) => (
+            format!(
+                " {provider} review / {notes} findings as notes, {unanchored} text-only / r reruns / Esc closes "
+            ),
+            if *anchored {
+                text.clone()
+            } else {
+                format!(
+                    "> Your checkout was not at the PR head, so line numbers below may refer to other code and no notes were placed.\n\n{text}"
+                )
+            },
+        ),
+        Some(AiReviewStatus::Error(error)) => (
+            " AI review failed / r retries / Esc closes ".to_owned(),
+            format!("> {error}"),
+        ),
+        Some(AiReviewStatus::Running(provider)) => (
+            format!(" {provider} review / running / Esc closes "),
+            "The review is still running.".to_owned(),
+        ),
+        None => (
+            " AI review / Esc closes ".to_owned(),
+            "No review has run for this PR head.".to_owned(),
+        ),
+    };
+    let inner = popup(frame, title, 110, frame.area().height.saturating_sub(4));
+    markdown(frame, &body, inner, scroll)
+}
+
 fn draw_description(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
     let inner = popup(
         frame,
@@ -2969,6 +3015,9 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
         }
         Dialog::Description { scroll } => {
             draw_description(frame, app, *scroll);
+        }
+        Dialog::AiReview { scroll } => {
+            draw_ai_review(frame, app, *scroll);
         }
         Dialog::Threads { scroll } => {
             let review = app.review.as_ref().unwrap();

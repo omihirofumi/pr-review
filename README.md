@@ -140,7 +140,7 @@ Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. 
 
 The file sidebar shows changed files as a tree. Chains of directories that each contain a single subdirectory are joined into one row, such as `api/core/src`, so deep package paths stay readable; long joined names keep their first and last directories, such as `main/…/globalexpert`.
 
-`Ctrl-b` hides or shows the file sidebar. Hiding it gives the diff the full width and preserves the current file, cursor, and selection. The setting lasts for the current app session, including file changes and refreshes. Press `h` to show and focus the file tree again. These shortcuts leave comment/question editors unchanged while you are typing.
+`Ctrl-b` hides or shows the file sidebar. Hiding it gives the diff the full width and preserves the current file, cursor, and selection. The setting lasts for the current app session, including file changes and refreshes. Press `h` to show and focus the file tree again; `l`, `Enter`, `Tab`, or `→` returns to the diff. Returning to a different file than the one you left starts at its top, while returning to the same file keeps your position. These shortcuts leave comment/question editors unchanged while you are typing.
 
 Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
 
@@ -218,6 +218,7 @@ language = "en"          # e.g. "ja" for Japanese explanations
 auto_explain = true
 timeout_seconds = 180
 max_input_bytes = 160000
+review_timeout_seconds = 1200  # AI review (R) runs the provider's own review and takes longer
 # model = "MODEL"        # Omit to use the provider CLI's default model
 ```
 
@@ -240,6 +241,15 @@ AI Guide shows what the agent says. There, `j` / `k` scroll, `gg` / `ge` jump to
 Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
 
 Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide. In an opened PR, `a` explicitly regenerates it; in the PR list, `a` prepares or reuses the selected PR's guide. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in AI Guide while Overview and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
+
+## AI code review
+
+Press `R` in an opened GitHub PR to run your provider's own review command, so prpr follows each provider's review practice instead of a prompt of its own:
+
+- **Claude** runs `/code-review <PR number>` in print mode with read-only tools only (`Read`, `Grep`, `Glob`, subagents, and `gh pr view/diff/checks` and `git diff/log/show/blame`-style commands). Anything else, including posting to GitHub or editing files, is denied.
+- **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head (`gh pr checkout N` or `jj new <head>`).
+
+The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review` or `codex review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
 
 ## Ask your agent and explain a diff
 
@@ -283,6 +293,8 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `Ctrl-d` / `Ctrl-u`, PageDown / PageUp | Move through the diff |
 | left / right | Scroll long diff lines horizontally |
 | `b` / `B` | PR description / open PR on GitHub |
+| `y` / `gy`, `Y` | Copy selected lines as Markdown / copy a GitHub permalink pinned to the reviewed revision |
+| `R` | Run or open the provider's AI code review |
 | `+` / `-` | Expand 20 context lines / collapse current context |
 | `F` | Toggle full-file context |
 | `t` | Toggle inline comments, replies, and local drafts |

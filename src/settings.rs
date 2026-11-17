@@ -41,6 +41,8 @@ pub struct AiConfig {
     pub auto_explain: bool,
     pub timeout_seconds: u64,
     pub max_input_bytes: usize,
+    /// Provider review commands inspect the repository and run longer than guide generation.
+    pub review_timeout_seconds: u64,
 }
 
 impl Default for AiConfig {
@@ -52,6 +54,7 @@ impl Default for AiConfig {
             auto_explain: true,
             timeout_seconds: 180,
             max_input_bytes: 160_000,
+            review_timeout_seconds: 1200,
         }
     }
 }
@@ -65,6 +68,10 @@ impl AiConfig {
         ensure!(
             self.max_input_bytes > 0,
             "AI max_input_bytes must be positive"
+        );
+        ensure!(
+            self.review_timeout_seconds > 0,
+            "AI review_timeout_seconds must be positive"
         );
         ensure!(
             !self.language.trim().is_empty(),

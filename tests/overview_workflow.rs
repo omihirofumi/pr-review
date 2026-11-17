@@ -346,6 +346,7 @@ mod cli {
                 pending_ai: None,
                 ai_cancel: None,
                 ai_handle: None,
+                review_cancels: Vec::new(),
             };
             let (sender, _receiver) = mpsc::channel();
             for result in [
@@ -399,6 +400,7 @@ mod cli {
                 pending_ai: None,
                 ai_cancel: None,
                 ai_handle: None,
+                review_cancels: Vec::new(),
             };
             let (sender, _receiver) = mpsc::channel();
             let stale = JobResult::Analysis {
@@ -545,6 +547,7 @@ mod cli {
                 ai_request: 9,
                 ai_cancel: Some(cancel.clone()),
                 ai_handle: Some(handle),
+                review_cancels: Vec::new(),
             };
             runtime.sync(8);
             assert!(cancel.load(Ordering::Relaxed));
@@ -579,6 +582,7 @@ mod cli {
                     ai_request: 0,
                     ai_cancel: Some(cancel.clone()),
                     ai_handle: Some(handle),
+                    review_cancels: Vec::new(),
                 };
             }
             assert!(cancel.load(Ordering::Relaxed));
@@ -615,6 +619,7 @@ mod cli {
                 pending_ai: None,
                 ai_cancel: None,
                 ai_handle: None,
+                review_cancels: Vec::new(),
             };
             let (sender, _) = mpsc::channel();
             for (generation, request) in [(6, 3), (7, 2)] {
@@ -1634,4 +1639,47 @@ fn complete_chords_take_precedence_over_global_shortcut_suffixes() {
     app.key(key(KeyCode::Esc)).unwrap();
     press(&mut app, 'g').unwrap();
     assert!(matches!(press(&mut app, 'E').unwrap(), Action::Ask { .. }));
+}
+
+#[test]
+fn ai_review_key_starts_once_reports_progress_and_opens_the_finished_review() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.settings.ai.provider = Provider::None;
+    app.opened(overview());
+    assert!(press(&mut app, 'R').is_err(), "the diff is not loaded yet");
+    app.accept_diff(app::demo_data()).unwrap();
+    assert!(press(&mut app, 'R').is_err(), "an agent must be chosen");
+    app.settings.ai.provider = Provider::Claude;
+    assert!(matches!(press(&mut app, 'R').unwrap(), Action::AiReview));
+    let key = app::ai_review_key(&app.review.as_ref().unwrap().data.pr);
+    app.ai_reviews
+        .insert(key.clone(), app::AiReviewStatus::Running(Provider::Claude));
+    assert!(matches!(press(&mut app, 'R').unwrap(), Action::None));
+    assert!(app.dialog.is_none());
+    app.ai_reviews.insert(
+        key,
+        app::AiReviewStatus::Ready {
+            provider: Provider::Claude,
+            text: "## Findings\n\nNo issues found.".into(),
+            notes: 0,
+            unanchored: 0,
+            anchored: true,
+        },
+    );
+    press(&mut app, 'R').unwrap();
+    assert!(matches!(app.dialog, Some(Dialog::AiReview { .. })));
+    assert!(screen(&mut app).contains("No issues found."));
+    assert!(matches!(press(&mut app, 'r').unwrap(), Action::AiReview));
+    app.dialog = None;
+    app.local_spec = Some(prpr::local::Spec::Jj {
+        repository: directory.path().into(),
+        revision: None,
+        from: None,
+        to: None,
+    });
+    assert!(
+        press(&mut app, 'R').is_err(),
+        "local diffs have no provider PR review"
+    );
 }

@@ -565,7 +565,7 @@ pub(crate) fn run_structured(
     }
 }
 
-fn run_bounded(
+pub(crate) fn run_bounded(
     command: &mut Command,
     input: Vec<u8>,
     timeout: Duration,
@@ -597,7 +597,7 @@ fn run_bounded(
         if started.elapsed() >= timeout {
             terminate(&mut child);
             bail!(
-                "AI explanation timed out after {} seconds; retry or increase timeout_seconds",
+                "AI provider timed out after {} seconds; retry or increase its [ai] timeout setting",
                 timeout.as_secs()
             );
         }
