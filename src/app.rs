@@ -949,6 +949,10 @@ pub struct App {
     pub chat_input: TextInput,
     /// Transcript scroll offset; `u16::MAX` follows the latest answer.
     pub chat_scroll: u16,
+    /// Agent notes from `--notes`, added once the first local snapshot is loaded.
+    pub pending_notes: Vec<notes::Seed>,
+    /// A `--watch` reload is running in the background without blocking input.
+    pub watch_loading: bool,
     pub open_on_diff: bool,
     pub tab: PageTab,
     pub overview: Option<OverviewState>,
@@ -990,6 +994,8 @@ impl App {
             chat_open: false,
             chat_input: TextInput::default(),
             chat_scroll: u16::MAX,
+            pending_notes: Vec::new(),
+            watch_loading: false,
             open_on_diff: false,
             tab: PageTab::Overview,
             overview: None,
@@ -1225,6 +1231,57 @@ impl App {
         notes::update(&self.root, &review.data, &review.notes, &notes)?;
         review.notes = notes;
         Ok(id)
+    }
+
+    /// Adds agent-prepared notes, skipping ones already saved, and shows the first of them.
+    pub fn import_notes(&mut self, seeds: Vec<notes::Seed>) {
+        let mut added = 0;
+        let mut first = None;
+        let mut skipped = Vec::new();
+        for seed in seeds {
+            let anchor = seed.anchor();
+            let saved = self.review.as_ref().is_some_and(|review| {
+                review.notes.iter().any(|note| {
+                    note.reply_to.is_none()
+                        && !note.outdated
+                        && note.anchor == anchor
+                        && note.author == seed.author
+                })
+            });
+            let result = if saved {
+                Ok(())
+            } else {
+                self.add_note(anchor.clone(), None, seed.author)
+                    .map(|_| added += 1)
+            };
+            match result {
+                Ok(()) => {
+                    first.get_or_insert(anchor);
+                }
+                Err(error) => skipped.push(format!("{}:{}: {error:#}", anchor.path, anchor.line)),
+            }
+        }
+        if let Some(anchor) = first {
+            let _ = self.navigate(&anchor.path, &anchor.side, anchor.line);
+            if let Some(review) = &mut self.review {
+                review.show_comments = true;
+            }
+        }
+        if skipped.is_empty() {
+            self.message(
+                format!("Showing agent notes ({added} new). N lists them; t toggles inline notes."),
+                false,
+            );
+        } else {
+            self.message(
+                format!(
+                    "Added {added} agent notes; skipped {}: {}",
+                    skipped.len(),
+                    skipped.join("; ")
+                ),
+                true,
+            );
+        }
     }
 
     pub fn navigate(&mut self, path: &str, side: &Side, line: u32) -> Result<()> {

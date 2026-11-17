@@ -47,7 +47,11 @@ prpr diff                       # Current working-copy change (@)
 prpr diff -r @-                 # Another revision or connected revset
 prpr diff --from main --to @    # Compare two revisions
 prpr diff --agent codex          # Override the AI provider for this launch
+prpr diff --watch               # Reload whenever files or Jujutsu operations change
+prpr diff --notes notes.json    # Open with notes an agent prepared
 ```
+
+`--watch` reloads the diff a moment after files in the repository change or a Jujutsu operation such as `jj describe` or `jj squash` completes, so you can read along while an agent edits. The cursor, tab, AI chat, and AI guide stay in place; notes on changed files become outdated, and agent marks clear. Reloads wait while a dialog other than the AI chat is open. `jj diff --tool prpr` and `diff-formatter = "prpr"` launches review temporary snapshots and cannot watch.
 
 Local reviews open directly in Diff. Use the same `j/k`, `gg/ge`, `[/]`, `v/x`, `+/-`, `F`, and `gf/e` controls as PR reviews. `Q` asks about selected lines or the current hunk; `E` explains it. `1` opens Overview with the change description; `2` opens AI Guide, where `a` prepares a structured reading guide. AI configuration is shared with PR reviews.
 
@@ -112,6 +116,21 @@ prpr session mark add --repo . --file src/main.rs --new-line 42 --start-column 9
 prpr session mark clear --repo .
 prpr session reload --repo .
 ```
+
+An agent can also prepare notes before any viewer is open. It writes a JSON file, preferably outside the repository so the file does not appear in the diff, and you open the review with it:
+
+```json
+{"notes": [
+  {"file": "src/main.rs", "new_line": 42, "start_line": 39, "body": "Why this range matters.", "author": "claude"},
+  {"file": "src/old.rs", "old_line": 7, "body": "This removal drops the retry."}
+]}
+```
+
+```sh
+prpr diff -r @ --notes /tmp/prpr-notes.json
+```
+
+Notes become ordinary local notes: `N` lists them, you can reply, and the agent can answer through `prpr session`. prpr opens on the first note. Reopening with the same file does not duplicate notes, and notes whose lines are not in the diff are skipped with a message. A malformed file stops prpr before the TUI opens.
 
 Use `--session ID` when several viewers share a repository. If the viewer uses `--workspace-root`, pass the same option to session commands. Sessions use private local Unix sockets; no daemon or network listener is needed. `comment list` includes local notes, GitHub comments, and saved GitHub drafts separately. Replies target local note IDs. `mark add` highlights exact characters (1-based, inclusive columns) or whole lines until the review reloads, so an agent can point at the expression a note is about. `reload` refreshes the review as `r` does and keeps you on the Diff tab. Commands reject unknown files, invisible line ranges, and outdated note anchors. Reading comments or replying to them does not authorize an agent to edit code or publish a GitHub review.
 

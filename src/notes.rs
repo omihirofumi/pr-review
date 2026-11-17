@@ -168,3 +168,95 @@ pub fn comments(notes: &[Note]) -> Vec<ReviewComment> {
         })
         .collect()
 }
+
+/// A note an agent prepares before the review opens, using the anchors of `prpr session comment add`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Seed {
+    pub file: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub start_line: Option<u32>,
+    pub body: String,
+    #[serde(default = "agent")]
+    pub author: String,
+}
+
+fn agent() -> String {
+    "agent".into()
+}
+
+impl Seed {
+    pub fn anchor(&self) -> DraftComment {
+        let side = if self.old_line.is_some() {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        DraftComment {
+            path: self.file.clone(),
+            line: self.old_line.or(self.new_line).unwrap_or_default(),
+            side: side.clone(),
+            start_line: self.start_line,
+            start_side: self.start_line.map(|_| side),
+            body: self.body.clone(),
+        }
+    }
+}
+
+/// Reads `{"notes": [...]}` so a malformed file fails before the terminal switches to the TUI.
+pub fn read_seeds(path: &Path) -> Result<Vec<Seed>> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct File {
+        notes: Vec<Seed>,
+    }
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Cannot read notes {}", path.display()))?;
+    let file: File = serde_json::from_slice(&bytes)
+        .with_context(|| format!("Invalid notes file {}", path.display()))?;
+    for (index, seed) in file.notes.iter().enumerate() {
+        ensure!(
+            seed.old_line.is_some() != seed.new_line.is_some(),
+            "Note {} in {} needs exactly one of old_line or new_line",
+            index + 1,
+            path.display()
+        );
+    }
+    Ok(file.notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeds_map_to_anchors_and_reject_ambiguous_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.json");
+        std::fs::write(
+            &path,
+            r#"{"notes": [
+                {"file": "a.rs", "new_line": 4, "start_line": 2, "body": "Range", "author": "codex"},
+                {"file": "b.rs", "old_line": 7, "body": "Removed"}
+            ]}"#,
+        )
+        .unwrap();
+        let seeds = read_seeds(&path).unwrap();
+        let range = seeds[0].anchor();
+        assert_eq!((range.line, range.start_line), (4, Some(2)));
+        assert_eq!(range.start_side, Some(Side::Right));
+        assert_eq!(seeds[0].author, "codex");
+        assert_eq!(seeds[1].anchor().side, Side::Left);
+        assert_eq!(seeds[1].author, "agent");
+
+        for invalid in [
+            r#"{"notes": [{"file": "a.rs", "old_line": 1, "new_line": 1, "body": "x"}]}"#,
+            r#"{"notes": [{"file": "a.rs", "body": "x"}]}"#,
+            r#"{"notes": [{"file": "a.rs", "new_line": 1, "body": "x", "line": 1}]}"#,
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(read_seeds(&path).is_err(), "{invalid}");
+        }
+    }
+}

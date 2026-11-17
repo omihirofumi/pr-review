@@ -1,5 +1,7 @@
 #[path = "session.rs"]
 mod session;
+#[path = "watch.rs"]
+mod watch;
 use crate::{app, store, ui};
 
 use std::{
@@ -25,7 +27,7 @@ use directories::ProjectDirs;
 use prpr::{
     analysis, assistant, context, github, local,
     model::*,
-    review,
+    notes, review,
     settings::{self, OpenIn, Provider},
     workspace,
 };
@@ -69,6 +71,14 @@ struct DiffArgs {
     from: Option<String>,
     #[arg(long)]
     to: Option<String>,
+    #[arg(long, help = "Reload when working files or Jujutsu operations change")]
+    watch: bool,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Open with agent notes from a JSON file: {\"notes\": [{\"file\", \"new_line\" or \"old_line\", \"start_line\"?, \"body\", \"author\"?}]}"
+    )]
+    notes: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -145,6 +155,8 @@ impl Args {
 pub(crate) enum JobResult {
     Local {
         generation: u64,
+        /// Started by `--watch`, so an unchanged snapshot is dropped and the conversation is kept.
+        watched: bool,
         result: Result<local::Snapshot>,
     },
     Inbox(Result<Vec<PrSummary>>),
@@ -446,6 +458,15 @@ pub fn run() -> Result<()> {
         };
         app.checkout = local::checkout_root(&origin).zip(launched_from);
     }
+    let mut watcher = None;
+    if let Some(Mode::Diff(options)) = &args.command {
+        if let Some(path) = &options.notes {
+            app.pending_notes = notes::read_seeds(path)?;
+        }
+        if options.watch {
+            watcher = Some(watch::Watcher::start(&repository)?);
+        }
+    }
     let session = session::Server::start(&app.root, repository)?;
     if args.demo {
         let demo = app::demo_data();
@@ -512,6 +533,15 @@ pub fn run() -> Result<()> {
     }
     loop {
         session.poll(&mut app);
+        if let Some(watcher) = &watcher
+            && app.review.is_some()
+            && !app.busy
+            && !app.watch_loading
+            && matches!(app.dialog, None | Some(app::Dialog::Ask))
+            && watcher.settled()
+        {
+            spawn_local(&mut app, &sender, true);
+        }
         if let Some(action) = app.requested.take() {
             dispatch(
                 action,
@@ -637,6 +667,22 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+fn spawn_local(app: &mut App, sender: &mpsc::Sender<JobResult>, watched: bool) {
+    let Some(spec) = app.local_spec.clone() else {
+        return;
+    };
+    app.watch_loading |= watched;
+    let generation = app.generation;
+    let sender = sender.clone();
+    thread::spawn(move || {
+        let _ = sender.send(JobResult::Local {
+            generation,
+            watched,
+            result: spec.load(),
+        });
+    });
+}
+
 pub(crate) fn apply_background(
     result: JobResult,
     app: &mut App,
@@ -644,13 +690,38 @@ pub(crate) fn apply_background(
     runtime: &mut Runtime,
 ) -> Option<JobResult> {
     match result {
-        JobResult::Local { generation, result } => {
+        JobResult::Local {
+            generation,
+            watched,
+            result,
+        } => {
+            if watched {
+                app.watch_loading = false;
+            }
             if generation != app.generation {
                 return None;
             }
-            app.busy = false;
+            if !watched {
+                app.busy = false;
+            }
             match result {
                 Ok(snapshot) => {
+                    let unchanged = app.review.as_ref().is_some_and(|review| {
+                        review.data.pr.head_sha == snapshot.data.pr.head_sha
+                            && review.data.pr.title == snapshot.data.pr.title
+                            && review.data.pr.body == snapshot.data.pr.body
+                    });
+                    if watched && unchanged {
+                        return None;
+                    }
+                    let kept = watched.then(|| {
+                        (
+                            std::mem::take(&mut app.chat),
+                            app.overview.as_mut().map(|overview| {
+                                std::mem::replace(&mut overview.ai, app::AiStatus::Disabled)
+                            }),
+                        )
+                    });
                     let previous = app.review.as_ref().map(|review| {
                         (
                             app.tab,
@@ -682,10 +753,22 @@ pub(crate) fn apply_background(
                         }
                         app.tab = tab;
                     }
+                    if let Some((chat, ai)) = kept {
+                        app.chat = chat;
+                        if let (Some(overview), Some(ai)) = (&mut app.overview, ai) {
+                            overview.ai = ai;
+                        }
+                        app.message("Files changed; reloaded the diff.", false);
+                        return None;
+                    }
                     app.message(
                         "Local review. Use the command palette for notes, AI explanations, and refresh.",
                         false,
                     );
+                    let seeds = std::mem::take(&mut app.pending_notes);
+                    if !seeds.is_empty() {
+                        app.import_notes(seeds);
+                    }
                     if app.settings.ai.auto_explain {
                         start_analysis(app, sender, runtime, false);
                     }
@@ -1379,20 +1462,13 @@ fn dispatch(
             if app.busy {
                 return Ok(());
             }
-            let spec = app.local_spec.clone().context("No local source is open")?;
+            app.local_spec.as_ref().context("No local source is open")?;
             app.generation = app.generation.wrapping_add(1);
             runtime.sync(app.generation);
             app.chat = Default::default();
             app.busy = true;
-            let generation = app.generation;
-            let sender = sender.clone();
             app.message("Loading local diff snapshot…", false);
-            thread::spawn(move || {
-                let _ = sender.send(JobResult::Local {
-                    generation,
-                    result: spec.load(),
-                });
-            });
+            spawn_local(app, sender, false);
             return Ok(());
         }
 
@@ -1829,6 +1905,98 @@ mod tests {
         ] {
             assert!(Args::try_parse_from(argv).unwrap().resolve().is_err());
         }
+    }
+
+    fn jj(root: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("jj")
+            .current_dir(root)
+            .args(["--no-pager", "--color=never"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn agent_notes_open_once_and_watched_reloads_keep_the_conversation() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().canonicalize().unwrap();
+        jj(&repository, &["git", "init", "."]);
+        std::fs::write(repository.join("a.rs"), "one\ntwo\n").unwrap();
+        jj(&repository, &["new"]);
+        std::fs::write(repository.join("a.rs"), "one\nTWO\nthree\n").unwrap();
+        let notes_file = repository.join("notes.json");
+        std::fs::write(
+            &notes_file,
+            r#"{"notes": [
+                {"file": "a.rs", "new_line": 3, "start_line": 2, "body": "Why add three?", "author": "codex"},
+                {"file": "a.rs", "new_line": 40, "body": "Not in the diff"}
+            ]}"#,
+        )
+        .unwrap();
+        let spec = local::Spec::Jj {
+            repository: repository.clone(),
+            revision: None,
+            from: None,
+            to: None,
+        };
+        let state = tempfile::tempdir().unwrap();
+        let (sender, _receiver) = mpsc::channel();
+        let mut runtime = Runtime::default();
+        let open = |app: &mut App, runtime: &mut Runtime, watched: bool| {
+            let result = spec.load();
+            apply_background(
+                JobResult::Local {
+                    generation: app.generation,
+                    watched,
+                    result,
+                },
+                app,
+                &sender,
+                runtime,
+            )
+        };
+
+        for launch in 0..2 {
+            let mut app = App::new(state.path().into(), false);
+            app.local_spec = Some(spec.clone());
+            app.pending_notes = notes::read_seeds(&notes_file).unwrap();
+            open(&mut app, &mut runtime, false);
+            let review = app.review.as_ref().unwrap();
+            assert_eq!(review.notes.len(), 1, "launch {launch}");
+            assert_eq!(review.notes[0].author, "codex");
+            let row = &review.current_lines()[review.position()];
+            assert_eq!(row.new_line, Some(3));
+            assert!(app.error);
+            assert!(app.status.contains("a.rs:40"), "{}", app.status);
+        }
+
+        let mut app = App::new(state.path().into(), false);
+        app.local_spec = Some(spec.clone());
+        open(&mut app, &mut runtime, false);
+        app.chat.error = Some("kept".into());
+        let before = app.review.as_ref().unwrap().data.pr.head_sha.clone();
+        assert!(open(&mut app, &mut runtime, true).is_none());
+        assert_eq!(app.chat.error.as_deref(), Some("kept"));
+        assert_eq!(app.review.as_ref().unwrap().data.pr.head_sha, before);
+
+        std::fs::write(repository.join("a.rs"), "one\nTWO\nthree\nfour\n").unwrap();
+        open(&mut app, &mut runtime, true);
+        let review = app.review.as_ref().unwrap();
+        assert_ne!(review.data.pr.head_sha, before);
+        assert!(
+            review.data.files[0]
+                .patch
+                .as_deref()
+                .unwrap()
+                .contains("+four")
+        );
+        assert_eq!(app.chat.error.as_deref(), Some("kept"));
+        assert!(!app.watch_loading);
     }
 
     #[test]

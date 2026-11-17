@@ -49,7 +49,21 @@ prpr session mark clear --repo . --file src/main.rs
 
 Marks are shown to the user immediately, are listed under `marks` in `review`, and disappear when the review reloads. Pair a mark with a note that explains it.
 
-After the user pushes or edits code, reload the running review instead of asking them to press `r`, then inspect it again for the new `revision`:
+When no session is open and the user wants your notes waiting in the viewer, write them to a JSON file outside the repository so the file itself does not join the diff, then have the user run `prpr diff` with it. If your environment can open a new terminal pane or tab for the user, run the command there; never start the TUI in your own non-interactive terminal:
+
+```sh
+cat > "$TMPDIR/prpr-notes.json" <<'JSON'
+{"notes": [
+  {"file": "src/main.rs", "new_line": 42, "start_line": 39, "body": "Why this range matters.", "author": "claude"},
+  {"file": "src/old.rs", "old_line": 7, "body": "This removal drops the retry."}
+]}
+JSON
+prpr diff -r @ --notes "$TMPDIR/prpr-notes.json"
+```
+
+Each note needs `file`, `body`, and exactly one of `new_line` or `old_line`; `start_line` and `author` (default `agent`) are optional. Anchors follow the same rules as `comment add`. Valid notes are saved as local notes, so later replies work, and reopening with the same file does not duplicate them. Notes whose anchors are not in the diff are skipped and reported in the status line. The viewer opens on the first note.
+
+After the user pushes or edits code, reload the running review instead of asking them to press `r`, then inspect it again for the new `revision`. A `prpr diff --watch` review reloads by itself when files or Jujutsu operations change, so only inspect it again:
 
 ```sh
 prpr session reload --repo .
