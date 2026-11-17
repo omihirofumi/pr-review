@@ -4,7 +4,7 @@
 
 A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Jujutsu changes with Helix and optional Codex or Claude explanations.
 
-Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal.
+Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
 
 ## Install
 
@@ -134,11 +134,65 @@ Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to
 
 To learn the controls without contacting GitHub, run `prpr --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
 
+## A day with prpr
+
+One reviewer's Wednesday, to show how the pieces fit together. The repository, PRs, and files are made up.
+
+### 9:10 Today's PRs are chosen before a browser opens
+
+In the repository, run `prpr --search 'review-requested:@me'`. Only PRs waiting for your review are listed, with the selected PR's description beside them. Walk the list with `j` and press `2` to preview a PR's AI guide; guides prepared earlier come from the cache, so there is no wait.
+
+Three today. Start with the heaviest, #482. `o` would open Diff, so type `#` and the number to start from Overview instead.
+
+### 9:20 CI and conversation without leaving the terminal
+
+Overview shows two labels, `backend` and `needs-tests`, and `CI 1 failed · 13 passed`. Re-runs of the same check count once, by their latest run, and the failing `integration / test` check is listed above the description.
+
+The description reads in full. Template hints such as `<!-- Describe the change -->` stay hidden, as on GitHub, so only what the author wrote remains. At the end, the conversation lists a bot's issue-link comment and an earlier review, in time order.
+
+### 9:30 The AI Guide sets the reading order
+
+Press `2` for AI Guide: summary, intent, risks, and a reading order in the right column. Step 1 is `services/api/src/retry/policy.rs:60`, the core rule of the change. `Enter` puts the cursor on that line in Diff; when done, `2` returns and `n` moves to the next step.
+
+In Diff, `j` moves the cursor while the view stays still, and scrolling starts only five rows before the bottom edge. The cursor stops at the end of a file, and `.` moves to the next one. The sidebar joins single-child folders into rows such as `services/api/src`, so it is always clear whether you are under `main/…` or `test/…`.
+
+On an interesting line, `gf` opens that file from your checkout in Helix. A deleted line opens a read-only copy of the diff base fetched from GitHub. Nothing has to be prepared first.
+
+### 10:05 Each question goes to whoever can answer it
+
+The condition in `should_retry` is puzzling. To check your own understanding, press `x` three times to select the three lines and `E` for an explanation. It appears in a side panel; nothing reaches GitHub.
+
+This PR was written by your coding agent, which still has the context of why it wrote the code. So press `C` on the same lines to leave a local note, and ask the agent: "Use prpr-review to read my comments and reply." The reply appears under the note a moment later, and `session mark` highlights the exact expression it refers to. Local notes stay on your machine.
+
+A question for the human reviewers goes into a GitHub draft with `c` instead. `Ctrl-s` only saves it locally; nothing is sent yet.
+
+To ask another team on Slack, `y` copies the selection as a Markdown snippet headed by `file:line`, ready to paste. `gy` copies a GitHub permalink pinned to the PR head instead.
+
+### 10:20 An AI review runs in the background
+
+With a first pass done, press `R` to run Claude's `/code-review` on the PR. It takes a few minutes, and Diff stays usable meanwhile.
+
+The status line warns that your checkout is not at the PR head: you were still on another branch, so line numbers could point at other code, and findings would stay text-only. Run `gh pr checkout 482`; when the first result arrives, open it with `R` and press `r` to rerun. This time each finding with a file and line is placed as a `claude review` note on that line: a retry that can send twice, and a race between the scheduled job and the API. Neither was in your drafts.
+
+### 13:30 Your own change, explained by the agent that wrote it
+
+In the afternoon you return to your own work: a retry change your coding agent wrote this morning, to read before pushing. `prpr diff` opens it with the same controls as a PR.
+
+Why is the backoff capped at 30 seconds? Write a note with `c` and ask the agent the same way. The reply says the cap matches the upstream API timeout, and a mark highlights the constant it comes from.
+
+You would rather make the cap configurable. The agent edits the code and runs `prpr session reload`; without a key press, the review refreshes and stays on Diff.
+
+### 17:40 One review, sent in the evening
+
+Back on #482, `D` lists the morning's drafts. Add the one AI finding you agree with, in your own words. `s` opens the summary, `Tab` selects Request changes, `Ctrl-s` shows the preview, and `Enter` sends it.
+
+`V` now shows your review at the end of the conversation. Looking back, the browser never opened all day.
+
 ## Command palette and file sidebar
 
 Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. Type words such as `sidebar`, `next hunk`, `explain diff`, or `checkout` to filter actions. Use arrows (or `Ctrl-n` / `Ctrl-p`) to select, `Enter` to run, and `Esc` or `Ctrl-k` to close. `Ctrl-u` clears the search; `Ctrl-h` deletes backward. Available actions follow the current view. Disabled actions show why they cannot run. Review submission still uses its existing summary and final confirmation screens.
 
-The file sidebar shows changed files as a tree. Chains of directories that each contain a single subdirectory are joined into one row, such as `api/core/src`, so deep package paths stay readable; long joined names keep their first and last directories, such as `main/…/globalexpert`.
+The file sidebar shows changed files as a tree. Chains of directories that each contain a single subdirectory are joined into one row, such as `services/api/src`, so deep package paths stay readable; long joined names keep their first and last directories, such as `main/…/example`.
 
 `Ctrl-b` hides or shows the file sidebar. Hiding it gives the diff the full width and preserves the current file, cursor, and selection. The setting lasts for the current app session, including file changes and refreshes. Press `h` to show and focus the file tree again; `l`, `Enter`, `Tab`, or `→` returns to the diff. Returning to a different file than the one you left starts at its top, while returning to the same file keeps your position. These shortcuts leave comment/question editors unchanged while you are typing.
 

@@ -3359,10 +3359,10 @@ mod tests {
     #[test]
     fn directory_segments_join_single_child_chains_but_keep_branches_separate() {
         let files = [
-            "api/core/src/main/kotlin/com/acme/domain/Interview.kt",
-            "api/core/src/main/kotlin/com/acme/domain/policy/Policy.kt",
-            "api/core/src/main/kotlin/com/acme/usecase/Remind.kt",
-            "api/core/src/test/kotlin/com/acme/domain/InterviewTest.kt",
+            "services/api/src/main/kotlin/com/example/billing/Invoice.kt",
+            "services/api/src/main/kotlin/com/example/billing/retry/Policy.kt",
+            "services/api/src/main/kotlin/com/example/checkout/Charge.kt",
+            "services/api/src/test/kotlin/com/example/billing/InvoiceTest.kt",
             "README.md",
         ];
         let labels = directory_segments(&files)
@@ -3377,10 +3377,15 @@ mod tests {
         assert_eq!(
             labels,
             [
-                vec!["api/core/src", "main/kotlin/com/acme", "domain"],
-                vec!["api/core/src", "main/kotlin/com/acme", "domain", "policy"],
-                vec!["api/core/src", "main/kotlin/com/acme", "usecase"],
-                vec!["api/core/src", "test/kotlin/com/acme/domain"],
+                vec!["services/api/src", "main/kotlin/com/example", "billing"],
+                vec![
+                    "services/api/src",
+                    "main/kotlin/com/example",
+                    "billing",
+                    "retry"
+                ],
+                vec!["services/api/src", "main/kotlin/com/example", "checkout"],
+                vec!["services/api/src", "test/kotlin/com/example/billing"],
                 vec![],
             ]
         );
