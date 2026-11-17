@@ -106,6 +106,80 @@ fn prepare_from_remote(pr: &PullRequest, root: &Path, remote: &OsStr) -> Result<
     Ok(workspace)
 }
 
+/// Puts the PR head in the repository prpr was launched from, so tools that read the working
+/// tree see the reviewed code; returns what was done for the status line.
+pub fn checkout_here(pr: &PullRequest, repository: &Path) -> Result<String> {
+    checkout_here_from_remote(
+        pr,
+        repository,
+        OsStr::new(&format!("https://github.com/{}", pr.id.repo)),
+    )
+}
+
+fn checkout_here_from_remote(
+    pr: &PullRequest,
+    repository: &Path,
+    remote: &OsStr,
+) -> Result<String> {
+    validate_pr(pr)?;
+    let jujutsu = repository.join(".jj").is_dir();
+    let git_dir = if jujutsu {
+        git_dir(repository)?
+    } else {
+        let changes = run(Command::new("git").arg("-C").arg(repository).args([
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ]))?;
+        ensure!(
+            changes.trim().is_empty(),
+            "Commit or stash the changes in {} before checking out PR #{}",
+            repository.display(),
+            pr.id.number
+        );
+        PathBuf::from(
+            run(Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(["rev-parse", "--absolute-git-dir"]))?
+            .trim(),
+        )
+    };
+    // A remote-tracking ref adds no local branch, and Jujutsu shows it as an immutable bookmark.
+    let reference = format!("refs/remotes/prpr/pr-{}", pr.id.number);
+    run(git(&git_dir)
+        .args(["fetch", "--quiet", "--no-tags"])
+        .arg(remote)
+        .arg(format!("+refs/pull/{}/head:{reference}", pr.id.number)))
+    .context("Cannot fetch the pull request; check gh authentication and repository access")?;
+    ensure!(
+        run(git(&git_dir).args(["rev-parse", &reference]))?.trim() == pr.head_sha,
+        "The pull request changed since it was loaded; refresh before checking out"
+    );
+    let short = &pr.head_sha[..12];
+    if jujutsu {
+        run(jj(Some(repository)).args(["git", "import"]))?;
+        run(jj(Some(repository)).args(["new", &pr.head_sha]))?;
+        return Ok(format!(
+            "Checked out PR #{} as a new change on pr-{}@prpr ({short}) in {}",
+            pr.id.number,
+            pr.id.number,
+            repository.display()
+        ));
+    }
+    run(Command::new("git").arg("-C").arg(repository).args([
+        "switch",
+        "--detach",
+        "--quiet",
+        &pr.head_sha,
+    ]))?;
+    Ok(format!(
+        "Checked out PR #{} (detached at {short}) in {}",
+        pr.id.number,
+        repository.display()
+    ))
+}
+
 pub fn editor_location(
     pr: &PullRequest,
     file: &ChangedFile,
@@ -529,6 +603,83 @@ mod tests {
             "local review edit\n"
         );
         assert!(editor_location(&fixture.pr, &file, &Side::Right, 1, &workspace).is_err());
+    }
+
+    fn clone_at_base(fixture: &Fixture, name: &str) -> PathBuf {
+        let clone = fixture.source.parent().unwrap().join(name);
+        run(Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(&fixture.source)
+            .arg(&clone))
+        .unwrap();
+        fixture_git(
+            &clone,
+            &["switch", "--detach", "--quiet", &fixture.pr.base_sha],
+        );
+        clone
+    }
+
+    #[test]
+    fn checks_out_the_pr_in_a_git_repository_only_when_it_is_clean() {
+        let fixture = Fixture::new();
+        let clone = clone_at_base(&fixture, "git-clone");
+        fs::write(clone.join("old(name).rs"), "uncommitted\n").unwrap();
+        let error =
+            checkout_here_from_remote(&fixture.pr, &clone, fixture.source.as_os_str()).unwrap_err();
+        assert!(error.to_string().contains("Commit or stash"));
+        assert_eq!(
+            fixture_git(&clone, &["rev-parse", "HEAD"]),
+            fixture.pr.base_sha
+        );
+
+        fixture_git(&clone, &["checkout", "--", "."]);
+        let summary =
+            checkout_here_from_remote(&fixture.pr, &clone, fixture.source.as_os_str()).unwrap();
+        assert!(summary.contains("detached"));
+        assert_eq!(
+            fixture_git(&clone, &["rev-parse", "HEAD"]),
+            fixture.pr.head_sha
+        );
+        assert_eq!(
+            fs::read_to_string(clone.join("new name.rs")).unwrap(),
+            "reviewed source\n"
+        );
+        assert_eq!(
+            fixture_git(
+                &clone,
+                &["for-each-ref", "--format=%(refname)", "refs/heads"]
+            ),
+            "refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn checks_out_the_pr_as_a_new_jujutsu_change_and_keeps_existing_work() {
+        let fixture = Fixture::new();
+        let clone = clone_at_base(&fixture, "jj-clone");
+        run(jj(Some(&clone)).args(["git", "init", "--colocate"])).unwrap();
+        fs::write(clone.join("work.txt"), "in progress\n").unwrap();
+        let summary =
+            checkout_here_from_remote(&fixture.pr, &clone, fixture.source.as_os_str()).unwrap();
+        assert!(summary.contains("pr-42@prpr"));
+        let parent =
+            run(jj(Some(&clone)).args(["log", "--no-graph", "-r", "@-", "-T", "commit_id"]))
+                .unwrap();
+        assert_eq!(parent, fixture.pr.head_sha);
+        assert!(!clone.join("work.txt").exists());
+        let kept = run(jj(Some(&clone)).args([
+            "file",
+            "show",
+            "-r",
+            "description(exact:\"\") & ~@ & mine()",
+            "work.txt",
+        ]))
+        .unwrap();
+        assert_eq!(kept, "in progress\n");
+        assert_eq!(
+            fixture_git(&clone, &["rev-parse", "HEAD"]),
+            fixture.pr.head_sha
+        );
     }
 
     #[test]

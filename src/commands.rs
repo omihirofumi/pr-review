@@ -157,10 +157,10 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 )
                 .disabled_if(!text, "Choose a textual hunk"),
                 Command::new(
-                    "Checkout PR in Jujutsu workspace",
+                    "Check out PR in this repository",
                     "w",
                     'w',
-                    "prepare local branch",
+                    "checkout prepare local branch workspace switch",
                 )
                 .disabled_if(app.busy, busy)
                 .disabled_if(app.demo, "Checkout is unavailable in the offline demo"),

@@ -484,3 +484,27 @@ else:
     sys.exit(1)
 print(json.dumps(response))
 "#;
+
+#[test]
+fn checkout_targets_the_launch_repository_when_it_holds_the_pr() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(dir.path().into(), false);
+    app.loaded(app::demo_data()).unwrap();
+    let repo = app.review.as_ref().unwrap().data.pr.id.repo.clone();
+    app.checkout = Some((dir.path().join("launch"), repo));
+    match app.key(key(KeyCode::Char('w'))).unwrap() {
+        Action::CheckoutHere { pr, repository } => {
+            assert_eq!(repository, dir.path().join("launch"));
+            assert_eq!(pr.id, app.review.as_ref().unwrap().data.pr.id);
+        }
+        _ => panic!("w should check out in the launch repository"),
+    }
+    app.checkout = Some((dir.path().join("launch"), "someone/else".into()));
+    assert!(matches!(
+        app.key(key(KeyCode::Char('w'))).unwrap(),
+        Action::Prepare {
+            open_editor: None,
+            ..
+        }
+    ));
+}

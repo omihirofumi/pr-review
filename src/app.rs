@@ -914,6 +914,11 @@ pub enum Action {
         pr: PullRequest,
         open_editor: Option<Box<EditorTarget>>,
     },
+    /// Check the PR head out in the repository prpr was launched from.
+    CheckoutHere {
+        pr: PullRequest,
+        repository: PathBuf,
+    },
     OpenEditor(Box<EditorTarget>),
     Submit {
         data: Box<ReviewData>,
@@ -1970,6 +1975,15 @@ impl App {
                     || self.settings.editor.open_in == OpenIn::Repository)
             {
                 return Ok(Action::OpenEditor(review.editor_target()?));
+            }
+            if prepare_only
+                && let Some((repository, repo)) = &self.checkout
+                && *repo == review.data.pr.id.repo
+            {
+                return Ok(Action::CheckoutHere {
+                    pr: review.data.pr.clone(),
+                    repository: repository.clone(),
+                });
             }
             return Ok(Action::Prepare {
                 pr: review.data.pr.clone(),

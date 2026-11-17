@@ -2843,7 +2843,7 @@ fn draw_ai_review(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
                 text.clone()
             } else {
                 format!(
-                    "> Your checkout was not at the PR head, so line numbers below may refer to other code and no notes were placed.\n\n{text}"
+                    "> Your checkout was not at the PR head, so line numbers below may refer to other code and no notes were placed. Press w in Diff to check it out, then r here to rerun.\n\n{text}"
                 )
             },
         ),

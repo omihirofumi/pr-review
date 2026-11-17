@@ -4,7 +4,7 @@
 
 A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Jujutsu changes with Helix and optional Codex or Claude explanations.
 
-Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, prepare an isolated checkout, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
+Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, check the PR out where you are, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
 
 ## Install
 
@@ -182,7 +182,7 @@ To ask another team on Slack, `y` copies the selection as a Markdown snippet hea
 
 With a first pass done, press `R` to run Claude's `/code-review` on the PR. It takes a few minutes, and Diff stays usable meanwhile.
 
-The status line warns that your checkout is not at the PR head: you were still on another branch, so line numbers could point at other code, and findings would stay text-only. Run `gh pr checkout 482`; when the first result arrives, open it with `R` and press `r` to rerun. This time each finding with a file and line is placed as a `claude review` note on that line: a retry that can send twice, and a race between the scheduled job and the API. Neither was in your drafts.
+The status line warns that your checkout is not at the PR head: you were still on another branch, so line numbers could point at other code, and findings would stay text-only. Press `w` to check PR #482 out right there; when the first result arrives, open it with `R` and press `r` to rerun. This time each finding with a file and line is placed as a `claude review` note on that line: a retry that can send twice, and a race between the scheduled job and the API. Neither was in your drafts.
 
 ### 13:30 Your own change, explained by the agent that wrote it
 
@@ -324,7 +324,7 @@ Explanations are cached under the application data directory. The cache is tied 
 Press `R` in an opened GitHub PR to run your provider's own review command, so prpr follows each provider's review practice instead of a prompt of its own:
 
 - **Claude** runs `/code-review <PR number>` in print mode with read-only tools only (`Read`, `Grep`, `Glob`, subagents, and `gh pr view/diff/checks` and `git diff/log/show/blame`-style commands). Anything else, including posting to GitHub or editing files, is denied.
-- **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head (`gh pr checkout N` or `jj new <head>`).
+- **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head; press `w` in Diff to get there.
 
 The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review` or `codex review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
 
@@ -382,7 +382,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `T` / `V` | Full inline thread list / PR conversation and reviews |
 | `#` | Open a PR by number in the selected repository |
 | `o` | Open the selected PR or saved item |
-| `w` / `e` | Prepare checkout / open source in Helix |
+| `w` / `e` | Check out the PR in this repository / open source in Helix |
 | `c` / `D` | Compose comment / manage saved drafts |
 | `s` | Preview and submit review |
 | `u` | Recover a submission with an unknown result |
@@ -408,9 +408,18 @@ Expanded lines can be selected, opened in Helix, or used with `Q` / `E`. For sel
 
 Press `B` in the PR list, Overview, or Diff to open the selected PR in your configured browser through GitHub CLI. The shortcut follows the selected repository and PR number. In text editors and the list filter, `B` remains ordinary text input.
 
+## Checking out a PR
+
+Press `w` in Diff to check the PR head out in the repository you launched prpr from, so tests, editors, and AI review see the reviewed code. prpr fetches `refs/pull/<number>/head` from the base repository, so fork PRs work too, and stores it as the remote-tracking ref `prpr/pr-<number>` instead of creating a local branch.
+
+- **Jujutsu:** creates a new change on top of the PR head (`jj new`). The PR commit shows as the immutable bookmark `pr-<number>@prpr`, and your previous change stays where it was.
+- **Git:** switches to the PR head with a detached HEAD. If tracked files have uncommitted changes, prpr refuses and asks you to commit or stash them first.
+
+If prpr was started outside a checkout of the PR's repository, `w` prepares an isolated review workspace instead (see below).
+
 ## Local workspaces and drafts
 
-The application creates its own Jujutsu repositories and revision-specific review workspaces in the platform's local application-data directory. It does not switch branches or change files in the repository you launched it from. Override the data location with `--workspace-root /path/to/review-data`.
+The application creates its own Jujutsu repositories and revision-specific review workspaces in the platform's local application-data directory. These workspaces back `[editor] open_in = "workspace"` and `w` outside a checkout of the PR's repository; they never change the repository you launched prpr from. Override the data location with `--workspace-root /path/to/review-data`.
 
 The workspace path appears after checkout. Open a shell there to run tests or inspect additional files. If that workspace has local edits or has moved to another revision, the app refuses to reuse it and reports the preserved path.
 

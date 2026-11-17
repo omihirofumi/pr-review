@@ -209,6 +209,7 @@ pub(crate) enum JobResult {
         result: Result<PathBuf>,
         open_editor: Option<Box<app::EditorTarget>>,
     },
+    CheckedOut(Result<String>),
     Submitted {
         result: Result<String>,
         body: String,
@@ -547,6 +548,7 @@ pub fn run() -> Result<()> {
                         open_editor_action(&mut app, &mut terminal, *target);
                     }
                 }
+                JobResult::CheckedOut(Ok(summary)) => app.message(summary, false),
                 JobResult::Submitted {
                     result: Ok(url), ..
                 } => {
@@ -589,6 +591,7 @@ pub fn run() -> Result<()> {
                 }
                 JobResult::Inbox(Err(error))
                 | JobResult::Activity(Err(error))
+                | JobResult::CheckedOut(Err(error))
                 | JobResult::Prepared {
                     result: Err(error), ..
                 } => app.message(format!("{error:#}"), true),
@@ -941,7 +944,7 @@ pub(crate) fn apply_background(
                             )
                         } else {
                             format!(
-                                "{provider} review ready: {} findings. Your checkout is not at the PR head, so they stay text-only. R opens the review.",
+                                "{provider} review ready: {} findings. Your checkout is not at the PR head, so they stay text-only. Press w to check it out, then rerun from R.",
                                 output.findings.len()
                             )
                         },
@@ -1043,7 +1046,7 @@ fn start_ai_review(app: &mut App, sender: &mpsc::Sender<JobResult>, runtime: &mu
         if anchored {
             format!("{provider} review started at the PR head. It can take minutes; keep reviewing. R opens it when ready.")
         } else {
-            format!("{provider} review started, but your checkout is not at the PR head, so line numbers may not match; findings will stay text-only. R opens it when ready.")
+            format!("{provider} review started, but your checkout is not at the PR head, so line numbers may not match; findings will stay text-only. w checks out the PR; R opens the review when ready.")
         },
         false,
     );
@@ -1347,6 +1350,7 @@ fn dispatch(
                 | Action::LoadPr(_)
                 | Action::LoadInbox
                 | Action::Prepare { .. }
+                | Action::CheckoutHere { .. }
                 | Action::Activity(_)
                 | Action::Submit { .. }
                 | Action::PreviewGuide(_)
@@ -1526,6 +1530,22 @@ fn dispatch(
             app.message("Loading the PR conversation and reviews...", false);
             thread::spawn(move || {
                 let _ = sender.send(JobResult::Activity(github::conversation_text(&id)));
+            });
+        }
+        Action::CheckoutHere { pr, repository } => {
+            app.message(
+                format!(
+                    "Checking out PR #{} in {}...",
+                    pr.id.number,
+                    repository.display()
+                ),
+                false,
+            );
+            thread::spawn(move || {
+                let _ = sender.send(JobResult::CheckedOut(workspace::checkout_here(
+                    &pr,
+                    &repository,
+                )));
             });
         }
         Action::Prepare { pr, open_editor } => {
