@@ -2987,7 +2987,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
             );
         }
         Dialog::Ask => {}
-        Dialog::AgentPicker { selected } => {
+        Dialog::AgentPicker { selected, .. } => {
             let inner = popup(
                 frame,
                 " Explanation agent / Enter saves / Esc cancels ".into(),
@@ -4141,7 +4141,10 @@ mod tests {
         app.dialog = Some(Dialog::Description { scroll: 0 });
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert!(screen(&terminal).contains("Bound retry waits by the remaining deadline."));
-        app.dialog = Some(Dialog::AgentPicker { selected: 1 });
+        app.dialog = Some(Dialog::AgentPicker {
+            selected: 1,
+            generate: false,
+        });
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let output = screen(&terminal);
         for text in [

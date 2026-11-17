@@ -284,7 +284,7 @@ Description previews, full descriptions, Ask responses, and AI Guide use a share
 
 ## Overview and AI reading guide
 
-Press `A` in the PR list or any PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+Press `A` in the PR list or any PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None. The reading guide is generated when you press `a`. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
 
 Example configuration:
 
@@ -292,14 +292,14 @@ Example configuration:
 [ai]
 provider = "codex"       # "codex", "claude", or "none"
 language = "en"          # e.g. "ja" for Japanese explanations
-auto_explain = true
+auto_explain = false     # true generates the guide whenever a review opens
 timeout_seconds = 180
 max_input_bytes = 160000
 review_timeout_seconds = 1200  # AI review (R) runs the provider's own review and takes longer
 # model = "MODEL"        # Omit to use the provider CLI's default model
 ```
 
-`--agent` and `--model` override settings for one launch. Choosing another provider with `A` clears the saved model override so a provider-specific model is not reused accidentally. Set `auto_explain = false` to generate only when you press `a`.
+`--agent` and `--model` override settings for one launch. Choosing another provider with `A` clears the saved model override so a provider-specific model is not reused accidentally. Set `auto_explain = true` to generate the guide automatically whenever a PR or local diff opens, and right after choosing an agent.
 
 The explanation contains:
 

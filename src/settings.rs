@@ -51,7 +51,7 @@ impl Default for AiConfig {
             provider: Provider::None,
             model: None,
             language: "en".into(),
-            auto_explain: true,
+            auto_explain: false,
             timeout_seconds: 180,
             max_input_bytes: 160_000,
             review_timeout_seconds: 1200,

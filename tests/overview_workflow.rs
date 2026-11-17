@@ -229,7 +229,10 @@ fn disabled_ai_picker_saves_the_selected_provider_before_requesting_analysis() {
     press(&mut app, 'a').unwrap();
     assert!(matches!(
         app.dialog,
-        Some(Dialog::AgentPicker { selected: 0 })
+        Some(Dialog::AgentPicker {
+            selected: 0,
+            generate: true
+        })
     ));
     press(&mut app, 'j').unwrap();
     let action = app.key(key(KeyCode::Enter)).unwrap();
@@ -259,7 +262,7 @@ fn failed_settings_save_preserves_the_picker_and_previous_provider() {
     assert_eq!(app.settings.ai.provider, Provider::None);
     assert!(matches!(
         app.dialog,
-        Some(Dialog::AgentPicker { selected: 1 })
+        Some(Dialog::AgentPicker { selected: 1, .. })
     ));
     assert!(matches!(
         app.overview.as_ref().unwrap().ai,
@@ -944,10 +947,16 @@ fn keeping_the_same_agent_preserves_chat_and_switching_agents_clears_it() {
     let mut app = App::new(directory.path().into(), false);
     app.settings.ai.provider = Provider::Codex;
     app.chat.error = Some("Preserved conversation state".into());
-    app.dialog = Some(Dialog::AgentPicker { selected: 0 });
+    app.dialog = Some(Dialog::AgentPicker {
+        selected: 0,
+        generate: false,
+    });
     app.key(key(KeyCode::Enter)).unwrap();
     assert!(app.chat.error.is_some());
-    app.dialog = Some(Dialog::AgentPicker { selected: 1 });
+    app.dialog = Some(Dialog::AgentPicker {
+        selected: 1,
+        generate: false,
+    });
     app.key(key(KeyCode::Enter)).unwrap();
     assert!(app.chat.error.is_none());
 }
@@ -1750,5 +1759,27 @@ fn checkout_runs_from_overview_and_ai_guide() {
     assert!(matches!(
         app.key(key(KeyCode::Enter)).unwrap(),
         Action::CheckoutHere { .. }
+    ));
+}
+
+#[test]
+fn choosing_an_agent_generates_a_guide_only_when_asked_or_automatic() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().join("state"), false);
+    app.opened(overview());
+    assert!(!app.settings.ai.auto_explain);
+    press(&mut app, 'A').unwrap();
+    press(&mut app, 'k').unwrap();
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::None
+    ));
+    assert_eq!(app.settings.ai.provider, Provider::Claude);
+    app.settings.ai.auto_explain = true;
+    press(&mut app, 'A').unwrap();
+    press(&mut app, 'k').unwrap();
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::Explain { force: false }
     ));
 }

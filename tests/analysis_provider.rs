@@ -86,7 +86,7 @@ fn settings_defaults_partial_configuration_and_atomic_roundtrip() {
     assert_eq!(partial.ai.provider, Provider::Claude);
     assert_eq!(partial.ai.timeout_seconds, 180);
     assert_eq!(partial.ai.max_input_bytes, 160_000);
-    assert!(partial.ai.auto_explain);
+    assert!(!partial.ai.auto_explain);
     std::fs::write(&path, "[ai]\nprovider = 'missing-provider'\n").unwrap();
     assert!(settings::load(&path).is_err());
 }

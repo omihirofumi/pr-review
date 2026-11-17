@@ -136,6 +136,8 @@ pub enum Dialog {
     Ask,
     AgentPicker {
         selected: usize,
+        /// Opened by asking for a guide, so choosing an agent generates one regardless of `auto_explain`.
+        generate: bool,
     },
     OpenPr {
         input: TextInput,
@@ -1559,6 +1561,7 @@ impl App {
                             Provider::Claude => 1,
                             Provider::None => 2,
                         },
+                        generate: false,
                     });
                     return Ok(Action::None);
                 }
@@ -1579,7 +1582,10 @@ impl App {
                         return Ok(Action::None);
                     }
                     if self.settings.ai.provider == Provider::None {
-                        self.dialog = Some(Dialog::AgentPicker { selected: 0 });
+                        self.dialog = Some(Dialog::AgentPicker {
+                            selected: 0,
+                            generate: true,
+                        });
                         return Ok(Action::None);
                     }
                     return Ok(Action::Explain { force: true });
@@ -1937,11 +1943,15 @@ impl App {
                         Provider::Claude => 1,
                         Provider::None => 2,
                     },
+                    generate: false,
                 })
             }
             KeyCode::Char('a') => {
                 if self.settings.ai.provider == Provider::None {
-                    self.dialog = Some(Dialog::AgentPicker { selected: 0 });
+                    self.dialog = Some(Dialog::AgentPicker {
+                        selected: 0,
+                        generate: true,
+                    });
                 } else if let Some(pr) = self.visible_prs().get(self.selected_pr) {
                     let id = pr.id.clone();
                     self.preview.tab = PreviewTab::Guide;
@@ -2225,7 +2235,10 @@ impl App {
                 }
                 return Ok(Action::None);
             }
-            Dialog::AgentPicker { mut selected } => {
+            Dialog::AgentPicker {
+                mut selected,
+                generate,
+            } => {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => selected = (selected + 1).min(2),
                     KeyCode::Char('k') | KeyCode::Up => selected = selected.saturating_sub(1),
@@ -2246,7 +2259,7 @@ impl App {
                                 settings::save(path, &persisted)
                             })();
                             if let Err(error) = saved {
-                                self.dialog = Some(Dialog::AgentPicker { selected });
+                                self.dialog = Some(Dialog::AgentPicker { selected, generate });
                                 return Err(error);
                             }
                         }
@@ -2264,13 +2277,15 @@ impl App {
                         }
                         return Ok(if provider == Provider::None {
                             Action::DisableAi
-                        } else {
+                        } else if generate || self.settings.ai.auto_explain {
                             Action::Explain { force: false }
+                        } else {
+                            Action::None
                         });
                     }
                     _ => {}
                 }
-                Some(Dialog::AgentPicker { selected })
+                Some(Dialog::AgentPicker { selected, generate })
             }
             Dialog::OpenPr { mut input } => {
                 if key.code == KeyCode::Enter && !self.busy {
