@@ -132,11 +132,8 @@ pub enum Dialog {
     Notes {
         selected: usize,
     },
-    Ask {
-        input: TextInput,
-        focus: Option<Box<assistant::Focus>>,
-        scroll: u16,
-    },
+    /// Keyboard focus is in the AI chat panel's input.
+    Ask,
     AgentPicker {
         selected: usize,
     },
@@ -941,6 +938,10 @@ pub struct App {
     pub local_contents: std::collections::BTreeMap<String, FileContext>,
     pub preview: PreviewState,
     pub chat: Chat,
+    pub chat_open: bool,
+    pub chat_input: TextInput,
+    /// Transcript scroll offset; `u16::MAX` follows the latest answer.
+    pub chat_scroll: u16,
     pub open_on_diff: bool,
     pub tab: PageTab,
     pub overview: Option<OverviewState>,
@@ -979,6 +980,9 @@ impl App {
             local_contents: Default::default(),
             preview: PreviewState::default(),
             chat: Chat::default(),
+            chat_open: false,
+            chat_input: TextInput::default(),
+            chat_scroll: u16::MAX,
             open_on_diff: false,
             tab: PageTab::Overview,
             overview: None,
@@ -1255,9 +1259,9 @@ impl App {
                 Dialog::Note { input, .. }
                 | Dialog::Compose { input, .. }
                 | Dialog::Submit { input, .. }
-                | Dialog::OpenPr { input }
-                | Dialog::Ask { input, .. },
+                | Dialog::OpenPr { input },
             ) => input,
+            Some(Dialog::Ask) => &mut self.chat_input,
             _ => return,
         };
         input.text.insert_str(input.cursor, &text);
@@ -1274,6 +1278,19 @@ impl App {
                     .contains(&filter)
             })
             .collect()
+    }
+
+    /// Code a question is about: the diff cursor or selection on the Diff tab, otherwise the whole PR.
+    pub fn chat_focus(&self) -> Result<Option<Box<assistant::Focus>>> {
+        let review = self
+            .review
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Wait for the diff before asking a question"))?;
+        if self.tab == PageTab::Diff || self.overview.is_none() {
+            review.question_focus().map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn binding_view(&self) -> View {
@@ -1419,6 +1436,15 @@ impl App {
                     });
                     return Ok(Action::None);
                 }
+                KeyCode::Char('l') if self.review.is_some() => {
+                    self.goto_pending = false;
+                    self.pending_keys.clear();
+                    self.chat_open = !self.chat_open;
+                    if self.chat_open {
+                        self.dialog = Some(Dialog::Ask);
+                    }
+                    return Ok(Action::None);
+                }
                 KeyCode::Char('b') => {
                     self.goto_pending = false;
                     self.pending_keys.clear();
@@ -1474,25 +1500,21 @@ impl App {
                 });
             return Ok(id.map_or(Action::None, Action::Browse));
         }
-        if matches!(key.code, KeyCode::Char('Q') | KeyCode::Char('E'))
-            && let Some(review) = &self.review
-        {
+        if matches!(key.code, KeyCode::Char('Q') | KeyCode::Char('E')) && self.review.is_some() {
             if self.settings.ai.provider == Provider::None {
                 bail!("Choose Codex or Claude in the command palette before asking");
             }
-            let focus = if self.tab == PageTab::Diff || self.overview.is_none() {
-                Some(review.question_focus()?)
+            let focus = if key.code == KeyCode::Char('E') {
+                Some(self.chat_focus()?)
             } else {
                 None
             };
             self.goto_pending = false;
             self.pending_keys.clear();
-            self.dialog = Some(Dialog::Ask {
-                input: TextInput::default(),
-                focus: focus.clone(),
-                scroll: u16::MAX,
-            });
-            if key.code == KeyCode::Char('E') {
+            self.chat_open = true;
+            self.dialog = Some(Dialog::Ask);
+            if let Some(focus) = focus {
+                self.chat_scroll = u16::MAX;
                 return Ok(Action::Ask { question: "Explain this diff: what changes, why it may be needed, how it works, and what I should check during review. Distinguish evidence from inference.".into(), focus });
             }
             return Ok(Action::None);
@@ -2093,10 +2115,6 @@ impl App {
     fn dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
         let dialog = self.dialog.take().unwrap();
         if key.code == KeyCode::Esc {
-            if matches!(dialog, Dialog::Ask { .. }) && self.chat.pending.is_some() {
-                self.chat.pending = None;
-                return Ok(Action::CancelAsk);
-            }
             return Ok(Action::None);
         }
         let save = key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2145,36 +2163,40 @@ impl App {
                 }
                 Some(Dialog::Palette { input, selected })
             }
-            Dialog::Ask {
-                mut input,
-                focus,
-                mut scroll,
-            } => {
-                if save && self.chat.pending.is_none() && !input.text.trim().is_empty() {
-                    let question = input.text.clone();
-                    self.dialog = Some(Dialog::Ask {
-                        input: TextInput::default(),
-                        focus: focus.clone(),
-                        scroll: u16::MAX,
-                    });
+            Dialog::Ask => {
+                self.dialog = Some(Dialog::Ask);
+                if self.settings.keybindings.single_matches("toggle_chat", key) {
+                    self.chat_open = false;
+                    self.dialog = None;
+                    return Ok(Action::None);
+                }
+                let control = key.modifiers.contains(KeyModifiers::CONTROL);
+                if save && self.chat.pending.is_none() && !self.chat_input.text.trim().is_empty() {
+                    let focus = self.chat_focus()?;
+                    let question = std::mem::take(&mut self.chat_input).text;
+                    self.chat_scroll = u16::MAX;
                     return Ok(Action::Ask { question, focus });
                 }
                 match key.code {
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        scroll = scroll.saturating_add(12)
+                    KeyCode::Char('x') if control && self.chat.pending.is_some() => {
+                        self.chat.pending = None;
+                        return Ok(Action::CancelAsk);
                     }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        scroll = scroll.saturating_sub(12)
+                    KeyCode::Char('n') if control && self.chat.pending.is_none() => {
+                        self.chat = Chat::default();
+                        self.chat_scroll = u16::MAX;
                     }
-                    KeyCode::PageDown => scroll = scroll.saturating_add(15),
-                    KeyCode::PageUp => scroll = scroll.saturating_sub(15),
-                    _ => input.key(key),
+                    KeyCode::Char('d') if control => {
+                        self.chat_scroll = self.chat_scroll.saturating_add(12)
+                    }
+                    KeyCode::Char('u') if control => {
+                        self.chat_scroll = self.chat_scroll.saturating_sub(12)
+                    }
+                    KeyCode::PageDown => self.chat_scroll = self.chat_scroll.saturating_add(15),
+                    KeyCode::PageUp => self.chat_scroll = self.chat_scroll.saturating_sub(15),
+                    _ => self.chat_input.key(key),
                 }
-                Some(Dialog::Ask {
-                    input,
-                    focus,
-                    scroll,
-                })
+                return Ok(Action::None);
             }
             Dialog::AgentPicker { mut selected } => {
                 match key.code {

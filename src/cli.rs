@@ -819,17 +819,13 @@ pub(crate) fn apply_background(
                     }),
                     Err(error) => {
                         app.chat.error = Some(format!("{error:#}"));
-                        if let Some(app::Dialog::Ask { input, .. }) = &mut app.dialog
-                            && input.text.is_empty()
-                        {
-                            *input = app::TextInput::new(question);
+                        if app.chat_input.text.is_empty() {
+                            app.chat_input = app::TextInput::new(question);
                         }
                     }
                 }
             }
-            if let Some(app::Dialog::Ask { scroll, .. }) = &mut app.dialog {
-                *scroll = u16::MAX;
-            }
+            app.chat_scroll = u16::MAX;
         }
         JobResult::Overview { generation, result } => {
             if generation != app.generation {

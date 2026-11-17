@@ -201,6 +201,15 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
     if app.review.is_some() {
         commands.push(
             Command::new(
+                "Toggle AI chat panel",
+                "Ctrl-l",
+                'l',
+                "ask conversation agent codex claude thread",
+            )
+            .control(),
+        );
+        commands.push(
+            Command::new(
                 if diff {
                     "Ask AI about selected code"
                 } else {

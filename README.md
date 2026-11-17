@@ -332,11 +332,13 @@ The review runs in the background from the repository you launched prpr in; keep
 
 **Ask** and **Explain diff** use the configured Codex or Claude CLI and its existing login. They share the guide's language, model, timeout, and context budget.
 
-- In Diff, press `Q` to ask about the current hunk. Select lines with `v` or repeated `x` first to ask about that range. AI questions can include both removed and added lines.
-- Press `E` to immediately explain the selected lines or current hunk: behavior before and after, purpose, how the change works, and review concerns.
-- In an opened PR's Overview or AI Guide, press `Q` to ask about the whole PR.
-- Write a question and press `Ctrl-s` to send. `Enter` inserts a newline; `Ctrl-h` deletes backward. Write another question in the same panel for a follow-up.
-- `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation. `Esc` closes the panel and cancels its active request. Reopen with `Q` to continue the conversation.
+The conversation lives in an AI chat panel on the right, next to whichever tab is open, so the code stays visible while you ask about it. Press `Ctrl-l` on Overview, AI Guide, or Diff to show or hide it. Terminals narrower than 120 columns show the panel over the review instead.
+
+- Press `Q` to type in the panel. On Diff, the line under the cursor, or the lines selected with `v` or repeated `x`, are attached to the question when you send it; the panel shows what is attached. On Overview and AI Guide the whole changeset is attached. AI questions can include both removed and added lines.
+- Press `E` to immediately explain the attached lines: behavior before and after, purpose, how the change works, and review concerns.
+- Press `Ctrl-s` to send. `Enter` inserts a newline; `Ctrl-h` deletes backward.
+- `Esc` returns to the review and leaves the panel open, and a running request keeps going. Select other lines and press `Q` again to ask a follow-up about them in the same thread.
+- `Ctrl-x` cancels a running request, and `Ctrl-n` starts a new thread. `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation.
 
 Each turn shows its source scope, file/line references, unknowns, and context coverage. Questions include the selected lines, surrounding complete hunks, PR description, and additional patches that fit the budget. References are checked against the supplied diff. Older conversation turns are omitted when necessary to fit the budget, and that omission is reported.
 
@@ -357,6 +359,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `a` / `A` | Prepare AI guide / choose and save an agent |
 | `Ctrl-k` | Search and run commands for the current view |
 | `Ctrl-b` | Toggle the file sidebar |
+| `Ctrl-l` | Toggle the AI chat panel |
 | `Q` / `E` | Ask the agent / explain selected diff lines or the current hunk |
 | `j` / `k`, up / down | Move through lines within the current file |
 | `.` / `,`, `n` / `p` | Next / previous file |

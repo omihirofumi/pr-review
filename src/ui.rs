@@ -313,6 +313,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(area);
     draw_header(frame, app, header);
+    let (body, chat) = if app.chat_open && app.review.is_some() && area.width >= 120 {
+        let width = (body.width * 2 / 5).clamp(48, 90);
+        let [body, chat] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(width)]).areas(body);
+        (body, Some(chat))
+    } else {
+        (body, None)
+    };
     let body = if app.overview.is_some() {
         let [tabs, content] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
@@ -377,6 +385,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ("guide", "AI guide"),
                 ("diff", "diff"),
                 ("review_activity", "conversation"),
+                ("toggle_chat", "AI chat"),
                 ("open_github", "GitHub"),
                 ("help", "help"),
             ],
@@ -385,6 +394,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ("next_reading_step", "next step"),
                 ("open_reading_step", "jump"),
                 ("ai_guide", "regenerate"),
+                ("toggle_chat", "AI chat"),
                 ("choose_agent", "agent"),
                 ("help", "help"),
             ],
@@ -395,6 +405,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ("toggle_sidebar", "files"),
                 ("ask", "ask"),
                 ("explain_diff", "explain"),
+                ("toggle_chat", "AI chat"),
                 ("help", "help"),
             ],
         };
@@ -416,15 +427,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(keys).style(Style::default().fg(MUTED).bg(PANEL)),
         help,
     );
-    if let Some(Dialog::Ask {
-        input,
-        focus,
-        scroll,
-    }) = &app.dialog
-    {
-        let actual = draw_ask(frame, app, input, focus.as_deref(), *scroll);
-        if let Some(Dialog::Ask { scroll, .. }) = &mut app.dialog {
-            *scroll = actual;
+    let asking = matches!(app.dialog, Some(Dialog::Ask));
+    if let Some(chat) = chat {
+        app.chat_scroll = draw_chat(frame, app, chat, asking);
+    }
+    if asking {
+        if chat.is_none() {
+            let area = frame.area();
+            let rect = Rect::new(
+                area.x + 1,
+                area.y + 1,
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(2),
+            );
+            app.chat_scroll = draw_chat(frame, app, rect, true);
         }
     } else if let Some(Dialog::Description { scroll }) = &app.dialog {
         let actual = draw_description(frame, app, *scroll);
@@ -1552,22 +1568,17 @@ fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
     app.preview.scroll = scroll;
 }
 
-fn draw_ask(
-    frame: &mut Frame,
-    app: &App,
-    input: &TextInput,
-    focus: Option<&prpr::assistant::Focus>,
-    scroll: u16,
-) -> u16 {
-    let inner = popup(
-        frame,
-        format!(
-            " Ask {} · Ctrl-s sends · Esc closes/cancels ",
-            app.settings.ai.provider
-        ),
-        frame.area().width.saturating_sub(2),
-        frame.area().height.saturating_sub(2),
-    );
+/// Conversation with the AI agent, docked beside the review or drawn over it when the
+/// terminal is too narrow; returns the transcript scroll actually used.
+fn draw_chat(frame: &mut Frame, app: &App, area: Rect, focused: bool) -> u16 {
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(format!(" AI chat · {} ", app.settings.ai.provider))
+        .border_style(Style::default().fg(if focused { ACCENT } else { BORDER }))
+        .style(Style::default().fg(TEXT).bg(PANEL));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let scroll = app.chat_scroll;
     let [scope, transcript, editor_label, editor] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(2),
@@ -1575,8 +1586,16 @@ fn draw_ask(
         Constraint::Length(4),
     ])
     .areas(inner);
+    let attached = match app.chat_focus() {
+        Ok(Some(focus)) => format!("Attached: {}", focus.label),
+        Ok(None) => format!(
+            "Attached: entire changeset · open Diff ({}) to attach lines",
+            app.shortcut("diff")
+        ),
+        Err(error) => format!("Nothing attached: {error}"),
+    };
     frame.render_widget(
-        Paragraph::new(focus.map_or("Entire PR", |focus| focus.label.as_str()))
+        Paragraph::new(attached)
             .style(Style::default().fg(ACCENT))
             .wrap(Wrap { trim: false }),
         scope,
@@ -1631,7 +1650,7 @@ fn draw_ask(
         ));
     }
     if text.is_empty() {
-        text.push_str("Ask about the behavior, intent, risks, or tests. The selected lines and surrounding hunks are supplied as context.\n\nCtrl-d / Ctrl-u scroll the conversation. Follow-up questions retain previous turns.");
+        text.push_str("Ask about the behavior, intent, risks, or tests. On the Diff tab the line under the cursor, or the selection, is attached when you send, along with its surrounding hunks.\n\nFollow-up questions keep the earlier turns. Leave the panel, select other lines, and ask again to bring them into the same thread.\n\nCtrl-d / Ctrl-u scroll the conversation.");
     }
     let requested = if scroll == u16::MAX {
         markdown_text(&text[..latest_start], markdown_area(transcript).width)
@@ -1642,16 +1661,31 @@ fn draw_ask(
         scroll
     };
     let actual = markdown(frame, &text, transcript, requested);
+    let hint = if !focused {
+        format!(
+            "{} type a question · {} hide",
+            app.shortcut("ask"),
+            app.shortcut("toggle_chat")
+        )
+    } else if app.chat.pending.is_some() {
+        "Thinking… · Ctrl-x cancels · Esc back to review".into()
+    } else {
+        "Ctrl-s send · Ctrl-n new thread · Esc back to review".into()
+    };
     frame.render_widget(
-        Paragraph::new(if app.chat.pending.is_some() {
-            "Thinking… · Esc cancels"
-        } else {
-            "Question / follow-up · Ctrl-h backspace · Ctrl-s send"
-        })
-        .style(Style::default().fg(MUTED)),
+        Paragraph::new(hint).style(Style::default().fg(MUTED)),
         editor_label,
     );
-    draw_input(frame, input, editor);
+    if focused {
+        draw_input(frame, &app.chat_input, editor);
+    } else {
+        frame.render_widget(
+            Paragraph::new(app.chat_input.text.as_str())
+                .style(Style::default().fg(MUTED))
+                .wrap(Wrap { trim: false }),
+            editor,
+        );
+    }
     actual
 }
 
@@ -2952,7 +2986,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 hint,
             );
         }
-        Dialog::Ask { .. } => {}
+        Dialog::Ask => {}
         Dialog::AgentPicker { selected } => {
             let inner = popup(
                 frame,

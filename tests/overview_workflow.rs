@@ -685,11 +685,7 @@ mod cli {
             let directory = tempfile::tempdir().unwrap();
             let mut app = App::new(directory.path().into(), false);
             app.chat.pending = Some(("Original question".into(), "Entire PR".into()));
-            app.dialog = Some(app::Dialog::Ask {
-                input: Default::default(),
-                focus: None,
-                scroll: 0,
-            });
+            app.dialog = Some(app::Dialog::Ask);
             let mut runtime = Runtime::default();
             let (sender, _) = mpsc::channel();
             apply_background(
@@ -702,9 +698,7 @@ mod cli {
                 &sender,
                 &mut runtime,
             );
-            assert!(
-                matches!(&app.dialog, Some(app::Dialog::Ask { input, .. }) if input.text == "Original question")
-            );
+            assert_eq!(app.chat_input.text, "Original question");
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = cancel.clone();
             runtime.ask_cancel = Some(cancel.clone());
@@ -909,13 +903,15 @@ fn ask_and_explain_keep_ai_questions_separate_from_review_drafts() {
     assert!(app.review.as_ref().unwrap().drafts.is_empty());
     app.chat.pending = Some((question, "selection".into()));
     assert!(matches!(
-        app.key(key(KeyCode::Esc)).unwrap(),
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .unwrap(),
         Action::CancelAsk
     ));
     assert!(app.chat.pending.is_none());
+    app.key(key(KeyCode::Esc)).unwrap();
     let action = press(&mut app, 'E').unwrap();
     assert!(matches!(action, Action::Ask { focus: Some(_), .. }));
-    assert!(screen(&mut app).contains("Ask codex"));
+    assert!(screen(&mut app).contains("AI chat · codex"));
 }
 
 #[test]
@@ -934,18 +930,12 @@ fn a_long_ai_response_opens_at_the_answer_and_remains_scrollable() {
             coverage: Default::default(),
         },
     });
-    app.dialog = Some(Dialog::Ask {
-        input: Default::default(),
-        focus: None,
-        scroll: u16::MAX,
-    });
+    app.dialog = Some(Dialog::Ask);
     assert!(screen(&mut app).contains("START_OF_ANSWER"));
     app.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(!screen(&mut app).contains("START_OF_ANSWER"));
-    assert!(
-        matches!(app.dialog, Some(Dialog::Ask { scroll, .. }) if scroll > 0 && scroll < u16::MAX)
-    );
+    assert!(app.chat_scroll > 0 && app.chat_scroll < u16::MAX);
 }
 
 #[test]
@@ -1126,13 +1116,9 @@ fn github_browser_shortcut_uses_selected_pr_in_all_views_and_does_not_intercept_
     assert!(
         matches!(press(&mut app, 'B').unwrap(), Action::Browse(id) if id.repo == "example/service")
     );
-    app.dialog = Some(Dialog::Ask {
-        input: Default::default(),
-        focus: None,
-        scroll: 0,
-    });
+    app.dialog = Some(Dialog::Ask);
     assert!(matches!(press(&mut app, 'B').unwrap(), Action::None));
-    assert!(matches!(&app.dialog, Some(Dialog::Ask { input, .. }) if input.text == "B"));
+    assert_eq!(app.chat_input.text, "B");
     app.dialog = None;
     app.filtering = true;
     assert!(matches!(press(&mut app, 'B').unwrap(), Action::None));
@@ -1268,7 +1254,7 @@ fn palette_search_uses_shared_actions_and_never_submits_without_the_existing_pre
         palette_run(&mut app, "Explain diff"),
         Action::Ask { .. }
     ));
-    assert!(matches!(app.dialog, Some(Dialog::Ask { .. })));
+    assert!(matches!(app.dialog, Some(Dialog::Ask)));
     app.key(key(KeyCode::Esc)).unwrap();
     assert!(matches!(
         palette_run(&mut app, "review summary"),
@@ -1682,4 +1668,56 @@ fn ai_review_key_starts_once_reports_progress_and_opens_the_finished_review() {
         press(&mut app, 'R').is_err(),
         "local diffs have no provider PR review"
     );
+}
+
+#[test]
+fn chat_panel_toggles_from_every_tab_and_attaches_the_cursor_when_sent() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.opened(overview());
+    app.accept_diff(app::demo_data()).unwrap();
+    app.settings.ai.provider = Provider::Codex;
+    let toggle = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+    for tab in [PageTab::Overview, PageTab::Guide, PageTab::Diff] {
+        app.tab = tab;
+        app.key(toggle).unwrap();
+        assert!(matches!(app.dialog, Some(Dialog::Ask)));
+        assert!(screen(&mut app).contains("AI chat · codex"));
+        app.key(toggle).unwrap();
+        assert!(app.dialog.is_none() && !app.chat_open);
+        assert!(!screen(&mut app).contains("AI chat · codex"));
+    }
+
+    app.key(toggle).unwrap();
+    for c in "Why".chars() {
+        press(&mut app, c).unwrap();
+    }
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(app.dialog.is_none() && app.chat_open);
+    let docked = screen(&mut app);
+    assert!(docked.contains("AI chat · codex") && docked.contains("Why"));
+    let before = app.chat_focus().unwrap().unwrap().label;
+    press(&mut app, 'x').unwrap();
+    let after = app.chat_focus().unwrap().unwrap().label;
+    assert_ne!(before, after);
+    let docked = screen(&mut app);
+    assert!(
+        docked.contains("Attached: src/client.rs"),
+        "{after}\n{docked}"
+    );
+
+    press(&mut app, 'Q').unwrap();
+    let Action::Ask { question, focus } = app
+        .key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap()
+    else {
+        panic!("Expected an AI question")
+    };
+    assert_eq!(question, "Why");
+    assert_eq!(focus.unwrap().label, after);
+    assert!(app.chat_input.text.is_empty());
+
+    app.key(key(KeyCode::Esc)).unwrap();
+    app.tab = PageTab::Overview;
+    assert!(screen(&mut app).contains("Attached: entire changeset"));
 }

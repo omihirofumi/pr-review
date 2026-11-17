@@ -101,6 +101,7 @@ specs! {
     ("diff", "Show Diff", REVIEW, ["3"]),
     ("ask", "Ask AI", REVIEW, ["Q"]),
     ("explain_diff", "Explain diff or selection", REVIEW, ["E"]),
+    ("toggle_chat", "Toggle AI chat panel", REVIEW, ["Ctrl-l"]),
     ("ai_guide", "Prepare AI reading guide", ALL, ["a"]),
     ("ai_review", "Run or open the provider's AI code review", REVIEW, ["R"]),
     ("choose_agent", "Choose AI agent", ALL, ["A"]),
