@@ -88,6 +88,12 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                     "Source opening is unavailable in the offline demo",
                 ),
             Command::new(
+                "Toggle unified / split view",
+                "|",
+                '|',
+                "side by side layout columns diff",
+            ),
+            Command::new(
                 "Copy selected lines as Markdown",
                 "y",
                 'y',

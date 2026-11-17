@@ -115,10 +115,27 @@ impl Default for EditorConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffLayout {
+    #[default]
+    Unified,
+    Split,
+    /// Split when the terminal is at least 160 columns wide.
+    Auto,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DiffConfig {
+    pub layout: DiffLayout,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub ai: AiConfig,
+    pub diff: DiffConfig,
     pub editor: EditorConfig,
     pub keybindings: crate::keybindings::Keybindings,
 }

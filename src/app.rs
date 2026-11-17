@@ -914,6 +914,10 @@ pub enum Action {
 }
 
 pub struct App {
+    /// Layout chosen with the toggle for this session, overriding `[diff] layout`.
+    pub diff_split: Option<bool>,
+    /// Layout used by the last draw, so the toggle flips what is on screen.
+    pub split_shown: std::cell::Cell<bool>,
     pub ai_reviews: HashMap<String, AiReviewStatus>,
     /// Action requested outside the key loop, such as an agent asking to reload.
     pub requested: Option<Action>,
@@ -952,6 +956,8 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            diff_split: None,
+            split_shown: std::cell::Cell::new(false),
             ai_reviews: HashMap::new(),
             requested: None,
             checkout: None,
@@ -1732,6 +1738,18 @@ impl App {
                     text: review.copy_text()?,
                     label: "selected lines",
                 });
+            }
+            KeyCode::Char('|') => {
+                let split = !self.split_shown.get();
+                self.diff_split = Some(split);
+                self.message(
+                    if split {
+                        "Split view: deletions left, additions right."
+                    } else {
+                        "Unified view."
+                    },
+                    false,
+                );
             }
             KeyCode::Char('Y') => {
                 return Ok(Action::Copy {

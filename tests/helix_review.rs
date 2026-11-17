@@ -554,3 +554,19 @@ fn copy_formats_markdown_and_permalinks_pin_the_reviewed_revision() {
         }
     ));
 }
+
+#[test]
+fn pipe_toggles_the_layout_shown_on_screen() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    load(
+        &mut app,
+        vec![fixture_file("a.rs", Some("@@ -1 +1 @@\n-old\n+new"))],
+    );
+    assert_eq!(app.diff_split, None);
+    app.key(key('|')).unwrap();
+    assert_eq!(app.diff_split, Some(true));
+    app.split_shown.set(true);
+    app.key(key('|')).unwrap();
+    assert_eq!(app.diff_split, Some(false));
+}

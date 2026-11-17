@@ -5,7 +5,7 @@ use prpr::{
     diff::{DiffLine, LineKind},
     keybindings::{self, View},
     model::{ChangedFile, CheckState, Side},
-    settings::Provider,
+    settings::{DiffLayout, Provider},
     thread::{Thread, matches_anchor, threads},
 };
 use ratatui::{
@@ -1852,7 +1852,14 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     let [file_header, content] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(diff_area);
     draw_file_header(frame, review, app.comments_loading, file_header);
-    let rows = review_rows(review, content.width);
+    let split = content.width >= 60
+        && app.diff_split.unwrap_or(match app.settings.diff.layout {
+            DiffLayout::Unified => false,
+            DiffLayout::Split => true,
+            DiffLayout::Auto => frame.area().width >= 160,
+        });
+    app.split_shown.set(split);
+    let rows = review_rows(review, content.width, split);
     let height = usize::from(content.height);
     let selected = selected_row(&rows, review.position());
     let viewport = &review.viewport;
@@ -1977,6 +1984,8 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
 struct ViewRow {
     line: Line<'static>,
     source: Option<usize>,
+    /// Right-hand line index when a split row shows two different unified lines.
+    alt_source: Option<usize>,
     background: Color,
 }
 
@@ -1985,12 +1994,13 @@ impl ViewRow {
         Self {
             line: Line::from(Span::styled(text.into(), Style::default().fg(foreground))),
             source: None,
+            alt_source: None,
             background,
         }
     }
 }
 
-fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
+fn review_rows(review: &ReviewState, width: u16, split: bool) -> Vec<ViewRow> {
     let mut rows = Vec::new();
     let Some(file) = review.current_file() else {
         return rows;
@@ -2054,31 +2064,58 @@ fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
         .to_string()
         .len()
         .max(3);
-    for (index, line) in lines.iter().enumerate() {
-        if line.kind == LineKind::Hunk && index > 0 {
-            rows.push(ViewRow::text("", BACKGROUND, MUTED));
-        }
-        let selected = review
+    let state = |index: usize, line: &DiffLine| RowState {
+        selected: review
             .selected_range()
             .map_or(index == review.position(), |(start, end)| {
                 (start..=end).contains(&index)
-            });
+            }),
+        cursor: index == review.position(),
+        has_thread: anchored.contains_key(&index),
+        has_draft: drafts.contains_key(&index),
+        mark: mark_for(&review.marks, &file.filename, line),
+    };
+    let row = |index: usize, gutter: Gutter| {
+        let line = &lines[index];
         let mut row = code_row(
             line,
             file,
-            RowState {
-                selected,
-                cursor: index == review.position(),
-                has_thread: anchored.contains_key(&index),
-                has_draft: drafts.contains_key(&index),
-                mark: mark_for(&review.marks, &file.filename, line),
-            },
+            state(index, line),
             review.horizontal,
             digits,
+            gutter,
         );
         row.source = Some(index);
-        rows.push(row);
-        if review.show_comments {
+        row
+    };
+    let groups = if split {
+        split_pairs(lines)
+    } else {
+        (0..lines.len()).map(|index| (Some(index), None)).collect()
+    };
+    for (left, right) in groups {
+        let first = left.or(right).unwrap_or_default();
+        if lines[first].kind == LineKind::Hunk && first > 0 {
+            rows.push(ViewRow::text("", BACKGROUND, MUTED));
+        }
+        let full_width = !split || matches!(lines[first].kind, LineKind::Hunk | LineKind::Meta);
+        rows.push(if full_width {
+            row(first, Gutter::Both)
+        } else {
+            split_row(
+                left.map(|index| row(index, Gutter::Old)),
+                right.map(|index| row(index, Gutter::New)),
+                width,
+            )
+        });
+        if !review.show_comments {
+            continue;
+        }
+        let mut indices = vec![first];
+        if let Some(right) = right.filter(|right| *right != first) {
+            indices.push(right);
+        }
+        for index in indices {
             if let Some(comments) = anchored.get(&index) {
                 for thread in comments {
                     append_thread(&mut rows, thread, width, None);
@@ -2215,12 +2252,20 @@ fn highlight_spans(spans: Vec<Span<'static>>, (start, end): (usize, usize)) -> V
     result
 }
 
+#[derive(Clone, Copy)]
+enum Gutter {
+    Both,
+    Old,
+    New,
+}
+
 fn code_row(
     line: &DiffLine,
     file: &ChangedFile,
     state: RowState,
     horizontal: u16,
     digits: usize,
+    gutter_numbers: Gutter,
 ) -> ViewRow {
     let background = match (line.kind, state.selected) {
         (LineKind::Addition, true) => SELECTED_ADDITION,
@@ -2243,6 +2288,7 @@ fn code_row(
     if matches!(line.kind, LineKind::Hunk | LineKind::Meta) {
         return ViewRow {
             source: None,
+            alt_source: None,
             background,
             line: Line::from(vec![
                 Span::styled(
@@ -2303,7 +2349,14 @@ fn code_row(
         .skip(usize::from(horizontal))
         .collect::<String>();
     let mut spans = vec![
-        Span::styled(format!("{marker}{old:>digits$} {new:>digits$} "), gutter),
+        Span::styled(
+            match gutter_numbers {
+                Gutter::Both => format!("{marker}{old:>digits$} {new:>digits$} "),
+                Gutter::Old => format!("{marker}{old:>digits$} "),
+                Gutter::New => format!("{marker}{new:>digits$} "),
+            },
+            gutter,
+        ),
         Span::styled(format!("{sign} "), Style::default().fg(sign_color)),
     ];
     let syntax = syntax_spans(&code, &file.filename);
@@ -2317,7 +2370,115 @@ fn code_row(
     ViewRow {
         line: Line::from(spans),
         source: None,
+        alt_source: None,
         background,
+    }
+}
+
+/// Unified line indices shown side by side: runs of deletions pair with the additions that
+/// follow, unchanged lines fill both sides, and hunk headers span the row alone.
+fn split_pairs(lines: &[DiffLine]) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut pairs = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        match lines[index].kind {
+            LineKind::Deletion => {
+                let deletions = index;
+                while index < lines.len() && lines[index].kind == LineKind::Deletion {
+                    index += 1;
+                }
+                let additions = index;
+                while index < lines.len() && lines[index].kind == LineKind::Addition {
+                    index += 1;
+                }
+                let removed = additions - deletions;
+                let added = index - additions;
+                for offset in 0..removed.max(added) {
+                    pairs.push((
+                        (offset < removed).then_some(deletions + offset),
+                        (offset < added).then_some(additions + offset),
+                    ));
+                }
+            }
+            LineKind::Addition => {
+                pairs.push((None, Some(index)));
+                index += 1;
+            }
+            LineKind::Hunk | LineKind::Meta => {
+                pairs.push((Some(index), None));
+                index += 1;
+            }
+            LineKind::Context => {
+                pairs.push((Some(index), Some(index)));
+                index += 1;
+            }
+        }
+    }
+    pairs
+}
+
+/// Truncates or pads a half row to `width` display columns, painting `background` behind
+/// spans that do not set their own.
+fn fit_spans(spans: Vec<Span<'static>>, width: usize, background: Color) -> Vec<Span<'static>> {
+    let mut fitted = Vec::new();
+    let mut used = 0;
+    for span in spans {
+        let style = if span.style.bg.is_none() {
+            span.style.bg(background)
+        } else {
+            span.style
+        };
+        let mut text = String::new();
+        for character in span.content.chars() {
+            let next = Span::raw(character.to_string()).width();
+            if used + next > width {
+                break;
+            }
+            text.push(character);
+            used += next;
+        }
+        if !text.is_empty() {
+            fitted.push(Span::styled(text, style));
+        }
+        if used >= width {
+            break;
+        }
+    }
+    if used < width {
+        fitted.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(background),
+        ));
+    }
+    fitted
+}
+
+fn split_row(left: Option<ViewRow>, right: Option<ViewRow>, width: u16) -> ViewRow {
+    let content = usize::from(width.saturating_sub(1));
+    let halves = [content / 2, content - content / 2];
+    let mut spans = Vec::new();
+    let mut sources = [None, None];
+    for (side, row) in [left, right].into_iter().enumerate() {
+        if side == 1 {
+            spans.push(Span::styled(
+                "│",
+                Style::default().fg(BORDER).bg(BACKGROUND),
+            ));
+        }
+        let (line, background) = match row {
+            Some(row) => {
+                sources[side] = row.source;
+                (row.line, row.background)
+            }
+            None => (Line::default(), BACKGROUND),
+        };
+        spans.extend(fit_spans(line.spans, halves[side], background));
+    }
+    ViewRow {
+        line: Line::from(spans),
+        source: sources[0].or(sources[1]),
+        alt_source: sources[1].filter(|_| sources[0].is_some()),
+        background: BACKGROUND,
     }
 }
 
@@ -2540,7 +2701,7 @@ fn side_label(side: &Side) -> &'static str {
 
 fn selected_row(rows: &[ViewRow], source: usize) -> usize {
     rows.iter()
-        .position(|row| row.source == Some(source))
+        .position(|row| row.source == Some(source) || row.alt_source == Some(source))
         .unwrap_or(0)
 }
 
@@ -3313,6 +3474,52 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
+    fn split_pairs_deletion_runs_with_following_additions() {
+        let lines = prpr::diff::parse_patch(
+            "@@ -1,5 +1,5 @@\n keep\n-old one\n-old two\n-old three\n+new one\n+new two\n tail\n+added",
+        );
+        assert_eq!(
+            split_pairs(&lines),
+            [
+                (Some(0), None),
+                (Some(1), Some(1)),
+                (Some(2), Some(5)),
+                (Some(3), Some(6)),
+                (Some(4), None),
+                (Some(7), Some(7)),
+                (None, Some(8)),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_rows_show_both_sides_and_track_the_cursor_on_either_half() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        let mut data = demo_data();
+        data.files.truncate(1);
+        data.files[0].patch = Some("@@ -1,2 +1,2 @@\n keep\n-before\n+after".into());
+        app.loaded(data).unwrap();
+        let review = app.review.as_mut().unwrap();
+        review.show_comments = false;
+        review.positions[0] = 3;
+        let rows = review_rows(app.review.as_ref().unwrap(), 80, true);
+        let paired = rows
+            .iter()
+            .find(|row| row_text(row).contains("before"))
+            .unwrap();
+        let text = row_text(paired);
+        assert!(
+            text.contains("after"),
+            "deletion and addition share a row: {text}"
+        );
+        assert!(text.find("before").unwrap() < text.find("after").unwrap());
+        assert_eq!((paired.source, paired.alt_source), (Some(2), Some(3)));
+        assert_eq!(selected_row(&rows, 3), selected_row(&rows, 2));
+        assert_eq!(paired.line.width(), 80);
+    }
+
+    #[test]
     fn marks_map_source_columns_through_tabs_and_horizontal_scroll() {
         assert_eq!(display_range("let value = 1;", (5, 9), 0), (4, 9));
         assert_eq!(display_range("\tvalue", (2, 6), 0), (4, 9));
@@ -3476,7 +3683,7 @@ mod tests {
             .unwrap();
         review.positions[0] = selected;
         for width in [32, 57, 89] {
-            let rows = review_rows(review, width);
+            let rows = review_rows(review, width, false);
             assert_eq!(
                 rows.iter().filter(|row| row.source.is_some()).count(),
                 review.current_lines().len()
@@ -3511,7 +3718,7 @@ mod tests {
         }
         let expected = review.anchor();
         review.show_comments = false;
-        let rows = review_rows(review, 57);
+        let rows = review_rows(review, 57, false);
         assert!(!rows.iter().any(|row| row_text(row).contains("sam")));
         assert!(!rows.iter().any(|row| row_text(row).contains("draft ·")));
         assert_eq!(review.anchor(), expected);
@@ -3539,7 +3746,7 @@ mod tests {
             start_side: None,
             in_reply_to_id: None,
         }];
-        let rows = review_rows(review, 32);
+        let rows = review_rows(review, 32, false);
         let last_source = rows.iter().rposition(|row| row.source.is_some()).unwrap();
         let outdated = rows
             .iter()
@@ -3549,7 +3756,7 @@ mod tests {
         assert!(rows[outdated].source.is_none());
         review.data.files[0].patch = None;
         review.lines[0].clear();
-        let rows = review_rows(review, 32);
+        let rows = review_rows(review, 32, false);
         assert!(
             rows.iter()
                 .any(|row| row_text(row).contains("Historical discussion"))
@@ -3647,7 +3854,7 @@ mod tests {
             anchor: 2,
             extending: true,
         });
-        let rows = review_rows(review, 89);
+        let rows = review_rows(review, 89, false);
         for (index, line) in review.current_lines().iter().enumerate() {
             let row = rows.iter().find(|row| row.source == Some(index)).unwrap();
             if (2..=5).contains(&index) {
@@ -3730,7 +3937,7 @@ mod tests {
             author: "sam".into(),
             in_reply_to_id: None,
         }];
-        let rows = review_rows(review, 32);
+        let rows = review_rows(review, 32, false);
         assert_eq!(
             rows.iter()
                 .filter(|row| row_text(row).contains("LEFT:19–20"))

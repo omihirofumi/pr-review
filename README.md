@@ -198,6 +198,19 @@ The file sidebar shows changed files as a tree. Chains of directories that each 
 
 Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
 
+## Unified and split view
+
+Diff starts in the unified layout. Press `|` to switch to a side-by-side split for the rest of the session: deletions on the left with old line numbers, additions on the right with new line numbers, and unchanged lines on both sides. A run of deleted lines pairs row by row with the added lines that follow it, and the shorter side is padded.
+
+`j` / `k` still follow the unified order, so the cursor crosses from the left column to the right when it moves from a deletion to an addition. Selections, comments, notes, marks, and `gf` therefore work the same in both layouts. Choose the starting layout in the configuration:
+
+```toml
+[diff]
+layout = "auto"   # "unified" (default), "split", or "auto": split from 160 columns
+```
+
+Split view needs a diff pane at least 60 columns wide and otherwise falls back to unified.
+
 ## Configurable shortcuts
 
 Normal-view shortcuts are configured in the same file as AI settings: `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Run `prpr --config-path` to locate it. Add a `[keybindings]` table, then restart prpr:
@@ -349,6 +362,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `b` / `B` | PR description / open PR on GitHub |
 | `y` / `gy`, `Y` | Copy selected lines as Markdown / copy a GitHub permalink pinned to the reviewed revision |
 | `R` | Run or open the provider's AI code review |
+| `\|` | Toggle unified / split view |
 | `+` / `-` | Expand 20 context lines / collapse current context |
 | `F` | Toggle full-file context |
 | `t` | Toggle inline comments, replies, and local drafts |
