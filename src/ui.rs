@@ -1859,6 +1859,7 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
             DiffLayout::Auto => frame.area().width >= 160,
         });
     app.split_shown.set(split);
+    review.split.set(split);
     let rows = review_rows(review, content.width, split);
     let height = usize::from(content.height);
     let selected = selected_row(&rows, review.position());
@@ -2089,7 +2090,7 @@ fn review_rows(review: &ReviewState, width: u16, split: bool) -> Vec<ViewRow> {
         row
     };
     let groups = if split {
-        split_pairs(lines)
+        prpr::diff::split_pairs(lines)
     } else {
         (0..lines.len()).map(|index| (Some(index), None)).collect()
     };
@@ -2373,48 +2374,6 @@ fn code_row(
         alt_source: None,
         background,
     }
-}
-
-/// Unified line indices shown side by side: runs of deletions pair with the additions that
-/// follow, unchanged lines fill both sides, and hunk headers span the row alone.
-fn split_pairs(lines: &[DiffLine]) -> Vec<(Option<usize>, Option<usize>)> {
-    let mut pairs = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        match lines[index].kind {
-            LineKind::Deletion => {
-                let deletions = index;
-                while index < lines.len() && lines[index].kind == LineKind::Deletion {
-                    index += 1;
-                }
-                let additions = index;
-                while index < lines.len() && lines[index].kind == LineKind::Addition {
-                    index += 1;
-                }
-                let removed = additions - deletions;
-                let added = index - additions;
-                for offset in 0..removed.max(added) {
-                    pairs.push((
-                        (offset < removed).then_some(deletions + offset),
-                        (offset < added).then_some(additions + offset),
-                    ));
-                }
-            }
-            LineKind::Addition => {
-                pairs.push((None, Some(index)));
-                index += 1;
-            }
-            LineKind::Hunk | LineKind::Meta => {
-                pairs.push((Some(index), None));
-                index += 1;
-            }
-            LineKind::Context => {
-                pairs.push((Some(index), Some(index)));
-                index += 1;
-            }
-        }
-    }
-    pairs
 }
 
 /// Truncates or pads a half row to `width` display columns, painting `background` behind
@@ -3479,7 +3438,7 @@ mod tests {
             "@@ -1,5 +1,5 @@\n keep\n-old one\n-old two\n-old three\n+new one\n+new two\n tail\n+added",
         );
         assert_eq!(
-            split_pairs(&lines),
+            prpr::diff::split_pairs(&lines),
             [
                 (Some(0), None),
                 (Some(1), Some(1)),

@@ -212,7 +212,7 @@ Use `]` for the next hunk and `[` for the previous hunk, or run those actions fr
 
 Diff starts in the unified layout. Press `|` to switch to a side-by-side split for the rest of the session: deletions on the left with old line numbers, additions on the right with new line numbers, and unchanged lines on both sides. A run of deleted lines pairs row by row with the added lines that follow it, and the shorter side is padded.
 
-`j` / `k` still follow the unified order, so the cursor crosses from the left column to the right when it moves from a deletion to an addition. Selections, comments, notes, marks, and `gf` therefore work the same in both layouts. Choose the starting layout in the configuration:
+In split view, `j` / `k` move row by row as in Hunk: within a row the cursor visits the left (deleted) line before the right (added) one, and `k` reverses that order, so it never jumps back up inside a replaced block. Unchanged lines take one step per row. Positions still refer to the same diff lines, so selections, comments, notes, marks, and `gf` work the same in both layouts. Choose the starting layout in the configuration:
 
 ```toml
 [diff]

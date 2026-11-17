@@ -570,3 +570,42 @@ fn pipe_toggles_the_layout_shown_on_screen() {
     app.key(key('|')).unwrap();
     assert_eq!(app.diff_split, Some(false));
 }
+
+#[test]
+fn split_view_moves_row_by_row_left_before_right_like_hunk() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    load(
+        &mut app,
+        vec![fixture_file(
+            "a.rs",
+            Some("@@ -1,5 +1,4 @@\n keep\n-d1\n-d2\n-d3\n+a1\n+a2\n tail"),
+        )],
+    );
+    let review = app.review.as_mut().unwrap();
+    review.split.set(true);
+    review.positions[0] = 1;
+    let mut visited = Vec::new();
+    for _ in 0..6 {
+        app.key(key('j')).unwrap();
+        visited.push(app.review.as_ref().unwrap().position());
+    }
+    assert_eq!(visited, [2, 5, 3, 6, 4, 7], "d1, a1, d2, a2, d3, tail");
+    visited.clear();
+    for _ in 0..6 {
+        app.key(key('k')).unwrap();
+        visited.push(app.review.as_ref().unwrap().position());
+    }
+    assert_eq!(
+        visited,
+        [4, 6, 3, 5, 2, 1],
+        "the reverse: right half before left"
+    );
+    app.review.as_ref().unwrap().split.set(false);
+    app.key(key('j')).unwrap();
+    assert_eq!(
+        app.review.as_ref().unwrap().position(),
+        2,
+        "unified view keeps unified order"
+    );
+}

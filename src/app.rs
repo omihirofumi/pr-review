@@ -303,6 +303,8 @@ pub struct ReviewState {
     pub marks: Vec<Mark>,
     /// File shown when the sidebar took focus, so returning to another file can start at its top.
     pub sidebar_origin: Option<usize>,
+    /// Whether the last draw used split view, which changes the order line movement follows.
+    pub split: std::cell::Cell<bool>,
 }
 
 /// Diff scroll position, updated while drawing so it follows the rendered row layout.
@@ -682,15 +684,26 @@ impl ReviewState {
         if self.positions.is_empty() {
             return;
         }
-        if self.selection.is_some_and(|selection| selection.extending) {
-            let max = self.current_lines().len().saturating_sub(1);
-            self.positions[self.selected_file] =
-                self.position().saturating_add_signed(delta).min(max);
-            return;
+        if !self.selection.is_some_and(|selection| selection.extending) {
+            self.selection = None;
         }
-        self.selection = None;
-        let max = self.current_lines().len().saturating_sub(1);
-        self.positions[self.selected_file] = self.position().saturating_add_signed(delta).min(max);
+        self.positions[self.selected_file] = self.line_after(delta);
+    }
+
+    /// Unified order in unified view; in split view, row by row with the left half first.
+    fn line_after(&self, delta: isize) -> usize {
+        let lines = self.current_lines();
+        let max = lines.len().saturating_sub(1);
+        if !self.split.get() {
+            return self.position().saturating_add_signed(delta).min(max);
+        }
+        let order = diff::split_order(lines);
+        let Some(at) = order.iter().position(|index| *index == self.position()) else {
+            return self.position().min(max);
+        };
+        order[at
+            .saturating_add_signed(delta)
+            .min(order.len().saturating_sub(1))]
     }
 
     fn copied_rows(&self) -> &[DiffLine] {
@@ -1164,6 +1177,7 @@ impl App {
             viewport: Viewport::default(),
             marks: Vec::new(),
             sidebar_origin: None,
+            split: std::cell::Cell::new(false),
         });
         self.tab = PageTab::Diff;
         self.goto_pending = false;

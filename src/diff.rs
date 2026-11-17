@@ -176,6 +176,58 @@ fn parse_number(number: &str) -> Option<u32> {
     number.parse().ok()
 }
 
+/// Unified line indices shown side by side: runs of deletions pair with the additions that
+/// follow, unchanged lines fill both sides, and hunk headers span the row alone.
+pub fn split_pairs(lines: &[DiffLine]) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut pairs = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        match lines[index].kind {
+            LineKind::Deletion => {
+                let deletions = index;
+                while index < lines.len() && lines[index].kind == LineKind::Deletion {
+                    index += 1;
+                }
+                let additions = index;
+                while index < lines.len() && lines[index].kind == LineKind::Addition {
+                    index += 1;
+                }
+                let removed = additions - deletions;
+                let added = index - additions;
+                for offset in 0..removed.max(added) {
+                    pairs.push((
+                        (offset < removed).then_some(deletions + offset),
+                        (offset < added).then_some(additions + offset),
+                    ));
+                }
+            }
+            LineKind::Addition => {
+                pairs.push((None, Some(index)));
+                index += 1;
+            }
+            LineKind::Hunk | LineKind::Meta => {
+                pairs.push((Some(index), None));
+                index += 1;
+            }
+            LineKind::Context => {
+                pairs.push((Some(index), Some(index)));
+                index += 1;
+            }
+        }
+    }
+    pairs
+}
+
+/// Line indices in the order split view visits them: row by row, the left half before the
+/// right, matching Hunk so the cursor never jumps back up within a replaced block.
+pub fn split_order(lines: &[DiffLine]) -> Vec<usize> {
+    split_pairs(lines)
+        .into_iter()
+        .flat_map(|(left, right)| [left, right.filter(|right| Some(*right) != left)])
+        .flatten()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
