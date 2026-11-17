@@ -13,7 +13,7 @@ use prpr::{
     local,
     model::*,
     notes,
-    settings::{self, Provider, Settings},
+    settings::{self, OpenIn, Provider, Settings},
 };
 
 use crate::store;
@@ -186,7 +186,25 @@ pub enum Dialog {
 pub enum PageTab {
     #[default]
     Overview,
+    Guide,
     Diff,
+}
+
+impl PageTab {
+    fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Overview, true) | (Self::Diff, false) => Self::Guide,
+            (Self::Guide, true) | (Self::Overview, false) => Self::Diff,
+            (Self::Diff, true) | (Self::Guide, false) => Self::Overview,
+        }
+    }
+}
+
+pub enum ActivityStatus {
+    Unavailable,
+    Loading,
+    Ready(PrActivity),
+    Error(String),
 }
 
 pub enum AiStatus {
@@ -239,7 +257,9 @@ pub fn preview_key(id: &PrId) -> String {
 
 pub struct OverviewState {
     pub metadata: PrOverview,
+    pub activity: ActivityStatus,
     pub scroll: u16,
+    pub guide_scroll: u16,
     pub selected_step: usize,
     pub focus_guide: bool,
     pub ai: AiStatus,
@@ -774,6 +794,8 @@ pub enum Action {
 }
 
 pub struct App {
+    /// Local checkout root and the GitHub repository it belongs to.
+    pub checkout: Option<(PathBuf, String)>,
     pub file_sidebar: bool,
     pub local_spec: Option<local::Spec>,
     pub local_contents: std::collections::BTreeMap<String, FileContext>,
@@ -807,6 +829,7 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            checkout: None,
             file_sidebar: true,
             local_spec: None,
             local_contents: Default::default(),
@@ -847,7 +870,9 @@ impl App {
         self.repo = Some(metadata.id.repo.clone());
         self.overview = Some(OverviewState {
             metadata,
+            activity: ActivityStatus::Loading,
             scroll: 0,
+            guide_scroll: 0,
             selected_step: 0,
             focus_guide: false,
             ai: if self.settings.ai.provider == Provider::None {
@@ -1106,6 +1131,8 @@ impl App {
     pub fn binding_view(&self) -> View {
         if self.overview.is_some() && self.tab == PageTab::Overview {
             View::Overview
+        } else if self.overview.is_some() && self.tab == PageTab::Guide {
+            View::Guide
         } else if self.review.is_some() || self.local_spec.is_some() || self.overview.is_some() {
             View::Diff
         } else {
@@ -1209,6 +1236,7 @@ impl App {
                         ("ask", true),
                         ("explain_diff", true),
                         ("overview", review_open),
+                        ("guide", review_open),
                         ("diff", review_open),
                         ("next_view", review_open),
                         ("previous_view", review_open),
@@ -1330,17 +1358,19 @@ impl App {
                     return Ok(Action::None);
                 }
                 KeyCode::Char('2') => {
+                    self.tab = PageTab::Guide;
+                    self.goto_pending = false;
+                    self.pending_keys.clear();
+                    return Ok(Action::None);
+                }
+                KeyCode::Char('3') => {
                     self.tab = PageTab::Diff;
                     self.goto_pending = false;
                     self.pending_keys.clear();
                     return Ok(Action::None);
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
-                    self.tab = if self.tab == PageTab::Overview {
-                        PageTab::Diff
-                    } else {
-                        PageTab::Overview
-                    };
+                    self.tab = self.tab.cycle(key.code == KeyCode::Tab);
                     self.goto_pending = false;
                     self.pending_keys.clear();
                     return Ok(Action::None);
@@ -1377,7 +1407,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.overview.is_some() && self.tab == PageTab::Overview {
+        if self.overview.is_some() && self.tab != PageTab::Diff {
             return self.overview_key(key);
         }
         if self.overview.is_some() && self.review.is_none() {
@@ -1719,7 +1749,10 @@ impl App {
             if review.data.source.is_local() {
                 return Ok(Action::OpenEditor(review.editor_target()?));
             }
-            if !prepare_only && review.workspace.is_some() {
+            if !prepare_only
+                && (review.workspace.is_some()
+                    || self.settings.editor.open_in == OpenIn::Repository)
+            {
                 return Ok(Action::OpenEditor(review.editor_target()?));
             }
             return Ok(Action::Prepare {
@@ -1738,59 +1771,56 @@ impl App {
     }
 
     fn overview_key(&mut self, key: KeyEvent) -> Result<Action> {
+        let guide = self.tab == PageTab::Guide;
         if self.goto_pending {
             self.goto_pending = false;
             self.pending_keys.clear();
+            let overview = self.overview.as_mut().unwrap();
+            let scroll = if guide {
+                &mut overview.guide_scroll
+            } else {
+                &mut overview.scroll
+            };
             match key.code {
-                KeyCode::Char('g') => {
-                    self.overview.as_mut().unwrap().scroll = 0;
-                    self.overview.as_mut().unwrap().focus_guide = false;
-                }
-                KeyCode::Char('e') => {
-                    self.overview.as_mut().unwrap().scroll = u16::MAX;
-                    self.overview.as_mut().unwrap().focus_guide = false;
-                }
-                KeyCode::Char('f') => self.jump_to_reading_step()?,
+                KeyCode::Char('g') => *scroll = 0,
+                KeyCode::Char('e') => *scroll = u16::MAX,
+                KeyCode::Char('f') if guide => self.jump_to_reading_step()?,
                 _ => {}
+            }
+            if matches!(key.code, KeyCode::Char('g' | 'e')) {
+                self.overview.as_mut().unwrap().focus_guide = false;
             }
             return Ok(Action::None);
         }
         let overview = self.overview.as_mut().unwrap();
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                overview.scroll = overview.scroll.saturating_add(1);
-                overview.focus_guide = false;
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                overview.scroll = overview.scroll.saturating_sub(1);
-                overview.focus_guide = false;
-            }
-            KeyCode::PageDown => {
-                overview.scroll = overview.scroll.saturating_add(15);
-                overview.focus_guide = false;
-            }
-            KeyCode::PageUp => {
-                overview.scroll = overview.scroll.saturating_sub(15);
-                overview.focus_guide = false;
-            }
+        let scroll = if guide {
+            &mut overview.guide_scroll
+        } else {
+            &mut overview.scroll
+        };
+        let moved = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Some(scroll.saturating_add(1)),
+            KeyCode::Char('k') | KeyCode::Up => Some(scroll.saturating_sub(1)),
+            KeyCode::PageDown => Some(scroll.saturating_add(15)),
+            KeyCode::PageUp => Some(scroll.saturating_sub(15)),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                overview.scroll = overview.scroll.saturating_add(12);
-                overview.focus_guide = false;
+                Some(scroll.saturating_add(12))
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                overview.scroll = overview.scroll.saturating_sub(12);
-                overview.focus_guide = false;
+                Some(scroll.saturating_sub(12))
             }
+            KeyCode::Home => Some(0),
+            KeyCode::End | KeyCode::Char('G') => Some(u16::MAX),
+            _ => None,
+        };
+        if let Some(position) = moved {
+            *scroll = position;
+            overview.focus_guide = false;
+            return Ok(Action::None);
+        }
+        match key.code {
             KeyCode::Char('g') => self.goto_pending = true,
-            KeyCode::Home => {
-                overview.scroll = 0;
-                overview.focus_guide = false;
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                overview.scroll = u16::MAX;
-                overview.focus_guide = false;
-            }
-            KeyCode::Char('n') | KeyCode::Char('p') => {
+            KeyCode::Char('n') | KeyCode::Char('p') if guide => {
                 let len = match &overview.ai {
                     AiStatus::Ready(analysis) => analysis.reading_order.len(),
                     _ => 0,
@@ -1805,7 +1835,10 @@ impl App {
                 };
                 overview.focus_guide = true;
             }
-            KeyCode::Enter | KeyCode::Char('o') => self.jump_to_reading_step()?,
+            KeyCode::Enter | KeyCode::Char('o') if guide => self.jump_to_reading_step()?,
+            KeyCode::Char('V') if !self.busy && self.local_spec.is_none() => {
+                return Ok(Action::Activity(overview.metadata.id.clone()));
+            }
             KeyCode::Char('b') => self.dialog = Some(Dialog::Description { scroll: 0 }),
             KeyCode::Char('?') => self.dialog = Some(Dialog::Help { scroll: 0 }),
             KeyCode::Char('!') => self.dialog = Some(Dialog::Status { scroll: 0 }),
@@ -2292,6 +2325,40 @@ fn scroll_key(scroll: &mut u16, key: KeyEvent) {
     }
 }
 
+pub fn demo_activity() -> PrActivity {
+    PrActivity {
+        labels: vec!["enhancement".into(), "risk:low".into()],
+        checks: vec![
+            Check {
+                name: "CI / test".into(),
+                state: CheckState::Failed,
+                detail: "failure".into(),
+                url: None,
+            },
+            Check {
+                name: "CI / lint".into(),
+                state: CheckState::Passed,
+                detail: "success".into(),
+                url: None,
+            },
+        ],
+        conversation: vec![
+            ConversationEntry {
+                author: "reviewer".into(),
+                action: "commented".into(),
+                created_at: "2026-01-02T09:30:00Z".into(),
+                body: "Could the retry delay be configurable?".into(),
+            },
+            ConversationEntry {
+                author: "maintainer".into(),
+                action: "approved".into(),
+                created_at: "2026-01-03T11:00:00Z".into(),
+                body: String::new(),
+            },
+        ],
+    }
+}
+
 pub fn demo_data() -> ReviewData {
     ReviewData {
         source: prpr::model::ReviewSource::GitHub,
@@ -2392,6 +2459,14 @@ mod tests {
         app.review.as_mut().unwrap().focus = Focus::Files;
         assert!(matches!(app.key(key('o')).unwrap(), Action::None));
         match app.key(key('e')).unwrap() {
+            Action::OpenEditor(target) => {
+                assert_eq!(target.side, Side::Left);
+                assert_eq!(target.line, 19);
+            }
+            _ => panic!("By default a file opens without preparing a workspace"),
+        }
+        app.settings.editor.open_in = OpenIn::Workspace;
+        match app.key(key('e')).unwrap() {
             Action::Prepare {
                 open_editor: Some(target),
                 ..
@@ -2399,7 +2474,7 @@ mod tests {
                 assert_eq!(target.side, Side::Left);
                 assert_eq!(target.line, 19);
             }
-            _ => panic!("Opening a file should prepare its review workspace"),
+            _ => panic!("Workspace mode should prepare the review workspace first"),
         }
         app.review.as_mut().unwrap().workspace = Some(dir.path().into());
         assert!(matches!(app.key(key('e')).unwrap(), Action::OpenEditor(_)));

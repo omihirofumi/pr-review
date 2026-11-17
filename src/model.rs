@@ -206,3 +206,54 @@ mod tests {
         assert_eq!(comment.line_label(), "outdated");
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckState {
+    Failed,
+    Pending,
+    Passed,
+    Skipped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+    pub detail: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationEntry {
+    pub author: String,
+    pub action: String,
+    pub created_at: String,
+    pub body: String,
+}
+
+impl ConversationEntry {
+    /// Minute-precision UTC time from GitHub's ISO-8601 timestamp.
+    pub fn time(&self) -> String {
+        match self.created_at.split_once('T') {
+            Some((date, time)) => format!("{date} {} UTC", time.get(..5).unwrap_or(time)),
+            None => self.created_at.clone(),
+        }
+    }
+}
+
+/// GitHub-side PR context that changes independently of the reviewed diff.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrActivity {
+    pub labels: Vec<String>,
+    pub checks: Vec<Check>,
+    pub conversation: Vec<ConversationEntry>,
+}
+
+impl PrActivity {
+    pub fn count(&self, state: CheckState) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| check.state == state)
+            .count()
+    }
+}

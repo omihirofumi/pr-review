@@ -26,10 +26,23 @@ fn defaults_are_conflict_free_and_printed_configuration_roundtrips() {
         Match::Action("open_pr")
     ));
     assert!(matches!(
-        keys.resolve(View::Overview, &parse_sequence("o").unwrap())
+        keys.resolve(View::Guide, &parse_sequence("o").unwrap())
             .unwrap(),
         Match::Action("open_reading_step")
     ));
+    assert!(matches!(
+        keys.resolve(View::Overview, &parse_sequence("o").unwrap())
+            .unwrap(),
+        Match::None
+    ));
+    for (key, tab) in [("1", "overview"), ("2", "guide"), ("3", "diff")] {
+        for view in [View::Overview, View::Guide, View::Diff] {
+            assert!(matches!(
+                keys.resolve(view, &parse_sequence(key).unwrap()).unwrap(),
+                Match::Action(id) if id == tab
+            ));
+        }
+    }
 }
 
 #[test]
@@ -63,7 +76,7 @@ open_file = []
         Match::Action("next_hunk")
     ));
     assert!(matches!(
-        keys.resolve(View::Overview, &parse_sequence("n").unwrap())
+        keys.resolve(View::Guide, &parse_sequence("n").unwrap())
             .unwrap(),
         Match::Action("next_reading_step")
     ));

@@ -1,16 +1,16 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use prpr::{
     analysis::Analysis,
     diff::{DiffLine, LineKind},
     keybindings::{self, View},
-    model::{ChangedFile, Side},
+    model::{ChangedFile, CheckState, Side},
     settings::Provider,
     thread::{Thread, matches_anchor, threads},
 };
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{
@@ -22,7 +22,8 @@ use ratatui::{
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::{
-    AiStatus, App, Dialog, Focus, OverviewState, PageTab, PreviewTab, ReviewState, TextInput,
+    ActivityStatus, AiStatus, App, Dialog, Focus, OverviewState, PageTab, PreviewTab, ReviewState,
+    TextInput,
 };
 
 const BACKGROUND: Color = Color::Rgb(24, 24, 23);
@@ -174,10 +175,75 @@ fn expand_tabs(line: Line<'_>) -> Line<'static> {
     Line::from(spans).style(line.style)
 }
 
+/// Removes HTML comments outside fenced code, matching GitHub's rendered view of PR templates.
+fn strip_html_comments(body: &str) -> String {
+    let mut result = String::with_capacity(body.len());
+    let mut fence: Option<&str> = None;
+    let mut in_comment = false;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if !in_comment {
+            if let Some(marker) = fence {
+                if trimmed.starts_with(marker) {
+                    fence = None;
+                }
+                result.push_str(line);
+                continue;
+            }
+            if let Some(marker) = ["```", "~~~"]
+                .into_iter()
+                .find(|marker| trimmed.starts_with(marker))
+            {
+                fence = Some(marker);
+                result.push_str(line);
+                continue;
+            }
+        }
+        let mut kept = String::new();
+        let mut rest = line;
+        let mut removed = in_comment;
+        loop {
+            if in_comment {
+                match rest.find("-->") {
+                    Some(end) => {
+                        rest = &rest[end + 3..];
+                        in_comment = false;
+                    }
+                    None => {
+                        rest = "";
+                        break;
+                    }
+                }
+            } else {
+                match rest.find("<!--") {
+                    Some(start) => {
+                        kept.push_str(&rest[..start]);
+                        rest = &rest[start + 4..];
+                        in_comment = true;
+                        removed = true;
+                    }
+                    None => break,
+                }
+            }
+        }
+        kept.push_str(rest);
+        if removed && kept.trim().is_empty() {
+            continue;
+        }
+        result.push_str(&kept);
+    }
+    result
+}
+
 fn markdown_text(body: &str, width: u16) -> Text<'static> {
     let width = usize::from(width.max(1));
     let options = tui_markdown::Options::new(ReviewMarkdown).table_width(width as u16);
-    let text = tui_markdown::from_str_with_options(body, &options);
+    let body = if body.contains("<!--") {
+        strip_html_comments(body)
+    } else {
+        body.to_owned()
+    };
+    let text = tui_markdown::from_str_with_options(&body, &options);
     let mut rows = Vec::new();
     for line in text.lines {
         let line = if line.spans.iter().any(|span| span.content.contains('\t')) {
@@ -257,6 +323,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     if app.overview.is_some() && matches!(app.tab, PageTab::Overview) {
         draw_overview(frame, app, body);
+    } else if app.overview.is_some() && matches!(app.tab, PageTab::Guide) {
+        draw_guide(frame, app, body);
     } else if app.review.is_some() {
         draw_review(frame, app, body);
     } else if app.overview.is_some() {
@@ -306,8 +374,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ],
             View::Overview => &[
                 ("command_palette", "commands"),
+                ("guide", "AI guide"),
                 ("diff", "diff"),
-                ("ai_guide", "guide"),
+                ("review_activity", "conversation"),
+                ("open_github", "GitHub"),
+                ("help", "help"),
+            ],
+            View::Guide => &[
+                ("command_palette", "commands"),
+                ("next_reading_step", "next step"),
+                ("open_reading_step", "jump"),
+                ("ai_guide", "regenerate"),
                 ("choose_agent", "agent"),
                 ("help", "help"),
             ],
@@ -511,7 +588,8 @@ fn draw_overview_header(frame: &mut Frame, app: &App, overview: &OverviewState, 
 }
 
 fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
-    let label = if app.diff_loading {
+    let keys = &app.settings.keybindings;
+    let diff = if app.diff_loading {
         "Diff · loading"
     } else if app.diff_error.is_some() {
         "Diff · error"
@@ -520,37 +598,43 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Diff"
     };
-    let diff = format!(" {} {label} ", app.settings.keybindings.primary("diff"));
+    let guide = match app.overview.as_ref().map(|overview| &overview.ai) {
+        Some(AiStatus::Loading) => "AI Guide · loading",
+        Some(AiStatus::Error(_)) => "AI Guide · error",
+        Some(AiStatus::Ready(_)) => "AI Guide · ready",
+        Some(AiStatus::Disabled) => "AI Guide · off",
+        _ => "AI Guide",
+    };
     let selected = |active| {
         Style::default()
             .fg(if active { ACCENT } else { MUTED })
             .bg(if active { PANEL } else { SIDEBAR })
+            .bold()
     };
+    let mut spans = Vec::new();
+    for (tab, id, label) in [
+        (PageTab::Overview, "overview", "Overview"),
+        (PageTab::Guide, "guide", guide),
+        (PageTab::Diff, "diff", diff),
+    ] {
+        spans.push(Span::styled(
+            format!(" {} {label} ", keys.primary(id)),
+            selected(app.tab == tab),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if area.width >= 100 {
+        spans.push(Span::styled(
+            format!(
+                "   {} / {} switches views",
+                keys.primary("next_view"),
+                keys.primary("previous_view")
+            ),
+            Style::default().fg(MUTED),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(
-                    " {} Overview ",
-                    app.settings.keybindings.primary("overview")
-                ),
-                selected(matches!(app.tab, PageTab::Overview)).bold(),
-            ),
-            Span::raw(" "),
-            Span::styled(diff, selected(matches!(app.tab, PageTab::Diff)).bold()),
-            Span::styled(
-                if area.width >= 85 {
-                    format!(
-                        "    {} / {} switches views",
-                        app.settings.keybindings.primary("next_view"),
-                        app.settings.keybindings.primary("previous_view")
-                    )
-                } else {
-                    String::new()
-                },
-                Style::default().fg(MUTED),
-            ),
-        ]))
-        .style(Style::default().bg(SIDEBAR)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(SIDEBAR)),
         area,
     );
 }
@@ -587,84 +671,181 @@ fn draw_diff_placeholder(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
-    let keys = &app.settings.keybindings;
+    let local = app.local_spec.is_some();
     let Some(overview) = &mut app.overview else {
         return;
     };
     let metadata = &overview.metadata;
-    let body = if metadata.body.trim().is_empty() {
-        "No author description."
+    let identity = if local {
+        " Local changes".to_owned()
     } else {
-        metadata.body.as_str()
+        format!(
+            " {} · {}{}",
+            metadata.author,
+            metadata.state.to_lowercase(),
+            if metadata.draft { " · draft" } else { "" }
+        )
     };
-    let wrapped = if matches!(overview.ai, AiStatus::Ready(_)) {
-        markdown_text(body, area.width.saturating_sub(4).max(1)).lines
-    } else {
-        Vec::new()
-    };
-    let preview = if !matches!(overview.ai, AiStatus::Ready(_)) {
-        0
-    } else {
-        1
-    };
-    let description_height = wrapped.len().min(preview) as u16 + 1;
-    let [details, description, state, content] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(description_height),
-        Constraint::Length(2),
+    let mut lines = vec![Line::from(vec![
+        Span::styled(identity, Style::default().fg(TEXT)),
+        Span::styled(
+            format!(
+                " · {} changed files · +{} -{}",
+                metadata.changed_files, metadata.additions, metadata.deletions
+            ),
+            Style::default().fg(MUTED),
+        ),
+    ])];
+    if !metadata.url.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", metadata.url),
+            Style::default().fg(MUTED),
+        )));
+    }
+    lines.extend(activity_lines(&overview.activity));
+    let [details, content] = Layout::vertical([
+        Constraint::Length(lines.len() as u16 + 1),
         Constraint::Min(1),
     ])
     .areas(area);
-    frame.render_widget(
-        Paragraph::new(vec![
+    frame.render_widget(Paragraph::new(lines), details);
+    let body = overview_markdown(&metadata.body, &overview.activity, local);
+    overview.scroll = markdown(frame, &body, content, overview.scroll);
+}
+
+fn activity_lines(activity: &ActivityStatus) -> Vec<Line<'static>> {
+    let label = |text: &str| Span::styled(format!(" {text:<7}"), Style::default().fg(MUTED));
+    match activity {
+        ActivityStatus::Unavailable => Vec::new(),
+        ActivityStatus::Loading => vec![
             Line::from(vec![
-                Span::styled(
-                    if app.local_spec.is_some() {
-                        " Local changes".into()
-                    } else {
-                        format!(
-                            " {} · {}{}",
-                            metadata.author,
-                            metadata.state.to_lowercase(),
-                            if metadata.draft { " · draft" } else { "" }
-                        )
-                    },
-                    Style::default().fg(TEXT),
-                ),
-                Span::styled(
-                    format!(" · {} changed files", metadata.changed_files),
-                    Style::default().fg(MUTED),
-                ),
+                label("Labels"),
+                Span::styled("loading…", Style::default().fg(MUTED)),
             ]),
-            Line::from(Span::styled(
-                format!(" {}", metadata.url),
-                Style::default().fg(MUTED),
-            )),
-        ]),
-        details,
-    );
-    let mut description_lines = vec![Line::from(Span::styled(
-        format!(
-            " {} DESCRIPTION · {} opens full text",
-            if app.local_spec.is_some() {
-                "CHANGE"
-            } else {
-                "AUTHOR"
-            },
-            keys.primary("description")
-        ),
-        Style::default().fg(MUTED),
-    ))];
-    description_lines.extend(wrapped.into_iter().take(preview).map(|mut line| {
-        line.spans.insert(0, Span::raw("  "));
-        line
-    }));
-    frame.render_widget(Paragraph::new(description_lines), description);
+            Line::from(vec![
+                label("CI"),
+                Span::styled("loading…", Style::default().fg(MUTED)),
+            ]),
+        ],
+        ActivityStatus::Error(error) => vec![Line::from(vec![
+            label("GitHub"),
+            Span::styled(
+                format!("Labels, CI, and conversation unavailable: {error}"),
+                Style::default().fg(RED),
+            ),
+        ])],
+        ActivityStatus::Ready(activity) => {
+            let mut labels = vec![label("Labels")];
+            if activity.labels.is_empty() {
+                labels.push(Span::styled("none", Style::default().fg(MUTED)));
+            }
+            for name in &activity.labels {
+                labels.push(Span::styled(
+                    format!(" {name} "),
+                    Style::default().fg(COMMENT_ACCENT).bg(PANEL),
+                ));
+                labels.push(Span::raw(" "));
+            }
+            let mut checks = vec![label("CI")];
+            if activity.checks.is_empty() {
+                checks.push(Span::styled(
+                    "no checks reported",
+                    Style::default().fg(MUTED),
+                ));
+            }
+            let mut first = true;
+            for (state, word, color) in [
+                (CheckState::Failed, "failed", RED),
+                (CheckState::Pending, "pending", ACCENT),
+                (CheckState::Passed, "passed", GREEN),
+                (CheckState::Skipped, "skipped", MUTED),
+            ] {
+                let count = activity.count(state);
+                if count == 0 {
+                    continue;
+                }
+                if !first {
+                    checks.push(Span::styled(" · ", Style::default().fg(MUTED)));
+                }
+                first = false;
+                checks.push(Span::styled(
+                    format!("{count} {word}"),
+                    Style::default().fg(color).bold(),
+                ));
+            }
+            vec![Line::from(labels), Line::from(checks)]
+        }
+    }
+}
+
+fn overview_markdown(body: &str, activity: &ActivityStatus, local: bool) -> String {
+    let mut text = String::new();
+    if let ActivityStatus::Ready(activity) = activity {
+        let attention = activity
+            .checks
+            .iter()
+            .filter(|check| matches!(check.state, CheckState::Failed | CheckState::Pending))
+            .collect::<Vec<_>>();
+        if !attention.is_empty() {
+            text.push_str("### Checks needing attention\n\n");
+            for check in attention {
+                text.push_str(&format!("- **{}** · {}\n", check.detail, check.name));
+            }
+            text.push('\n');
+        }
+    }
+    text.push_str(if local {
+        "### Change description\n\n"
+    } else {
+        "### Author description\n\n"
+    });
+    text.push_str(if body.trim().is_empty() {
+        "_No description._"
+    } else {
+        body.trim_end()
+    });
+    text.push_str("\n\n");
+    match activity {
+        ActivityStatus::Ready(activity) => {
+            text.push_str(&format!(
+                "### Conversation · {}\n\n",
+                activity.conversation.len()
+            ));
+            if activity.conversation.is_empty() {
+                text.push_str("_No conversation comments or reviews._\n");
+            }
+            for entry in &activity.conversation {
+                text.push_str(&format!(
+                    "#### @{} · {} · {}\n\n",
+                    entry.author,
+                    entry.action,
+                    entry.time()
+                ));
+                if !entry.body.trim().is_empty() {
+                    text.push_str(entry.body.trim_end());
+                    text.push_str("\n\n");
+                }
+            }
+        }
+        ActivityStatus::Loading => text.push_str("### Conversation\n\n_Loading…_\n"),
+        ActivityStatus::Error(_) | ActivityStatus::Unavailable => {}
+    }
+    text
+}
+
+fn draw_guide(frame: &mut Frame, app: &mut App, area: Rect) {
+    let keys = &app.settings.keybindings;
+    let local = app.local_spec.is_some();
+    let Some(overview) = &mut app.overview else {
+        return;
+    };
+    let [state, content] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
     let (caption, color) = match &overview.ai {
         AiStatus::Disabled => (
             format!(
                 " AI guide not configured · {} chooses an agent",
-                keys.primary("ai_guide")
+                keys.primary("choose_agent")
             ),
             MUTED,
         ),
@@ -675,11 +856,7 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
                 format!(
                     " AI guide is ready to generate · {} explains this {}",
                     keys.primary("ai_guide"),
-                    if app.local_spec.is_some() {
-                        "change"
-                    } else {
-                        "PR"
-                    }
+                    if local { "change" } else { "PR" }
                 )
             },
             ACCENT,
@@ -718,7 +895,12 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
         AiStatus::Ready(analysis) => {
             let wide = content.width >= 110;
             let [narrative, guide] = if wide {
-                Layout::horizontal([Constraint::Min(50), Constraint::Length(38)]).areas(content)
+                Layout::horizontal([
+                    Constraint::Length(content.width.saturating_sub(38).min(98)),
+                    Constraint::Length(38),
+                ])
+                .flex(Flex::Center)
+                .areas(content)
             } else {
                 [content, Rect::default()]
             };
@@ -731,17 +913,22 @@ fn draw_overview(frame: &mut Frame, app: &mut App, area: Rect) {
             if wide {
                 draw_reading_guide(frame, analysis, overview.selected_step, guide);
             }
-            overview.scroll = scroll;
+            overview.guide_scroll = scroll;
         }
         status => {
-            let description = if let AiStatus::Error(error) = status {
-                format!(
-                    "> Guide unavailable: {error}. Use the command palette to retry or choose an agent.\n\n{body}"
-                )
-            } else {
-                body.to_owned()
+            let message = match status {
+                AiStatus::Error(error) => format!("> Guide unavailable: {error}"),
+                AiStatus::Disabled => format!(
+                    "No AI agent is configured. Press **{}** to choose Codex or Claude. The guide summarizes the change, its intent, risks, and a reading order through the diff.",
+                    keys.primary("choose_agent")
+                ),
+                AiStatus::Loading => "The guide appears here when the agent finishes. Overview and Diff stay usable meanwhile.".to_owned(),
+                _ => format!(
+                    "Press **{}** to generate a structured reading guide for this change.",
+                    keys.primary("ai_guide")
+                ),
             };
-            overview.scroll = markdown(frame, &description, content, overview.scroll);
+            overview.guide_scroll = markdown(frame, &message, content, overview.guide_scroll);
         }
     }
 }
@@ -1013,9 +1200,11 @@ fn draw_overview_rows(
     let requested = if overview.focus_guide {
         rows.iter()
             .position(|row| row.step == Some(overview.selected_step))
-            .map_or(usize::from(overview.scroll), |row| row.saturating_sub(2))
+            .map_or(usize::from(overview.guide_scroll), |row| {
+                row.saturating_sub(2)
+            })
     } else {
-        usize::from(overview.scroll)
+        usize::from(overview.guide_scroll)
     };
     let start = requested.min(rows.len().saturating_sub(height));
     for (offset, row) in rows.iter().skip(start).take(height).enumerate() {
@@ -1466,25 +1655,91 @@ struct SidebarRow {
     file: Option<usize>,
 }
 
+struct DirectorySegment {
+    path: String,
+    label: String,
+}
+
+/// Groups each file's parent directories into displayed segments, joining chains of
+/// directories that contain only one subdirectory so deep package paths stay shallow.
+fn directory_segments(filenames: &[&str]) -> Vec<Vec<DirectorySegment>> {
+    let mut children = HashMap::<String, HashSet<&str>>::new();
+    for filename in filenames {
+        let parts = filename.split('/').collect::<Vec<_>>();
+        for depth in 0..parts.len() {
+            children
+                .entry(parts[..depth].join("/"))
+                .or_default()
+                .insert(parts[depth]);
+        }
+    }
+    filenames
+        .iter()
+        .map(|filename| {
+            let parts = filename.split('/').collect::<Vec<_>>();
+            let directories = parts.len().saturating_sub(1);
+            let mut segments = Vec::new();
+            let mut depth = 0;
+            while depth < directories {
+                let start = depth;
+                while depth + 1 < directories
+                    && children
+                        .get(&parts[..=depth].join("/"))
+                        .is_some_and(|names| names.len() == 1)
+                {
+                    depth += 1;
+                }
+                segments.push(DirectorySegment {
+                    path: parts[..=depth].join("/"),
+                    label: parts[start..=depth].join("/"),
+                });
+                depth += 1;
+            }
+            segments
+        })
+        .collect()
+}
+
+fn sidebar_indent(depth: usize, width: u16) -> String {
+    " ".repeat((depth * 2).min(usize::from(width) / 3))
+}
+
 fn sidebar_rows(review: &ReviewState, width: u16) -> Vec<SidebarRow> {
     let mut rows = Vec::new();
-    let mut directories = HashSet::new();
-    for (index, file) in review.data.files.iter().enumerate() {
-        let parts = file.filename.split('/').collect::<Vec<_>>();
-        for depth in 0..parts.len().saturating_sub(1) {
-            let path = parts[..=depth].join("/");
-            if directories.insert(path) {
-                let prefix = "  ".repeat(depth.min(3));
-                rows.push(SidebarRow {
-                    file: None,
-                    line: Line::from(Span::styled(
-                        truncate(&format!(" {prefix}▾ {}", parts[depth]), usize::from(width)),
-                        Style::default().fg(MUTED),
-                    )),
-                });
-            }
+    let filenames = review
+        .data
+        .files
+        .iter()
+        .map(|file| file.filename.as_str())
+        .collect::<Vec<_>>();
+    let mut open = Vec::<String>::new();
+    for ((index, file), segments) in review
+        .data
+        .files
+        .iter()
+        .enumerate()
+        .zip(directory_segments(&filenames))
+    {
+        let shared = open
+            .iter()
+            .zip(&segments)
+            .take_while(|(open, segment)| **open == segment.path)
+            .count();
+        open.truncate(shared);
+        for segment in &segments[shared..] {
+            let prefix = format!(" {}▾ ", sidebar_indent(open.len(), width));
+            let room = usize::from(width).saturating_sub(Line::from(prefix.as_str()).width());
+            rows.push(SidebarRow {
+                file: None,
+                line: Line::from(Span::styled(
+                    format!("{prefix}{}", truncate_path(&segment.label, room)),
+                    Style::default().fg(MUTED),
+                )),
+            });
+            open.push(segment.path.clone());
         }
-        let indentation = "  ".repeat(parts.len().saturating_sub(1).min(3));
+        let parts = file.filename.split('/').collect::<Vec<_>>();
+        let indentation = sidebar_indent(segments.len(), width);
         let drafts = review
             .drafts
             .iter()
@@ -1531,7 +1786,9 @@ fn sidebar_rows(review: &ReviewState, width: u16) -> Vec<SidebarRow> {
 
 fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     let review = app.review.as_ref().unwrap();
-    let width = if area.width >= 100 {
+    let width = if area.width >= 160 {
+        40
+    } else if area.width >= 100 {
         31
     } else if area.width >= 70 {
         23
@@ -2202,6 +2459,21 @@ fn truncate(text: &str, width: usize) -> String {
     result
 }
 
+/// Shortens a directory chain while keeping its first and last names, which tell sibling
+/// branches such as `main/…` and `test/…` apart.
+fn truncate_path(path: &str, width: usize) -> String {
+    if Line::from(path).width() <= width {
+        return path.to_owned();
+    }
+    if let (Some((first, _)), Some((_, last))) = (path.split_once('/'), path.rsplit_once('/')) {
+        let middle = format!("{first}/…/{last}");
+        if Line::from(middle.as_str()).width() <= width {
+            return middle;
+        }
+    }
+    truncate(path, width)
+}
+
 fn wrap_comment(text: &str, width: usize) -> Vec<String> {
     let mut result = Vec::new();
     for logical in text.lines() {
@@ -2501,7 +2773,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
         Dialog::Activity { text, scroll } => {
             let inner = popup(
                 frame,
-                " Published reviews / j,k scroll / Esc closes ".into(),
+                " PR conversation and reviews / j,k scroll / Esc closes ".into(),
                 110,
                 frame.area().height.saturating_sub(4),
             );
@@ -2536,17 +2808,11 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 32,
             );
             let mut text = String::from("NORMAL-VIEW SHORTCUTS\n\n");
-            for (scope, title) in [
-                (7, "GENERAL"),
-                (6, "OPEN REVIEW"),
-                (1, "PR LIST"),
-                (2, "OVERVIEW"),
-                (4, "DIFF"),
-            ] {
+            for (scope, title) in keybindings::HELP_GROUPS {
                 text.push_str(&format!("{title}\n"));
                 for binding in keybindings::SPECS
                     .iter()
-                    .filter(|binding| binding.scope == scope)
+                    .filter(|binding| binding.scope == *scope)
                 {
                     text.push_str(&format!(
                         "  {:<22} {}\n",
@@ -2860,6 +3126,53 @@ mod tests {
     use crate::app::{App, Selection, demo_data};
     use prpr::model::{DraftComment, ReviewComment};
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn directory_segments_join_single_child_chains_but_keep_branches_separate() {
+        let files = [
+            "api/core/src/main/kotlin/com/acme/domain/Interview.kt",
+            "api/core/src/main/kotlin/com/acme/domain/policy/Policy.kt",
+            "api/core/src/main/kotlin/com/acme/usecase/Remind.kt",
+            "api/core/src/test/kotlin/com/acme/domain/InterviewTest.kt",
+            "README.md",
+        ];
+        let labels = directory_segments(&files)
+            .into_iter()
+            .map(|segments| {
+                segments
+                    .into_iter()
+                    .map(|segment| segment.label)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                vec!["api/core/src", "main/kotlin/com/acme", "domain"],
+                vec!["api/core/src", "main/kotlin/com/acme", "domain", "policy"],
+                vec!["api/core/src", "main/kotlin/com/acme", "usecase"],
+                vec!["api/core/src", "test/kotlin/com/acme/domain"],
+                vec![],
+            ]
+        );
+    }
+
+    #[test]
+    fn html_comments_are_hidden_except_inside_code_fences() {
+        let body = "Summary\n<!-- template hint -->\nKeep <!-- inline --> this\n<!--\nmulti\nline\n-->\n```html\n<!-- literal -->\n```\nEnd\n";
+        assert_eq!(
+            strip_html_comments(body),
+            "Summary\nKeep  this\n```html\n<!-- literal -->\n```\nEnd\n"
+        );
+    }
+
+    #[test]
+    fn truncate_path_keeps_the_first_and_last_directory_names() {
+        assert_eq!(truncate_path("main/kotlin/com/acme", 12), "main/…/acme");
+        assert_eq!(truncate_path("test/kotlin/com/acme", 12), "test/…/acme");
+        assert_eq!(truncate_path("domain", 10), "domain");
+        assert_eq!(truncate_path("averyveryverylongname/x", 8), "averyve…");
+    }
 
     fn row_text(row: &ViewRow) -> String {
         row.line
@@ -3263,14 +3576,19 @@ mod tests {
             app.overview.as_mut().unwrap().ai = state;
             for (width, height) in [(80, 24), (120, 36)] {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                app.tab = PageTab::Overview;
                 terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                 let output = screen(&terminal);
                 assert!(output.contains("Keep request retries within the deadline"));
                 assert!(output.contains("Bound retry waits by the remaining deadline."));
                 assert!(output.contains("https://github.com/example/service/pull/42"));
                 assert!(output.contains("1 Overview"));
-                assert!(output.contains("2 Diff"));
-                assert!(output.contains(message));
+                assert!(output.contains("2 AI Guide"));
+                assert!(output.contains("3 Diff"));
+                assert!(!output.contains(message));
+                app.tab = PageTab::Guide;
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                assert!(screen(&terminal).contains(message));
                 assert!(app.review.is_none());
             }
         }
@@ -3282,11 +3600,57 @@ mod tests {
     }
 
     #[test]
+    fn overview_shows_labels_ci_failures_and_conversation_in_time_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.opened(overview_metadata());
+        app.overview.as_mut().unwrap().activity =
+            ActivityStatus::Ready(crate::app::demo_activity());
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let output = screen(&terminal);
+        assert!(output.contains("enhancement"));
+        assert!(output.contains("risk:low"));
+        assert!(output.contains("1 failed · 1 passed"));
+        assert!(output.contains("Checks needing attention"));
+        assert!(output.contains("CI / test"));
+        assert!(!output.contains("CI / lint"));
+        assert!(output.contains("Conversation · 2"));
+        let comment = output
+            .find("@reviewer · commented · 2026-01-02 09:30 UTC")
+            .unwrap();
+        let approval = output.find("@maintainer · approved").unwrap();
+        assert!(comment < approval);
+    }
+
+    #[test]
+    fn wide_guide_centers_the_narrative_and_reading_order_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.opened(overview_metadata());
+        app.tab = PageTab::Guide;
+        app.overview.as_mut().unwrap().ai = AiStatus::Ready(Box::new(analysis_fixture()));
+        for width in [110_u16, 200] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let output = screen(&terminal);
+            let byte = output
+                .find(" Reading order")
+                .expect("reading order panel is visible");
+            let column = usize::from(output[..byte].chars().count() as u16 % width);
+            let narrative = usize::from(width - 38).min(98);
+            let margin = (usize::from(width) - narrative - 38) / 2;
+            assert_eq!(column, margin + narrative + 1, "width {width}");
+        }
+    }
+
+    #[test]
     fn structured_overview_includes_all_sections_and_keeps_reading_steps_visible() {
         let temp = tempfile::tempdir().unwrap();
         let mut app = App::new(temp.path().into(), true);
         app.settings.ai.provider = Provider::Codex;
         app.opened(overview_metadata());
+        app.tab = PageTab::Guide;
         app.overview.as_mut().unwrap().ai = AiStatus::Ready(Box::new(analysis_fixture()));
         let rows = overview_rows(&analysis_fixture(), 80, true);
         let text = rows
@@ -3314,12 +3678,12 @@ mod tests {
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             assert!(screen(&terminal).contains("tests/deadline.rs:3"));
             app.overview.as_mut().unwrap().focus_guide = false;
-            app.overview.as_mut().unwrap().scroll = u16::MAX;
+            app.overview.as_mut().unwrap().guide_scroll = u16::MAX;
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let output = screen(&terminal);
             assert!(output.contains("Context coverage"));
             assert!(output.contains("diagram.png"));
-            let end = app.overview.as_ref().unwrap().scroll;
+            let end = app.overview.as_ref().unwrap().guide_scroll;
             assert!(end > 0 && end < u16::MAX);
             app.key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('k'),
@@ -3327,8 +3691,9 @@ mod tests {
             ))
             .unwrap();
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-            assert_eq!(app.overview.as_ref().unwrap().scroll, end - 1);
-            app.overview.as_mut().unwrap().scroll = 0;
+            assert_eq!(app.overview.as_ref().unwrap().guide_scroll, end - 1);
+            assert_eq!(app.overview.as_ref().unwrap().scroll, 0);
+            app.overview.as_mut().unwrap().guide_scroll = 0;
         }
     }
 

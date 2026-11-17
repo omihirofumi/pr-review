@@ -27,7 +27,7 @@ Install only the tools needed for the features you use, using your preferred ins
 | Open source in Helix | [Helix](https://docs.helix-editor.com/install.html) (`hx`) |
 | AI explanations | Codex or Claude CLI, installed and authenticated separately |
 
-Opening GitHub source also requires the isolated PR checkout tools. When using a custom [`HELIX_RUNTIME`](https://docs.helix-editor.com/building-from-source.html), keep it compatible with the `hx` binary on your `PATH`.
+Opening GitHub source in the isolated review workspace (`[editor] open_in = "workspace"`) also requires the isolated PR checkout tools. When using a custom [`HELIX_RUNTIME`](https://docs.helix-editor.com/building-from-source.html), keep it compatible with the `hx` binary on your `PATH`.
 
 ### Cargo
 
@@ -49,7 +49,7 @@ prpr diff --from main --to @    # Compare two revisions
 prpr diff --agent codex          # Override the AI provider for this launch
 ```
 
-Local reviews open directly in Diff. Use the same `j/k`, `gg/ge`, `[/]`, `v/x`, `+/-`, `F`, and `gf/e` controls as PR reviews. `Q` asks about selected lines or the current hunk; `E` explains it. `1` opens Overview, where `a` prepares a structured reading guide. AI configuration is shared with PR reviews.
+Local reviews open directly in Diff. Use the same `j/k`, `gg/ge`, `[/]`, `v/x`, `+/-`, `F`, and `gf/e` controls as PR reviews. `Q` asks about selected lines or the current hunk; `E` explains it. `1` opens Overview with the change description; `2` opens AI Guide, where `a` prepares a structured reading guide. AI configuration is shared with PR reviews.
 
 Press `c` to write a local note on a line or range, then `Ctrl-s` to save. `N` lists notes: `c` replies, `o` jumps to the source, and `d` deletes the selected note and its replies. `t` toggles inline notes; `T` reads full threads. Local notes persist across restarts. After `r` refreshes a native `prpr diff` review, notes on changed files are marked outdated rather than attached to different code.
 
@@ -115,7 +115,7 @@ Select a PR with `j` / `k` and press `o`. If you already know its number, open i
 
 The PR list has a compact table and a preview pane showing the selected PR's Markdown description. `j` / `k` changes the selected PR; `h` / `l` or `Tab` focuses the table / preview. Press `p` to hide or show the preview, `P` to switch its position, and `[` / `]` or `1` / `2` to switch between **Description** and **AI guide**. Narrow terminals place the preview below the table. `Ctrl-d` / `Ctrl-u` scroll the preview. Descriptions arrive with the list; browsing them does not load diffs or start an AI agent. Press `a` to prepare or reuse a guide for the selected PR.
 
-Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr 123` opens **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Diff and comments load independently in the background. Inside an opened PR, press `2` for Diff, `1` for Overview, or `Tab` / `Shift-Tab` to switch. With an AI agent configured, a structured reading guide appears in Overview without blocking navigation.
+Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr 123` opens **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Labels, CI status, conversation, diff, and inline comments load independently in the background. Inside an opened PR, press `1` for Overview, `2` for AI Guide, `3` for Diff, or `Tab` / `Shift-Tab` to cycle. With an AI agent configured, a structured reading guide appears in AI Guide without blocking navigation; the tab label shows whether it is loading, ready, or failed.
 
 In Diff:
 
@@ -134,6 +134,8 @@ To learn the controls without contacting GitHub, run `prpr --demo`. It starts on
 ## Command palette and file sidebar
 
 Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. Type words such as `sidebar`, `next hunk`, `explain diff`, or `checkout` to filter actions. Use arrows (or `Ctrl-n` / `Ctrl-p`) to select, `Enter` to run, and `Esc` or `Ctrl-k` to close. `Ctrl-u` clears the search; `Ctrl-h` deletes backward. Available actions follow the current view. Disabled actions show why they cannot run. Review submission still uses its existing summary and final confirmation screens.
+
+The file sidebar shows changed files as a tree. Chains of directories that each contain a single subdirectory are joined into one row, such as `api/core/src`, so deep package paths stay readable; long joined names keep their first and last directories, such as `main/…/globalexpert`.
 
 `Ctrl-b` hides or shows the file sidebar. Hiding it gives the diff the full width and preserves the current file, cursor, and selection. The setting lasts for the current app session, including file changes and refreshes. Press `h` to show and focus the file tree again. These shortcuts leave comment/question editors unchanged while you are typing.
 
@@ -161,11 +163,11 @@ toggle_sidebar = ["Space b"]
 open_file = []
 ```
 
-Bindings apply to the PR list, Overview, and Diff. Dialog navigation and comment/question editing controls stay fixed, including `Esc`, `Ctrl-s`, and `Ctrl-h`. `o` does **not** open source files in Diff by default; `gf` and `e` do. It still opens PRs in the list and reading-guide steps in Overview.
+Bindings apply to the PR list, Overview, AI Guide, and Diff. Dialog navigation and comment/question editing controls stay fixed, including `Esc`, `Ctrl-s`, and `Ctrl-h`. `o` does **not** open source files in Diff by default; `gf` and `e` do. It still opens PRs in the list and reading-guide steps in AI Guide.
 
 Use characters directly (`Q`, `]`, `+`), named keys (`Enter`, `Tab`, `Shift-Tab`, `Space`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F24`), and `Ctrl-`, `Alt-`, or `Shift-` combinations. Use the resulting character directly for shifted punctuation. Multi-key sequences use spaces, such as `Space b` or `g p`; familiar lowercase sequences such as `gf` also work. Sequences contain up to four keys, and `Esc` cancels a pending sequence.
 
-`Ctrl-c` remains reserved for immediate exit. Terminal aliases (`Ctrl-i`/`Tab`, `Ctrl-j` or `Ctrl-m`/`Enter`, `Ctrl-h`/`Backspace`, and `Ctrl-[`/`Esc`) are checked together. Duplicate keys and ambiguous prefixes are rejected when their actions share a view. For example, assigning `next_hunk = ["n"]` requires rebinding or disabling `next_file`, while Overview's `next_reading_step` may still use `n`.
+`Ctrl-c` remains reserved for immediate exit. Terminal aliases (`Ctrl-i`/`Tab`, `Ctrl-j` or `Ctrl-m`/`Enter`, `Ctrl-h`/`Backspace`, and `Ctrl-[`/`Esc`) are checked together. Duplicate keys and ambiguous prefixes are rejected when their actions share a view. For example, assigning `next_hunk = ["n"]` requires rebinding or disabling `next_file`, while AI Guide's `next_reading_step` may still use `n`.
 
 The palette, help, and footer display the effective keys. Inspect every action name and its applicable views without opening the TUI:
 
@@ -198,11 +200,11 @@ A repository is detected from the current directory, including subdirectories. A
 
 The inbox shows up to 100 open PRs. `/` filters the loaded inbox locally; `--search` queries GitHub within the selected repository. Press `#` from the inbox or review screen to open a PR by number without restarting.
 
-Description previews, full descriptions, Ask responses, and AI Overview use a shared dark Markdown theme. Headings, emphasis, links, tables, and inline code are styled; fenced code keeps its indentation in a shaded block. Prose wraps to a comfortable reading width, and scrollbars show the position in long content. AI guide sections use distinct headings and spacing.
+Description previews, full descriptions, Ask responses, and AI Guide use a shared dark Markdown theme. Headings, emphasis, links, tables, and inline code are styled; fenced code keeps its indentation in a shaded block. Prose wraps to a comfortable reading width, and scrollbars show the position in long content. AI guide sections use distinct headings and spacing.
 
 ## Overview and AI reading guide
 
-Press `A` in the PR list or either PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+Press `A` in the PR list or any PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None; selecting an agent enables automatic explanations. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
 
 Example configuration:
 
@@ -228,11 +230,13 @@ The explanation contains:
 - **Verification:** visible test evidence, suggested checks, and unknowns. No tests are run by the explanation agent.
 - **Coverage:** which complete patches were included, omitted by the context budget, or unavailable from GitHub.
 
-In Overview, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / `p` select a reading-guide step. Press `Enter`, `o`, or `gf` to jump to that step in Diff; press `gf` or `e` again there to prepare its checkout and open Helix. `b` opens the full author description.
+Overview shows what GitHub and people say about the PR: author and state, labels, a CI summary (latest run per check), the full author description, and the conversation. Failed and pending checks are listed above the description. The conversation merges PR comments and reviews with text in time order; minimized comments and reviews that only carry inline comments are omitted. HTML comments, such as PR template hints, are hidden as on GitHub. `r` refreshes everything, including CI.
+
+AI Guide shows what the agent says. There, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / `p` select a reading-guide step. Press `Enter`, `o`, or `gf` to jump to that step in Diff; press `gf` or `e` again there to open it in Helix. Labels, CI results, and the conversation are not sent to the agent.
 
 Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
 
-Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide. In an opened PR, `a` explicitly regenerates it; in the PR list, `a` prepares or reuses the selected PR's guide. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in Overview while the description and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
+Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide. In an opened PR, `a` explicitly regenerates it; in the PR list, `a` prepares or reuses the selected PR's guide. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in AI Guide while Overview and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
 
 ## Ask your agent and explain a diff
 
@@ -240,7 +244,7 @@ Explanations are cached under the application data directory. The cache is tied 
 
 - In Diff, press `Q` to ask about the current hunk. Select lines with `v` or repeated `x` first to ask about that range. AI questions can include both removed and added lines.
 - Press `E` to immediately explain the selected lines or current hunk: behavior before and after, purpose, how the change works, and review concerns.
-- In an opened PR's Overview, press `Q` to ask about the whole PR.
+- In an opened PR's Overview or AI Guide, press `Q` to ask about the whole PR.
 - Write a question and press `Ctrl-s` to send. `Enter` inserts a newline; `Ctrl-h` deletes backward. Write another question in the same panel for a follow-up.
 - `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation. `Esc` closes the panel and cancels its active request. Reopen with `Q` to continue the conversation.
 
@@ -258,7 +262,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 
 | Key | Action |
 | --- | --- |
-| `1` / `2`, `Tab` / `Shift-Tab` | Overview / Diff tabs |
+| `1` / `2` / `3`, `Tab` / `Shift-Tab` | Overview / AI Guide / Diff tabs |
 | `h` / `l` | Focus files / diff pane in Diff |
 | `a` / `A` | Prepare AI guide / choose and save an agent |
 | `Ctrl-k` | Search and run commands for the current view |
@@ -279,7 +283,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `+` / `-` | Expand 20 context lines / collapse current context |
 | `F` | Toggle full-file context |
 | `t` | Toggle inline comments, replies, and local drafts |
-| `T` / `V` | Full inline thread list / published reviews |
+| `T` / `V` | Full inline thread list / PR conversation and reviews |
 | `#` | Open a PR by number in the selected repository |
 | `o` | Open the selected PR or saved item |
 | `w` / `e` | Prepare checkout / open source in Helix |
@@ -314,11 +318,26 @@ The application creates its own Jujutsu repositories and revision-specific revie
 
 The workspace path appears after checkout. Open a shell there to run tests or inspect additional files. If that workspace has local edits or has moved to another revision, the app refuses to reuse it and reports the preserved path.
 
-LEFT-side source opens a read-only snapshot from the diff merge base, including the previous filename for renamed files. RIGHT-side source opens from the PR head. Symlinks are refused as source locations.
-
 Drafts are written atomically and scoped to the repository, PR number, head SHA, and diff-base SHA. They survive restarts. Refreshing to a different revision leaves previous drafts on disk and starts a separate set; it does not move comments to potentially unrelated lines.
 
 GitHub access uses your existing `gh` authentication. Checkout fetches `refs/pull/<number>/head` from the base repository, so fork PRs use the same workflow. Raw Git is used only to fetch arbitrary PR refs into the isolated Jujutsu store; workspace management and revision inspection use `jj`.
+
+## Opening GitHub PR source in Helix
+
+By default, `gf` / `e` open the repository you launched prpr from, as it is now:
+
+- A RIGHT-side (added or context) line opens that file in your checkout at the PR's line number. Your checkout may be on another revision, so the content can differ from the PR head; the status line says so after Helix exits.
+- A LEFT-side (deleted) line opens a read-only copy of the diff merge base fetched from GitHub, using the previous filename for renamed files.
+- A file missing from your checkout, or a PR from a different repository than the launch directory, opens a read-only copy of the PR head.
+
+To open source in an isolated review workspace pinned to the PR head instead, opt in:
+
+```toml
+[editor]
+open_in = "workspace"   # default: "repository"
+```
+
+In workspace mode, the first `gf` prepares the workspace (as `w` does). LEFT-side source opens a read-only snapshot from the diff merge base, including the previous filename for renamed files; RIGHT-side source opens from the PR head. Symlinks are refused as source locations.
 
 ## Recovering an uncertain submission
 
@@ -329,7 +348,7 @@ Use `V` to inspect published reviews and `T` to inspect inline comments, then pr
 ## Current limits
 
 - GitHub.com repositories only.
-- Unified diffs with single-line and multiline range comments. Existing threads can be read; replying to or resolving a thread is not yet supported. PR conversation comments are not loaded.
+- Unified diffs with single-line and multiline range comments. Existing threads can be read; replying to or resolving a thread is not yet supported. PR conversation comments are read-only.
 - No textual review for binary files or files whose patch GitHub omits. Malformed or truncated hunks remain visible but cannot receive comments.
 - Merge, suggestion application, and CI-log viewing are outside the review workflow.
 - Working-copy edits are preserved, but the app does not offer to reset them.

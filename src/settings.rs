@@ -80,10 +80,28 @@ impl AiConfig {
     }
 }
 
+/// Where GitHub PR source opens in Helix.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenIn {
+    /// The checkout prpr was launched from, as it is now; files absent there open read-only.
+    #[default]
+    Repository,
+    /// An isolated Jujutsu workspace pinned to the PR head.
+    Workspace,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EditorConfig {
+    pub open_in: OpenIn,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub ai: AiConfig,
+    pub editor: EditorConfig,
     pub keybindings: crate::keybindings::Keybindings,
 }
 

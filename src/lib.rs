@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod assistant;
+pub mod cache;
 pub mod context;
 pub mod diff;
 pub mod github;

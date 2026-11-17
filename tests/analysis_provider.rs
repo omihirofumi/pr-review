@@ -315,6 +315,15 @@ fn provider_fixture_child() {
                 assert_eq!(calls(&root).len(), expected);
             };
             run(&overview, &review, &config, 1);
+            let entries = std::fs::read_dir(
+                root.join("cache")
+                    .join(&overview.id.repo)
+                    .join(overview.id.number.to_string()),
+            )
+            .unwrap()
+            .count();
+            assert_eq!(entries, 1);
+            assert!(!root.join("cache/analysis").exists());
             overview
                 .body
                 .push_str("The author clarified the failure mode.\n");
@@ -392,7 +401,7 @@ fn provider_fixture_child() {
         | "missing_line" | "provider_error" | "too_much_output" => {
             let error = result.unwrap_err();
             assert!(!format!("{error:#}").contains("PRIVATE_SENTINEL"));
-            assert!(!root.join("cache/analysis").exists());
+            assert!(!root.join("cache").exists());
         }
         other => panic!("Unknown scenario: {other}"),
     }

@@ -1,7 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet},
     fs,
-    hash::{Hash, Hasher},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -446,12 +445,9 @@ fn validate_repository(repo: &str) -> Result<()> {
 }
 
 fn cache_path(root: &Path, overview: &PrOverview, identity: &str) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    identity.hash(&mut hasher);
-    root.join("analysis")
-        .join(&overview.id.repo)
+    root.join(&overview.id.repo)
         .join(overview.id.number.to_string())
-        .join(format!("{:016x}.json", hasher.finish()))
+        .join(crate::cache::file_name(identity))
 }
 
 fn save_cache(path: &Path, entry: &CacheEntry) -> Result<()> {

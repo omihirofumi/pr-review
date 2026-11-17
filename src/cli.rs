@@ -3,7 +3,7 @@ mod session;
 use crate::{app, store, ui};
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc,
@@ -25,7 +25,7 @@ use directories::ProjectDirs;
 use prpr::{
     analysis, assistant, context, github, local,
     model::*,
-    settings::{self, Provider},
+    settings::{self, OpenIn, Provider},
     workspace,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -187,6 +187,10 @@ pub(crate) enum JobResult {
     Comments {
         generation: u64,
         result: Result<Vec<ReviewComment>>,
+    },
+    PrActivity {
+        generation: u64,
+        result: Result<PrActivity>,
     },
     Analysis {
         generation: u64,
@@ -384,6 +388,11 @@ pub fn run() -> Result<()> {
         print!("{}", settings.keybindings.print()?);
         return Ok(());
     }
+    let repository_given = args.repo.is_some()
+        || args
+            .target
+            .as_deref()
+            .is_some_and(|target| target.starts_with("https://"));
     let (args, target) = args.resolve()?;
     let mut app = App::new(root, args.demo);
     app.repo = args.repo.clone();
@@ -412,6 +421,14 @@ pub fn run() -> Result<()> {
         }),
         _ => None,
     };
+    if app.local_spec.is_none() && !args.demo {
+        let launched_from = if repository_given {
+            github::resolve_repo(None).ok()
+        } else {
+            app.repo.clone()
+        };
+        app.checkout = local::checkout_root(&origin).zip(launched_from);
+    }
     let session = session::Server::start(&app.root, repository)?;
     if args.demo {
         let demo = app::demo_data();
@@ -553,6 +570,7 @@ pub fn run() -> Result<()> {
                 | JobResult::Overview { .. }
                 | JobResult::Diff { .. }
                 | JobResult::Comments { .. }
+                | JobResult::PrActivity { .. }
                 | JobResult::Analysis { .. }
                 | JobResult::PreviewContext { .. }
                 | JobResult::PreviewGuide { .. }
@@ -615,6 +633,9 @@ pub(crate) fn apply_background(
                     metadata.state = "local".into();
                     app.open_on_diff = true;
                     app.opened(metadata);
+                    if let Some(overview) = &mut app.overview {
+                        overview.activity = app::ActivityStatus::Unavailable;
+                    }
                     app.local_contents = snapshot.contents;
                     if let Err(error) = app.accept_diff(snapshot.data) {
                         app.diff_loading = false;
@@ -793,6 +814,7 @@ pub(crate) fn apply_background(
                     app.opened(metadata.clone());
                     app.comments_loading = true;
                     spawn_diff(sender, generation, metadata.clone());
+                    spawn_activity(sender, generation, metadata.id.clone());
                     let sender = sender.clone();
                     thread::spawn(move || {
                         let _ = sender.send(JobResult::Comments {
@@ -853,6 +875,17 @@ pub(crate) fn apply_background(
                 ),
             }
         }
+        JobResult::PrActivity { generation, result } => {
+            if generation != app.generation {
+                return None;
+            }
+            if let Some(overview) = &mut app.overview {
+                overview.activity = match result {
+                    Ok(activity) => app::ActivityStatus::Ready(activity),
+                    Err(error) => app::ActivityStatus::Error(format!("{error:#}")),
+                };
+            }
+        }
         JobResult::Analysis {
             generation,
             request,
@@ -871,6 +904,16 @@ pub(crate) fn apply_background(
         foreground => return Some(foreground),
     }
     None
+}
+
+fn spawn_activity(sender: &mpsc::Sender<JobResult>, generation: u64, id: PrId) {
+    let sender = sender.clone();
+    thread::spawn(move || {
+        let _ = sender.send(JobResult::PrActivity {
+            generation,
+            result: github::load_activity(&id),
+        });
+    });
 }
 
 fn spawn_diff(sender: &mpsc::Sender<JobResult>, generation: u64, metadata: PrOverview) {
@@ -1278,6 +1321,7 @@ fn dispatch(
             app.accept_diff(data)?;
             if let Some(overview) = &mut app.overview {
                 overview.ai = app::AiStatus::Ready(sample_guide(&app::demo_data()));
+                overview.activity = app::ActivityStatus::Ready(app::demo_activity());
             }
         } else {
             app.message("Demo is offline. Nothing was sent to GitHub.", false);
@@ -1325,9 +1369,9 @@ fn dispatch(
             });
         }
         Action::Activity(id) => {
-            app.message("Loading published reviews...", false);
+            app.message("Loading the PR conversation and reviews...", false);
             thread::spawn(move || {
-                let _ = sender.send(JobResult::Activity(github::reviews_text(&id)));
+                let _ = sender.send(JobResult::Activity(github::conversation_text(&id)));
             });
         }
         Action::Prepare { pr, open_editor } => {
@@ -1392,11 +1436,25 @@ fn dispatch(
     Ok(())
 }
 
+fn read_only_snapshot(directory: &Path, filename: &str, text: &str) -> Result<PathBuf> {
+    let path = directory.join(
+        Path::new(filename)
+            .file_name()
+            .context("Invalid filename")?,
+    );
+    std::fs::write(&path, text)?;
+    let mut permissions = std::fs::metadata(&path)?.permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
 fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarget) {
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<&'static str> {
         let review = app.review.as_ref().context("No review is open")?;
         let line = target.line;
         let snapshot_directory;
+        let mut opened = "Returned from Helix. Review position preserved.";
         let (workspace, path) = if let ReviewSource::Local { repository, .. } = &review.data.source
         {
             local::validate_path(&target.file.filename)?;
@@ -1419,18 +1477,11 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
                 (repository.as_path(), candidate)
             } else {
                 snapshot_directory = tempfile::tempdir()?;
-                let path = snapshot_directory.path().join(
-                    std::path::Path::new(&target.file.filename)
-                        .file_name()
-                        .context("Invalid filename")?,
-                );
-                std::fs::write(&path, text)?;
-                let mut permissions = std::fs::metadata(&path)?.permissions();
-                permissions.set_readonly(true);
-                std::fs::set_permissions(&path, permissions)?;
+                let path =
+                    read_only_snapshot(snapshot_directory.path(), &target.file.filename, text)?;
                 (repository.as_path(), path)
             }
-        } else {
+        } else if app.settings.editor.open_in == OpenIn::Workspace {
             let workspace = review
                 .workspace
                 .as_ref()
@@ -1443,6 +1494,54 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
                 workspace,
             )?;
             (workspace.as_path(), path)
+        } else {
+            let pr = &review.data.pr;
+            let relative = match target.side {
+                Side::Left => target
+                    .file
+                    .previous_filename
+                    .as_deref()
+                    .unwrap_or(&target.file.filename),
+                Side::Right => &target.file.filename,
+            };
+            local::validate_path(relative)?;
+            let checkout = app
+                .checkout
+                .as_ref()
+                .filter(|(_, repo)| *repo == pr.id.repo)
+                .map(|(root, _)| root);
+            let existing = checkout
+                .filter(|_| target.side == Side::Right)
+                .map(|root| (root, root.join(relative)))
+                .filter(|(root, candidate)| {
+                    candidate.is_file()
+                        && candidate
+                            .canonicalize()
+                            .is_ok_and(|path| path.starts_with(root))
+                });
+            if let Some((root, candidate)) = existing {
+                opened = "Returned from Helix. It showed your checkout as it is now, which may differ from the PR head.";
+                (root.as_path(), candidate)
+            } else {
+                let (revision, label) = match target.side {
+                    Side::Left => (&pr.base_sha, "base"),
+                    Side::Right => (&pr.head_sha, "head"),
+                };
+                let text = github::file_at(&pr.id.repo, relative, revision).with_context(|| {
+                    format!("Cannot open a read-only copy of the PR {label}; set [editor] open_in = \"workspace\" to use a checkout")
+                })?;
+                snapshot_directory = tempfile::tempdir()?;
+                let path = read_only_snapshot(snapshot_directory.path(), relative, &text)?;
+                opened = if target.side == Side::Left {
+                    "Returned from Helix. It showed a read-only copy from the PR base."
+                } else {
+                    "Returned from Helix. The file is not in your checkout, so it showed a read-only copy from the PR head."
+                };
+                (
+                    checkout.map_or(snapshot_directory.path(), PathBuf::as_path),
+                    path,
+                )
+            }
         };
         disable_raw_mode()?;
         execute!(
@@ -1471,10 +1570,10 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
         if !result?.success() {
             bail!("Helix exited unsuccessfully");
         }
-        Ok(())
+        Ok(opened)
     })();
     match result {
-        Ok(()) => app.message("Returned from Helix. Review position preserved.", false),
+        Ok(opened) => app.message(opened, false),
         Err(error) => app.message(format!("{error:#}"), true),
     }
 }

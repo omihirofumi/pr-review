@@ -1,7 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
     fmt, fs,
-    hash::{Hash, Hasher},
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
@@ -18,8 +16,8 @@ use crate::{
     context::{FileContext, FullFile},
     diff::validate_comment,
     model::{
-        ChangedFile, DraftComment, PrId, PrOverview, PrSummary, PullRequest, ReviewComment,
-        ReviewData, ReviewEvent,
+        ChangedFile, Check, CheckState, ConversationEntry, DraftComment, PrActivity, PrId,
+        PrOverview, PrSummary, PullRequest, ReviewComment, ReviewData, ReviewEvent,
     },
 };
 
@@ -59,11 +57,9 @@ pub fn load_file_context(
     let identity = serde_json::to_string(
         &json!({"repo": pr.id.repo, "base": pr.base_sha, "head": pr.head_sha, "file": file}),
     )?;
-    let mut hasher = DefaultHasher::new();
-    identity.hash(&mut hasher);
     let path = cache_root
         .join(&pr.id.repo)
-        .join(format!("{:016x}.json", hasher.finish()));
+        .join(crate::cache::file_name(&identity));
     if let Ok(bytes) = fs::read(&path)
         && bytes.len() <= MAX_CONTEXT_BYTES * 4
         && let Ok(entry) = serde_json::from_slice::<CachedContext>(&bytes)
@@ -121,7 +117,7 @@ pub fn load_file_context(
     Ok(source)
 }
 
-fn file_at(repo: &str, path: &str, revision: &str) -> Result<String> {
+pub fn file_at(repo: &str, path: &str, revision: &str) -> Result<String> {
     ensure!(
         !path.is_empty()
             && !path.contains('\0')
@@ -472,29 +468,149 @@ pub fn load_review(id: &PrId) -> Result<ReviewData> {
     })
 }
 
-pub fn reviews_text(id: &PrId) -> Result<String> {
+pub fn load_activity(id: &PrId) -> Result<PrActivity> {
     validate_id(id)?;
-    let reviews: Vec<ApiReview> = paginated(&format!(
-        "repos/{}/pulls/{}/reviews?per_page=100",
-        id.repo, id.number
-    ))?;
-    if reviews.is_empty() {
-        return Ok("No reviews found.".into());
+    let number = id.number.to_string();
+    let view: ApiActivity = gh_json(&[
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        &id.repo,
+        "--json",
+        "labels,statusCheckRollup,comments,reviews",
+    ])?;
+    Ok(activity(view))
+}
+
+pub fn conversation_text(id: &PrId) -> Result<String> {
+    let activity = load_activity(id)?;
+    if activity.conversation.is_empty() {
+        return Ok("No conversation comments or reviews found.".into());
     }
-    Ok(reviews
-        .into_iter()
-        .map(|review| {
+    Ok(activity
+        .conversation
+        .iter()
+        .map(|entry| {
             format!(
-                "@{} | {} | commit {}\n{}\n{}",
-                login(review.user),
-                review.state,
-                review.commit_id,
-                review.html_url,
-                review.body.unwrap_or_default()
+                "@{} | {} | {}\n{}",
+                entry.author,
+                entry.action,
+                entry.time(),
+                entry.body
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n"))
+}
+
+fn activity(view: ApiActivity) -> PrActivity {
+    let mut latest = Vec::<(String, String, Check)>::new();
+    for item in view.status_check_rollup {
+        let (key, started, check) = match item {
+            ApiCheck::CheckRun {
+                name,
+                workflow_name,
+                status,
+                conclusion,
+                details_url,
+                started_at,
+            } => {
+                let conclusion = conclusion.unwrap_or_default();
+                let (state, detail) = if status != "COMPLETED" {
+                    (CheckState::Pending, status.to_lowercase())
+                } else {
+                    (check_run_state(&conclusion), conclusion.to_lowercase())
+                };
+                let display = match workflow_name.filter(|workflow| !workflow.is_empty()) {
+                    Some(workflow) => format!("{workflow} / {name}"),
+                    None => name,
+                };
+                (
+                    display.clone(),
+                    started_at.unwrap_or_default(),
+                    Check {
+                        name: display,
+                        state,
+                        detail: detail.replace('_', " "),
+                        url: details_url.filter(|url| !url.is_empty()),
+                    },
+                )
+            }
+            ApiCheck::StatusContext {
+                context,
+                state,
+                target_url,
+                started_at,
+            } => (
+                context.clone(),
+                started_at.unwrap_or_default(),
+                Check {
+                    name: context,
+                    state: match state.as_str() {
+                        "SUCCESS" => CheckState::Passed,
+                        "PENDING" | "EXPECTED" => CheckState::Pending,
+                        _ => CheckState::Failed,
+                    },
+                    detail: state.to_lowercase(),
+                    url: target_url.filter(|url| !url.is_empty()),
+                },
+            ),
+            ApiCheck::Unknown => continue,
+        };
+        match latest.iter_mut().find(|(existing, ..)| *existing == key) {
+            Some(entry) if entry.1 <= started => *entry = (key, started, check),
+            Some(_) => {}
+            None => latest.push((key, started, check)),
+        }
+    }
+    let mut checks = latest
+        .into_iter()
+        .map(|(.., check)| check)
+        .collect::<Vec<_>>();
+    checks.sort_by(|left, right| (left.state, &left.name).cmp(&(right.state, &right.name)));
+    let mut conversation = view
+        .comments
+        .into_iter()
+        .filter(|comment| !comment.is_minimized)
+        .map(|comment| ConversationEntry {
+            author: login(comment.author),
+            action: "commented".into(),
+            created_at: comment.created_at,
+            body: comment.body,
+        })
+        .chain(
+            view.reviews
+                .into_iter()
+                .filter(|review| review.state != "COMMENTED" || !review.body.trim().is_empty())
+                .map(|review| ConversationEntry {
+                    author: login(review.author),
+                    action: match review.state.as_str() {
+                        "APPROVED" => "approved".into(),
+                        "CHANGES_REQUESTED" => "requested changes".into(),
+                        "COMMENTED" => "reviewed".into(),
+                        "DISMISSED" => "review dismissed".into(),
+                        other => other.to_lowercase().replace('_', " "),
+                    },
+                    created_at: review.submitted_at.unwrap_or_default(),
+                    body: review.body,
+                }),
+        )
+        .collect::<Vec<_>>();
+    conversation.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    PrActivity {
+        labels: view.labels.into_iter().map(|label| label.name).collect(),
+        checks,
+        conversation,
+    }
+}
+
+fn check_run_state(conclusion: &str) -> CheckState {
+    match conclusion {
+        "SUCCESS" => CheckState::Passed,
+        "NEUTRAL" | "SKIPPED" | "CANCELLED" => CheckState::Skipped,
+        _ => CheckState::Failed,
+    }
 }
 
 pub fn submit_review(
@@ -767,12 +883,69 @@ struct ApiComment {
 }
 
 #[derive(Deserialize)]
-struct ApiReview {
-    user: Option<ApiUser>,
+#[serde(rename_all = "camelCase")]
+struct ApiActivity {
+    #[serde(default)]
+    labels: Vec<ApiLabel>,
+    #[serde(default)]
+    status_check_rollup: Vec<ApiCheck>,
+    #[serde(default)]
+    comments: Vec<ApiConversationComment>,
+    #[serde(default)]
+    reviews: Vec<ApiConversationReview>,
+}
+
+#[derive(Deserialize)]
+struct ApiLabel {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "__typename")]
+enum ApiCheck {
+    #[serde(rename_all = "camelCase")]
+    CheckRun {
+        name: String,
+        workflow_name: Option<String>,
+        #[serde(default)]
+        status: String,
+        conclusion: Option<String>,
+        details_url: Option<String>,
+        started_at: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    StatusContext {
+        context: String,
+        #[serde(default)]
+        state: String,
+        target_url: Option<String>,
+        started_at: Option<String>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiConversationComment {
+    author: Option<ApiUser>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    is_minimized: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiConversationReview {
+    author: Option<ApiUser>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
     state: String,
-    commit_id: String,
-    html_url: String,
-    body: Option<String>,
+    submitted_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -790,6 +963,56 @@ struct SearchPr {
 mod tests {
     use super::*;
     use crate::model::Side;
+
+    #[test]
+    fn activity_keeps_latest_check_runs_and_meaningful_conversation() {
+        let view: ApiActivity = serde_json::from_value(json!({
+            "labels": [{"name": "api"}],
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2026-01-01T00:00:00Z"},
+                {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-01-02T00:00:00Z"},
+                {"__typename": "CheckRun", "name": "lint", "workflowName": "CI", "status": "IN_PROGRESS", "conclusion": null},
+                {"__typename": "StatusContext", "context": "deploy", "state": "ERROR", "targetUrl": ""},
+                {"__typename": "FutureCheckKind"}
+            ],
+            "comments": [
+                {"author": {"login": "bot"}, "body": "hidden", "createdAt": "2026-01-01T00:00:00Z", "isMinimized": true},
+                {"author": {"login": "alice"}, "body": "Question", "createdAt": "2026-01-03T00:00:00Z", "isMinimized": false}
+            ],
+            "reviews": [
+                {"author": {"login": "bob"}, "body": "", "state": "COMMENTED", "submittedAt": "2026-01-02T00:00:00Z"},
+                {"author": {"login": "carol"}, "body": "", "state": "APPROVED", "submittedAt": "2026-01-04T00:00:00Z"},
+                {"author": {"login": "dan"}, "body": "Summary", "state": "COMMENTED", "submittedAt": "2026-01-02T12:00:00Z"}
+            ]
+        }))
+        .unwrap();
+        let activity = activity(view);
+        assert_eq!(activity.labels, ["api"]);
+        assert_eq!(
+            activity
+                .checks
+                .iter()
+                .map(|check| (check.name.as_str(), check.state, check.url.is_some()))
+                .collect::<Vec<_>>(),
+            [
+                ("deploy", CheckState::Failed, false),
+                ("CI / lint", CheckState::Pending, false),
+                ("CI / build", CheckState::Passed, false),
+            ]
+        );
+        assert_eq!(
+            activity
+                .conversation
+                .iter()
+                .map(|entry| (entry.author.as_str(), entry.action.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("dan", "reviewed"),
+                ("alice", "commented"),
+                ("carol", "approved")
+            ]
+        );
+    }
 
     #[test]
     fn parses_urls_numbers_and_repository_conflicts() {

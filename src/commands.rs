@@ -169,13 +169,6 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 )
                 .disabled_if(app.busy, busy),
                 Command::new(
-                    "Read published GitHub reviews",
-                    "V",
-                    'V',
-                    "activity summaries",
-                )
-                .disabled_if(app.busy, busy),
-                Command::new(
                     "Recover uncertain GitHub submission",
                     "u",
                     'u',
@@ -205,8 +198,19 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
     }
     if app.overview.is_some() {
         commands.extend([
-            Command::new("Show Overview", "1", '1', "description title ai guide"),
-            Command::new("Show Diff", "2", '2', "code changes files"),
+            Command::new(
+                "Show Overview",
+                "1",
+                '1',
+                "description title labels ci checks conversation comments",
+            ),
+            Command::new(
+                "Show AI Guide",
+                "2",
+                '2',
+                "summary intent risks reading order",
+            ),
+            Command::new("Show Diff", "3", '3', "code changes files"),
             Command::new(
                 "Read full change description",
                 "b",
@@ -214,6 +218,17 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "body author markdown",
             ),
         ]);
+    }
+    if app.overview.is_some() && !local {
+        commands.push(
+            Command::new(
+                "Read PR conversation and reviews",
+                "V",
+                'V',
+                "comments activity summaries published",
+            )
+            .disabled_if(app.busy, busy),
+        );
     }
     if app.overview.is_some() || (app.review.is_none() && !local) {
         commands.extend([

@@ -149,6 +149,7 @@ fn busy_review_cannot_switch_revision_or_start_mutations() {
 fn asynchronous_editor_request_keeps_the_original_file_and_line() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = App::new(dir.path().into(), false);
+    app.settings.editor.open_in = prpr::settings::OpenIn::Workspace;
     app.loaded(app::demo_data()).unwrap();
     let target = match app.key(key(KeyCode::Char('e'))).unwrap() {
         Action::Prepare {

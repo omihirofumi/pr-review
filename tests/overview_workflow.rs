@@ -118,9 +118,15 @@ fn overview_and_diff_tabs_remain_switchable_while_the_diff_is_pending() {
     let mut app = App::new(directory.path().into(), false);
     app.opened(overview());
     press(&mut app, '2').unwrap();
+    assert_eq!(app.tab, PageTab::Guide);
+    press(&mut app, '3').unwrap();
     assert_eq!(app.tab, PageTab::Diff);
     assert!(app.review.is_none());
     app.key(key(KeyCode::Tab)).unwrap();
+    assert_eq!(app.tab, PageTab::Overview);
+    app.key(key(KeyCode::Tab)).unwrap();
+    assert_eq!(app.tab, PageTab::Guide);
+    app.key(key(KeyCode::BackTab)).unwrap();
     assert_eq!(app.tab, PageTab::Overview);
     app.key(key(KeyCode::BackTab)).unwrap();
     assert_eq!(app.tab, PageTab::Diff);
@@ -175,19 +181,23 @@ fn reading_guide_jumps_to_the_requested_side_and_numbered_source_line() {
 
     press(&mut app, 'n').unwrap();
     app.key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.tab, PageTab::Overview, "Overview has no reading steps");
+    press(&mut app, '2').unwrap();
+    press(&mut app, 'n').unwrap();
+    app.key(key(KeyCode::Enter)).unwrap();
     let review = app.review.as_ref().unwrap();
     assert_eq!(review.current_file().unwrap().filename, "src/client.rs");
     assert_eq!(review.current_lines()[review.position()].old_line, Some(20));
     assert_eq!(review.focus, Focus::Diff);
     assert_eq!(app.tab, PageTab::Diff);
 
-    press(&mut app, '1').unwrap();
+    press(&mut app, '2').unwrap();
     press(&mut app, 'n').unwrap();
     app.key(key(KeyCode::Enter)).unwrap();
     let review = app.review.as_ref().unwrap();
     assert_eq!(review.current_lines()[review.position()].new_line, Some(24));
 
-    press(&mut app, '1').unwrap();
+    press(&mut app, '2').unwrap();
     press(&mut app, 'p').unwrap();
     press(&mut app, 'p').unwrap();
     press(&mut app, 'g').unwrap();
@@ -203,8 +213,9 @@ fn reading_guide_cannot_jump_until_the_diff_is_available() {
     let mut app = App::new(directory.path().into(), false);
     app.opened(overview());
     app.overview.as_mut().unwrap().ai = AiStatus::Ready(Box::new(analysis()));
+    app.tab = PageTab::Guide;
     assert!(app.key(key(KeyCode::Enter)).is_err());
-    assert_eq!(app.tab, PageTab::Overview);
+    assert_eq!(app.tab, PageTab::Guide);
     assert!(app.review.is_none());
 }
 
@@ -1531,10 +1542,7 @@ fn unbound_shortcuts_leave_palette_actions_available_and_canonical_keys_cannot_b
     assert!(matches!(press(&mut app, 'f').unwrap(), Action::None));
     assert!(matches!(
         palette_run(&mut app, "helix"),
-        Action::Prepare {
-            open_editor: Some(_),
-            ..
-        }
+        Action::OpenEditor(_)
     ));
     app.review.as_mut().unwrap().positions[0] = 3;
     palette_run(&mut app, "previous hunk");
@@ -1547,10 +1555,7 @@ fn unbound_shortcuts_leave_palette_actions_available_and_canonical_keys_cannot_b
     app.settings.keybindings.validate().unwrap();
     assert!(matches!(
         press(&mut app, 'o').unwrap(),
-        Action::Prepare {
-            open_editor: Some(_),
-            ..
-        }
+        Action::OpenEditor(_)
     ));
 }
 

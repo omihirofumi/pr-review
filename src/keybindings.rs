@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum View {
     Inbox,
     Overview,
+    Guide,
     Diff,
 }
 
@@ -16,6 +17,7 @@ impl View {
         match self {
             Self::Inbox => I,
             Self::Overview => O,
+            Self::Guide => G,
             Self::Diff => D,
         }
     }
@@ -23,6 +25,7 @@ impl View {
         match self {
             Self::Inbox => "PR list",
             Self::Overview => "Overview",
+            Self::Guide => "AI Guide",
             Self::Diff => "Diff",
         }
     }
@@ -31,8 +34,18 @@ impl View {
 const I: u8 = 1;
 const O: u8 = 2;
 const D: u8 = 4;
-const ALL: u8 = I | O | D;
-const REVIEW: u8 = O | D;
+const G: u8 = 8;
+const ALL: u8 = I | O | G | D;
+const REVIEW: u8 = O | G | D;
+
+pub const HELP_GROUPS: &[(u8, &str)] = &[
+    (ALL, "GENERAL"),
+    (REVIEW, "OPEN REVIEW"),
+    (I, "PR LIST"),
+    (O, "OVERVIEW"),
+    (G, "AI GUIDE"),
+    (D, "DIFF"),
+];
 
 pub struct BindingSpec {
     pub id: &'static str,
@@ -46,7 +59,7 @@ impl BindingSpec {
         self.scope & view.flag() != 0
     }
     pub fn views(&self) -> String {
-        [View::Inbox, View::Overview, View::Diff]
+        [View::Inbox, View::Overview, View::Guide, View::Diff]
             .into_iter()
             .filter(|view| self.applies(*view))
             .map(View::name)
@@ -84,7 +97,8 @@ specs! {
     ("next_view", "Switch view / focus", ALL, ["Tab"]),
     ("previous_view", "Switch view / focus backward", ALL, ["Shift-Tab"]),
     ("overview", "Show Overview", REVIEW, ["1"]),
-    ("diff", "Show Diff", REVIEW, ["2"]),
+    ("guide", "Show AI Guide", REVIEW, ["2"]),
+    ("diff", "Show Diff", REVIEW, ["3"]),
     ("ask", "Ask AI", REVIEW, ["Q"]),
     ("explain_diff", "Explain diff or selection", REVIEW, ["E"]),
     ("ai_guide", "Prepare AI reading guide", ALL, ["a"]),
@@ -121,11 +135,11 @@ specs! {
     ("checkout", "Prepare Jujutsu review workspace", D, ["w"]),
     ("open_file", "Open source in Helix", D, ["gf", "e"]),
     ("review_summary", "Write GitHub review summary", D, ["s"]),
-    ("review_activity", "Read published GitHub reviews", D, ["V"]),
+    ("review_activity", "Read PR conversation and reviews", REVIEW, ["V"]),
     ("recover_review", "Recover uncertain GitHub submission", D, ["u"]),
-    ("next_reading_step", "Next reading-guide step", O, ["n"]),
-    ("previous_reading_step", "Previous reading-guide step", O, ["p"]),
-    ("open_reading_step", "Open reading-guide step in Diff", O, ["Enter", "o", "gf"]),
+    ("next_reading_step", "Next reading-guide step", G, ["n"]),
+    ("previous_reading_step", "Previous reading-guide step", G, ["p"]),
+    ("open_reading_step", "Open reading-guide step in Diff", G, ["Enter", "o", "gf"]),
     ("focus_pr_list", "Focus PR list", I, ["h", "Left"]),
     ("focus_preview", "Focus PR preview", I, ["l", "Right"]),
     ("toggle_preview", "Toggle PR preview", I, ["p"]),
@@ -386,7 +400,7 @@ impl Keybindings {
                 "Unknown shortcut action {id}; use --print-keybindings to list action names"
             );
         }
-        for view in [View::Inbox, View::Overview, View::Diff] {
+        for view in [View::Inbox, View::Overview, View::Guide, View::Diff] {
             let mut seen: Vec<(Vec<Stroke>, &str)> = Vec::new();
             for spec in SPECS.iter().filter(|spec| spec.applies(view)) {
                 for text in self.keys(spec.id) {

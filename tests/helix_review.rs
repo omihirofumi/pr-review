@@ -404,15 +404,12 @@ fn gf_captures_the_active_deleted_source_line() {
     app.review.as_mut().unwrap().positions[0] = 2;
     app.key(key('g')).unwrap();
     match app.key(key('f')).unwrap() {
-        Action::Prepare {
-            open_editor: Some(target),
-            ..
-        } => {
+        Action::OpenEditor(target) => {
             assert_eq!(target.file.filename, "a.rs");
             assert_eq!(target.side, Side::Left);
             assert_eq!(target.line, 11);
         }
-        _ => panic!("gf must prepare an editor target for the active source line"),
+        _ => panic!("gf must open an editor target for the active source line"),
     }
     assert!(!app.goto_pending);
 }

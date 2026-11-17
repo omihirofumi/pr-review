@@ -79,6 +79,23 @@ pub fn repository(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(run(jj(path).arg("root"))?.trim()).canonicalize()?)
 }
 
+/// Prefers the Jujutsu root so colocated workspaces resolve the same way as `prpr diff`.
+pub fn checkout_root(path: &Path) -> Option<PathBuf> {
+    repository(path).ok().or_else(|| {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(path)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        PathBuf::from(String::from_utf8(output.stdout).ok()?.trim())
+            .canonicalize()
+            .ok()
+    })
+}
+
 fn load_jj(
     cwd: &Path,
     revision: Option<&str>,
