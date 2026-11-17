@@ -138,6 +138,7 @@ specs! {
     ("open_file", "Open source in Helix", D, ["gf", "e"]),
     ("copy_selection", "Copy selected lines as Markdown", D, ["y"]),
     ("toggle_split", "Toggle unified / split diff", D, ["|"]),
+    ("toggle_wrap", "Toggle line wrapping in the diff", D, ["W"]),
     ("copy_permalink", "Copy GitHub permalink to selected lines", D, ["gy", "Y"]),
     ("review_summary", "Write GitHub review summary", D, ["s"]),
     ("review_activity", "Read PR conversation and reviews", REVIEW, ["V"]),

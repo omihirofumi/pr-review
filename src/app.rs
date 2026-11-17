@@ -933,6 +933,8 @@ pub enum Action {
 pub struct App {
     /// Layout chosen with the toggle for this session, overriding `[diff] layout`.
     pub diff_split: Option<bool>,
+    /// Overrides `diff.wrap` from the configuration for this run.
+    pub diff_wrap: Option<bool>,
     /// Layout used by the last draw, so the toggle flips what is on screen.
     pub split_shown: std::cell::Cell<bool>,
     pub ai_reviews: HashMap<String, AiReviewStatus>,
@@ -982,6 +984,7 @@ impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
             diff_split: None,
+            diff_wrap: None,
             split_shown: std::cell::Cell::new(false),
             ai_reviews: HashMap::new(),
             requested: None,
@@ -1234,6 +1237,10 @@ impl App {
     }
 
     /// Adds agent-prepared notes, skipping ones already saved, and shows the first of them.
+    pub fn wrap(&self) -> bool {
+        self.diff_wrap.unwrap_or(self.settings.diff.wrap)
+    }
+
     pub fn import_notes(&mut self, seeds: Vec<notes::Seed>) {
         let mut added = 0;
         let mut first = None;
@@ -1761,6 +1768,7 @@ impl App {
         if self.review.is_none() {
             return self.inbox_key(key);
         }
+        let wrap = self.wrap();
         let review = self.review.as_mut().unwrap();
         if let KeyCode::Char(command @ ('+' | '-' | 'F')) = key.code {
             return Ok(review
@@ -1838,8 +1846,44 @@ impl App {
                 review.viewport.keep_offset.set(true);
                 review.move_line(-20)
             }
-            KeyCode::Right => review.horizontal = review.horizontal.saturating_add(8),
+            KeyCode::Right | KeyCode::Left if wrap => {
+                let key = self.settings.keybindings.primary("toggle_wrap");
+                self.message(
+                    format!("Lines wrap, so there is nothing to scroll; {key} turns wrapping off."),
+                    false,
+                );
+            }
+            KeyCode::Right => {
+                let widest = review
+                    .current_lines()
+                    .iter()
+                    .map(|line| {
+                        line.text
+                            .get(1..)
+                            .unwrap_or_default()
+                            .chars()
+                            .map(|character| if character == '\t' { 4 } else { 1 })
+                            .sum::<usize>()
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let limit = u16::try_from(widest.saturating_sub(8)).unwrap_or(u16::MAX);
+                review.horizontal = review.horizontal.saturating_add(8).min(limit);
+            }
             KeyCode::Left => review.horizontal = review.horizontal.saturating_sub(8),
+            KeyCode::Char('W') => {
+                let wrap = !wrap;
+                self.diff_wrap = Some(wrap);
+                review.horizontal = 0;
+                self.message(
+                    if wrap {
+                        "Long lines wrap."
+                    } else {
+                        "Long lines are cut off; Left and Right scroll sideways."
+                    },
+                    false,
+                );
+            }
             KeyCode::Char('b') => self.dialog = Some(Dialog::Description { scroll: 0 }),
             KeyCode::Char('t') => review.show_comments = !review.show_comments,
             KeyCode::Char('T') => self.dialog = Some(Dialog::Threads { scroll: 0 }),

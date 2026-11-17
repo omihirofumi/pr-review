@@ -94,6 +94,12 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "side by side layout columns diff",
             ),
             Command::new(
+                "Toggle line wrapping",
+                "W",
+                'W',
+                "wrap long lines horizontal scroll cut off",
+            ),
+            Command::new(
                 "Copy selected lines as Markdown",
                 "y",
                 'y',

@@ -240,6 +240,15 @@ layout = "auto"   # "unified" (default), "split", or "auto": split from 160 colu
 
 Split view needs a diff pane at least 60 columns wide and otherwise falls back to unified.
 
+### Long lines
+
+Long lines are cut off at the pane edge by default. `Right` and `Left` scroll the code 8 columns at a time while line numbers stay in place; scrolling stops at the longest line in the file, and the file header shows how far you have scrolled. Press `W` to wrap long lines instead: the rest of a line continues on the following rows under the code column, and in split view each side wraps on its own while the rows stay paired. Cursor movement, selections, comments, and marks still work by source line. To wrap by default:
+
+```toml
+[diff]
+wrap = true   # default false: cut long lines off and scroll sideways
+```
+
 ## Configurable shortcuts
 
 Normal-view shortcuts are configured in the same file as AI settings: `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Run `prpr --config-path` to locate it. Add a `[keybindings]` table, then restart prpr:
@@ -395,6 +404,8 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `y` / `gy`, `Y` | Copy selected lines as Markdown / copy a GitHub permalink pinned to the reviewed revision |
 | `R` | Run or open the provider's AI code review |
 | `\|` | Toggle unified / split view |
+| `W` | Toggle line wrapping |
+| `Left` / `Right` | Scroll long lines sideways when wrapping is off |
 | `+` / `-` | Expand 20 context lines / collapse current context |
 | `F` | Toggle full-file context |
 | `t` | Toggle inline comments, replies, and local drafts |

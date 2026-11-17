@@ -698,3 +698,27 @@ fn local_diffs_use_the_same_structured_guide_and_question_providers() {
         );
     }
 }
+
+#[test]
+fn saving_a_symlinked_configuration_updates_the_link_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let managed = directory.path().join("dotfiles/prpr/config.toml");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, "[diff]\nwrap = true\n").unwrap();
+    let link = directory.path().join("config/prpr/config.toml");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&managed, &link).unwrap();
+
+    let mut configured = settings::load(&link).unwrap();
+    assert!(configured.diff.wrap);
+    configured.ai.provider = Provider::Codex;
+    settings::save(&link, &configured).unwrap();
+
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(settings::load(&managed).unwrap(), configured);
+}

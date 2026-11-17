@@ -1783,3 +1783,39 @@ fn choosing_an_agent_generates_a_guide_only_when_asked_or_automatic() {
         Action::Explain { force: false }
     ));
 }
+
+#[test]
+fn wrapping_is_opt_in_and_replaces_sideways_scrolling() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.opened(overview());
+    let mut data = app::demo_data();
+    data.files.truncate(1);
+    let long = format!("let value = \"{}\";", "x".repeat(200));
+    data.files[0].patch = Some(format!("@@ -1,1 +1,1 @@\n-old\n+{long}"));
+    app.accept_diff(data).unwrap();
+    app.tab = PageTab::Diff;
+    assert!(!app.settings.diff.wrap && !app.wrap());
+
+    for _ in 0..40 {
+        app.key(key(KeyCode::Right)).unwrap();
+    }
+    let review = app.review.as_ref().unwrap();
+    assert_eq!(review.horizontal, (long.len() - 8) as u16);
+    assert!(screen(&mut app).contains(&format!("scrolled {} columns right", long.len() - 8)));
+
+    press(&mut app, 'W').unwrap();
+    assert!(app.wrap());
+    assert_eq!(app.review.as_ref().unwrap().horizontal, 0);
+    app.key(key(KeyCode::Right)).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().horizontal, 0);
+    assert!(app.status.contains("turns wrapping off"), "{}", app.status);
+    let wrapped = screen(&mut app);
+    assert!(wrapped.contains("let value") && wrapped.contains("x\";"));
+
+    press(&mut app, 'W').unwrap();
+    assert!(!app.wrap());
+    app.settings.diff.wrap = true;
+    app.diff_wrap = None;
+    assert!(app.wrap());
+}

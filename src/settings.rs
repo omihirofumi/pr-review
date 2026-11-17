@@ -129,6 +129,8 @@ pub enum DiffLayout {
 #[serde(default, deny_unknown_fields)]
 pub struct DiffConfig {
     pub layout: DiffLayout,
+    /// Wrap long lines instead of scrolling them sideways.
+    pub wrap: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -173,6 +175,9 @@ pub fn load(path: &Path) -> Result<Settings> {
 pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     settings.ai.validate()?;
     settings.keybindings.validate()?;
+    // Renaming over a symlink would replace the link, so write where it points, as dotfiles setups expect.
+    let resolved = fs::canonicalize(path).ok();
+    let path = resolved.as_deref().unwrap_or(path);
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())

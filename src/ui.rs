@@ -406,6 +406,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ("ask", "ask"),
                 ("explain_diff", "explain"),
                 ("toggle_chat", "AI chat"),
+                ("toggle_wrap", "wrap"),
                 ("help", "help"),
             ],
         };
@@ -1894,7 +1895,7 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
         });
     app.split_shown.set(split);
     review.split.set(split);
-    let rows = review_rows(review, content.width, split);
+    let rows = review_rows(review, content.width, split, app.wrap());
     let height = usize::from(content.height);
     let selected = selected_row(&rows, review.position());
     let viewport = &review.viewport;
@@ -1985,6 +1986,14 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
     } else {
         ""
     };
+    let context_label = if review.horizontal > 0 {
+        format!(
+            "{context_label} · scrolled {} columns right",
+            review.horizontal
+        )
+    } else {
+        context_label.to_string()
+    };
     frame.render_widget(
         Paragraph::new(if review.data.source.is_local() {
             format!(
@@ -2035,7 +2044,7 @@ impl ViewRow {
     }
 }
 
-fn review_rows(review: &ReviewState, width: u16, split: bool) -> Vec<ViewRow> {
+fn review_rows(review: &ReviewState, width: u16, split: bool, wrap: bool) -> Vec<ViewRow> {
     let mut rows = Vec::new();
     let Some(file) = review.current_file() else {
         return rows;
@@ -2110,19 +2119,29 @@ fn review_rows(review: &ReviewState, width: u16, split: bool) -> Vec<ViewRow> {
         has_draft: drafts.contains_key(&index),
         mark: mark_for(&review.marks, &file.filename, line),
     };
-    let row = |index: usize, gutter: Gutter| {
+    let row = |index: usize, gutter: Gutter, columns: usize| {
         let line = &lines[index];
         let mut row = code_row(
             line,
             file,
             state(index, line),
-            review.horizontal,
+            if wrap { 0 } else { review.horizontal },
             digits,
             gutter,
         );
         row.source = Some(index);
-        row
+        if !wrap {
+            return vec![row];
+        }
+        let gutter_spans = if matches!(line.kind, LineKind::Hunk | LineKind::Meta) {
+            1
+        } else {
+            2
+        };
+        wrap_row(row, gutter_spans, columns)
     };
+    let content = usize::from(width.saturating_sub(1));
+    let halves = [content / 2, content - content / 2];
     let groups = if split {
         prpr::diff::split_pairs(lines)
     } else {
@@ -2134,15 +2153,24 @@ fn review_rows(review: &ReviewState, width: u16, split: bool) -> Vec<ViewRow> {
             rows.push(ViewRow::text("", BACKGROUND, MUTED));
         }
         let full_width = !split || matches!(lines[first].kind, LineKind::Hunk | LineKind::Meta);
-        rows.push(if full_width {
-            row(first, Gutter::Both)
+        if full_width {
+            rows.extend(row(first, Gutter::Both, usize::from(width)));
         } else {
-            split_row(
-                left.map(|index| row(index, Gutter::Old)),
-                right.map(|index| row(index, Gutter::New)),
-                width,
-            )
-        });
+            let mut left = left
+                .map(|index| row(index, Gutter::Old, halves[0]))
+                .unwrap_or_default()
+                .into_iter();
+            let mut right = right
+                .map(|index| row(index, Gutter::New, halves[1]))
+                .unwrap_or_default()
+                .into_iter();
+            loop {
+                match (left.next(), right.next()) {
+                    (None, None) => break,
+                    (left, right) => rows.push(split_row(left, right, width)),
+                }
+            }
+        }
         if !review.show_comments {
             continue;
         }
@@ -2408,6 +2436,62 @@ fn code_row(
         alt_source: None,
         background,
     }
+}
+
+/// Breaks a rendered row into screen rows of `width` columns; continuation rows are indented past
+/// the first `gutter_spans` spans so code stays in its column.
+fn wrap_row(row: ViewRow, gutter_spans: usize, width: usize) -> Vec<ViewRow> {
+    let mut spans = row.line.spans.into_iter();
+    let gutter = spans.by_ref().take(gutter_spans).collect::<Vec<_>>();
+    let indent = gutter.iter().map(Span::width).sum::<usize>();
+    let available = width.saturating_sub(indent).max(1);
+    let mut chunks = vec![Vec::new()];
+    let mut used = 0;
+    for span in spans {
+        let mut text = String::new();
+        for character in span.content.chars() {
+            let next = Span::raw(character.to_string()).width();
+            if used > 0 && used + next > available {
+                if !text.is_empty() {
+                    chunks
+                        .last_mut()
+                        .unwrap()
+                        .push(Span::styled(std::mem::take(&mut text), span.style));
+                }
+                chunks.push(Vec::new());
+                used = 0;
+            }
+            text.push(character);
+            used += next;
+        }
+        if !text.is_empty() {
+            chunks
+                .last_mut()
+                .unwrap()
+                .push(Span::styled(text, span.style));
+        }
+    }
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut line = if index == 0 {
+                gutter.clone()
+            } else {
+                vec![Span::styled(
+                    " ".repeat(indent),
+                    Style::default().bg(row.background),
+                )]
+            };
+            line.extend(chunk);
+            ViewRow {
+                line: Line::from(line),
+                source: (index == 0).then_some(row.source).flatten(),
+                alt_source: (index == 0).then_some(row.alt_source).flatten(),
+                background: row.background,
+            }
+        })
+        .collect()
 }
 
 /// Truncates or pads a half row to `width` display columns, painting `background` behind
@@ -3496,7 +3580,7 @@ mod tests {
         let review = app.review.as_mut().unwrap();
         review.show_comments = false;
         review.positions[0] = 3;
-        let rows = review_rows(app.review.as_ref().unwrap(), 80, true);
+        let rows = review_rows(app.review.as_ref().unwrap(), 80, true, false);
         let paired = rows
             .iter()
             .find(|row| row_text(row).contains("before"))
@@ -3510,6 +3594,74 @@ mod tests {
         assert_eq!((paired.source, paired.alt_source), (Some(2), Some(3)));
         assert_eq!(selected_row(&rows, 3), selected_row(&rows, 2));
         assert_eq!(paired.line.width(), 80);
+    }
+
+    #[test]
+    fn wrapped_lines_keep_every_character_under_the_code_column() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        let mut data = demo_data();
+        data.files.truncate(1);
+        let long = (0..30)
+            .map(|n| format!("w{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        data.files[0].patch = Some(format!("@@ -1,2 +1,2 @@\n keep\n-{long}\n+short"));
+        app.loaded(data).unwrap();
+        let review = app.review.as_mut().unwrap();
+        review.show_comments = false;
+        review.marks.push(prpr::model::Mark {
+            path: review.data.files[0].filename.clone(),
+            side: Side::Left,
+            line: 2,
+            end_line: 2,
+            start_column: Some(1),
+            end_column: Some(u32::MAX),
+        });
+        let review = app.review.as_ref().unwrap();
+
+        let cut = review_rows(review, 60, false, false);
+        let rows = review_rows(review, 60, false, true);
+        assert_eq!(rows.len(), cut.len() + 2, "the long line takes three rows");
+        let first = rows.iter().position(|row| row.source == Some(2)).unwrap();
+        let wrapped = &rows[first..first + 3];
+        assert!(wrapped[1..].iter().all(|row| row.source.is_none()));
+        assert!(wrapped.iter().all(|row| row.line.width() <= 60));
+        let code_column = row_text(&wrapped[0]).find("w00").unwrap();
+        let mut text = String::new();
+        for (index, row) in wrapped.iter().enumerate() {
+            let line = row_text(row);
+            if index > 0 {
+                assert!(line[..code_column].trim().is_empty(), "{line}");
+            }
+            text.push_str(&line[code_column..]);
+        }
+        assert_eq!(text, long);
+        assert!(
+            wrapped[2]
+                .line
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(MARK)),
+            "the highlight continues onto wrapped rows"
+        );
+
+        let split = review_rows(review, 80, true, true);
+        let first = split.iter().position(|row| row.source == Some(2)).unwrap();
+        assert_eq!(split[first].alt_source, Some(3));
+        assert!(row_text(&split[first]).contains("short"));
+        let continued = split[first + 1..]
+            .iter()
+            .take_while(|row| row.source.is_none())
+            .collect::<Vec<_>>();
+        assert!(continued.len() >= 2);
+        assert!(split.iter().all(|row| row.line.width() <= 80));
+        assert!(
+            std::iter::once(&split[first])
+                .chain(continued.iter().copied())
+                .all(|row| row.line.width() == 80)
+        );
+        assert!(split.iter().any(|row| row_text(row).contains("w29")));
     }
 
     #[test]
@@ -3676,7 +3828,7 @@ mod tests {
             .unwrap();
         review.positions[0] = selected;
         for width in [32, 57, 89] {
-            let rows = review_rows(review, width, false);
+            let rows = review_rows(review, width, false, false);
             assert_eq!(
                 rows.iter().filter(|row| row.source.is_some()).count(),
                 review.current_lines().len()
@@ -3711,7 +3863,7 @@ mod tests {
         }
         let expected = review.anchor();
         review.show_comments = false;
-        let rows = review_rows(review, 57, false);
+        let rows = review_rows(review, 57, false, false);
         assert!(!rows.iter().any(|row| row_text(row).contains("sam")));
         assert!(!rows.iter().any(|row| row_text(row).contains("draft ·")));
         assert_eq!(review.anchor(), expected);
@@ -3739,7 +3891,7 @@ mod tests {
             start_side: None,
             in_reply_to_id: None,
         }];
-        let rows = review_rows(review, 32, false);
+        let rows = review_rows(review, 32, false, false);
         let last_source = rows.iter().rposition(|row| row.source.is_some()).unwrap();
         let outdated = rows
             .iter()
@@ -3749,7 +3901,7 @@ mod tests {
         assert!(rows[outdated].source.is_none());
         review.data.files[0].patch = None;
         review.lines[0].clear();
-        let rows = review_rows(review, 32, false);
+        let rows = review_rows(review, 32, false, false);
         assert!(
             rows.iter()
                 .any(|row| row_text(row).contains("Historical discussion"))
@@ -3847,7 +3999,7 @@ mod tests {
             anchor: 2,
             extending: true,
         });
-        let rows = review_rows(review, 89, false);
+        let rows = review_rows(review, 89, false, false);
         for (index, line) in review.current_lines().iter().enumerate() {
             let row = rows.iter().find(|row| row.source == Some(index)).unwrap();
             if (2..=5).contains(&index) {
@@ -3930,7 +4082,7 @@ mod tests {
             author: "sam".into(),
             in_reply_to_id: None,
         }];
-        let rows = review_rows(review, 32, false);
+        let rows = review_rows(review, 32, false, false);
         assert_eq!(
             rows.iter()
                 .filter(|row| row_text(row).contains("LEFT:19–20"))
