@@ -98,9 +98,12 @@ prpr session context --repo .
 prpr session comment list --repo .
 prpr session comment add --repo . --reply-to note-ID --body 'Explanation' --author codex
 prpr session navigate --repo . --file src/main.rs --new-line 42
+prpr session mark add --repo . --file src/main.rs --new-line 42 --start-column 9 --end-column 21
+prpr session mark clear --repo .
+prpr session reload --repo .
 ```
 
-Use `--session ID` when several viewers share a repository. If the viewer uses `--workspace-root`, pass the same option to session commands. Sessions use private local Unix sockets; no daemon or network listener is needed. `comment list` includes local notes, GitHub comments, and saved GitHub drafts separately. Replies target local note IDs. Commands reject unknown files, invisible line ranges, and outdated note anchors. Reading comments or replying to them does not authorize an agent to edit code or publish a GitHub review.
+Use `--session ID` when several viewers share a repository. If the viewer uses `--workspace-root`, pass the same option to session commands. Sessions use private local Unix sockets; no daemon or network listener is needed. `comment list` includes local notes, GitHub comments, and saved GitHub drafts separately. Replies target local note IDs. `mark add` highlights exact characters (1-based, inclusive columns) or whole lines until the review reloads, so an agent can point at the expression a note is about. `reload` refreshes the review as `r` does and keeps you on the Diff tab. Commands reject unknown files, invisible line ranges, and outdated note anchors. Reading comments or replying to them does not authorize an agent to edit code or publish a GitHub review.
 
 ## Quick start
 
@@ -119,7 +122,7 @@ Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr
 
 In Diff:
 
-1. Keep pressing `j` to read downward and continue into the next file. `k` goes backward. Use `gg` / `ge` to jump to the current file's top / bottom.
+1. Press `j` / `k` to move through the current file; the cursor stops at its first and last lines. Press `.` / `,` (or `n` / `p`) for the next / previous file, and `gg` / `ge` for the current file's top / bottom. The view scrolls only when the cursor comes within `scrolloff` rows (default 5) of an edge; `Ctrl-d` / `Ctrl-u` move the view and cursor together.
 2. Press `gf` or `e` to open the selected source line in Helix. Quit Helix to resume the review at the same position.
 3. Press `c` to comment on one line. For three lines, press `xxx`, then `c`; for a variable range, press `v`, move with `j` / `k`, then press `c`. In the diff view, `Esc` or `;` clears a selection. Ranges cannot combine removed and added lines or span separate hunks.
 4. Write the comment and press `Ctrl-s` to save a **local draft**. `Ctrl-h` deletes backward. Press `D` to inspect or edit saved drafts.
@@ -268,8 +271,8 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `Ctrl-k` | Search and run commands for the current view |
 | `Ctrl-b` | Toggle the file sidebar |
 | `Q` / `E` | Ask the agent / explain selected diff lines or the current hunk |
-| `j` / `k`, up / down | Move through lines and continue into adjacent files |
-| `n` / `p` | Next / previous file |
+| `j` / `k`, up / down | Move through lines within the current file |
+| `.` / `,`, `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous hunk, continuing across files |
 | `gg` / `ge` | Top / end of current file, or first / last item in lists |
 | `gf` | Open selected source location in Helix |
@@ -335,6 +338,7 @@ To open source in an isolated review workspace pinned to the PR head instead, op
 ```toml
 [editor]
 open_in = "workspace"   # default: "repository"
+scrolloff = 5           # rows kept between the Diff cursor and the viewport edge
 ```
 
 In workspace mode, the first `gf` prepares the workspace (as `w` does). LEFT-side source opens a read-only snapshot from the diff merge base, including the previous filename for renamed files; RIGHT-side source opens from the PR head. Symlinks are refused as source locations.

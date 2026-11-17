@@ -34,6 +34,57 @@ enum SessionCommand {
         command: CommentCommand,
     },
     Navigate(NavigateArgs),
+    /// Reload the review as `r` does, picking up new pushes, comments, and local edits
+    Reload(Selector),
+    /// Highlight source ranges for the reviewer; marks last until the review reloads
+    Mark {
+        #[command(subcommand)]
+        command: MarkCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MarkCommand {
+    Add(MarkArgs),
+    Clear(MarkClearArgs),
+}
+
+#[derive(ClapArgs)]
+struct MarkArgs {
+    #[command(flatten)]
+    selector: Selector,
+    #[arg(long)]
+    file: String,
+    #[arg(
+        long,
+        conflicts_with = "new_line",
+        required_unless_present = "new_line"
+    )]
+    old_line: Option<u32>,
+    #[arg(long, conflicts_with = "old_line")]
+    new_line: Option<u32>,
+    #[arg(long, help = "Last line of a multi-line mark on the same side")]
+    end_line: Option<u32>,
+    #[arg(
+        long,
+        requires = "end_column",
+        help = "First highlighted character, 1-based"
+    )]
+    start_column: Option<u32>,
+    #[arg(
+        long,
+        requires = "start_column",
+        help = "Last highlighted character, 1-based and inclusive"
+    )]
+    end_column: Option<u32>,
+}
+
+#[derive(ClapArgs)]
+struct MarkClearArgs {
+    #[command(flatten)]
+    selector: Selector,
+    #[arg(long, help = "Only clear marks in this file")]
+    file: Option<String>,
 }
 
 #[derive(Clone, ClapArgs)]
@@ -131,6 +182,13 @@ enum Request {
         file: String,
         side: Side,
         line: u32,
+    },
+    Reload,
+    Mark {
+        mark: Mark,
+    },
+    ClearMarks {
+        file: Option<String>,
     },
 }
 
@@ -246,7 +304,7 @@ fn handle(app: &mut App, identity: &Manifest, request: Request) -> Result<Value>
                 value
             }).collect::<Vec<_>>();
             Ok(
-                json!({"session": identity.id, "source": review.data.source, "revision": review.data.pr.head_sha, "title": review.data.pr.title, "description": review.data.pr.body, "files": files, "notes": review.notes}),
+                json!({"session": identity.id, "source": review.data.source, "revision": review.data.pr.head_sha, "title": review.data.pr.title, "description": review.data.pr.body, "files": files, "notes": review.notes, "marks": review.marks}),
             )
         }
         Request::Comments => {
@@ -303,7 +361,88 @@ fn handle(app: &mut App, identity: &Manifest, request: Request) -> Result<Value>
             app.navigate(&file, &side, line)?;
             Ok(json!({"file": file, "side": side, "line": line}))
         }
+        Request::Reload => {
+            ensure!(!app.busy, "Review is loading; retry when it finishes");
+            let action = if app.local_spec.is_some() {
+                crate::app::Action::RefreshLocal
+            } else {
+                let review = app.review.as_ref().context("No diff is loaded yet")?;
+                crate::app::Action::LoadPr(review.data.pr.id.clone())
+            };
+            app.open_on_diff = app.tab == crate::app::PageTab::Diff;
+            app.requested = Some(action);
+            app.message("Agent requested a reload.", false);
+            Ok(json!({"reloading": true}))
+        }
+        Request::Mark { mark } => {
+            let review = app.review.as_mut().context("No diff is loaded yet")?;
+            validate_mark(review, &mark)?;
+            review.marks.push(mark.clone());
+            app.message(
+                format!(
+                    "Agent highlighted {}:{}{}.",
+                    mark.path,
+                    mark.line,
+                    if mark.end_line > mark.line {
+                        format!("-{}", mark.end_line)
+                    } else {
+                        String::new()
+                    }
+                ),
+                false,
+            );
+            Ok(json!({"marks": review_marks(app)}))
+        }
+        Request::ClearMarks { file } => {
+            let review = app.review.as_mut().context("No diff is loaded yet")?;
+            let before = review.marks.len();
+            review
+                .marks
+                .retain(|mark| file.as_ref().is_some_and(|path| *path != mark.path));
+            Ok(json!({"cleared": before - review.marks.len()}))
+        }
     }
+}
+
+fn review_marks(app: &App) -> &[Mark] {
+    app.review.as_ref().map_or(&[], |review| &review.marks)
+}
+
+fn validate_mark(review: &crate::app::ReviewState, mark: &Mark) -> Result<()> {
+    let index = review
+        .data
+        .files
+        .iter()
+        .position(|file| file.filename == mark.path)
+        .context("File is outside this review")?;
+    ensure!(
+        mark.line > 0 && mark.end_line >= mark.line,
+        "--end-line must not precede the first line"
+    );
+    for line in mark.line..=mark.end_line {
+        ensure!(
+            review.lines[index]
+                .iter()
+                .any(|row| prpr::thread::matches_anchor(row, &mark.side, line)),
+            "Line {line} is outside the displayed diff; expand it first"
+        );
+    }
+    if let (Some(start), Some(end)) = (mark.start_column, mark.end_column) {
+        ensure!(
+            mark.line == mark.end_line,
+            "Columns apply to a single line; omit --end-line"
+        );
+        let text = review.lines[index]
+            .iter()
+            .find(|row| prpr::thread::matches_anchor(row, &mark.side, mark.line))
+            .map(|row| row.text.get(1..).unwrap_or_default().chars().count())
+            .unwrap_or_default();
+        ensure!(
+            start >= 1 && start <= end && end as usize <= text,
+            "Columns must satisfy 1 <= start <= end <= {text}"
+        );
+    }
+    Ok(())
 }
 
 fn manifests(root: &Path) -> Result<Vec<Manifest>> {
@@ -443,6 +582,39 @@ pub fn run(args: &Args, root: &Path) -> Result<()> {
                 },
             )?
         }
+        SessionCommand::Reload(selector) => call(root, selector, Request::Reload)?,
+        SessionCommand::Mark {
+            command: MarkCommand::Add(args),
+        } => {
+            let line = args.old_line.or(args.new_line).unwrap();
+            call(
+                root,
+                &args.selector,
+                Request::Mark {
+                    mark: Mark {
+                        path: args.file.clone(),
+                        side: if args.old_line.is_some() {
+                            Side::Left
+                        } else {
+                            Side::Right
+                        },
+                        line,
+                        end_line: args.end_line.unwrap_or(line),
+                        start_column: args.start_column,
+                        end_column: args.end_column,
+                    },
+                },
+            )?
+        }
+        SessionCommand::Mark {
+            command: MarkCommand::Clear(args),
+        } => call(
+            root,
+            &args.selector,
+            Request::ClearMarks {
+                file: args.file.clone(),
+            },
+        )?,
         SessionCommand::Navigate(args) => call(
             root,
             &args.selector,
@@ -468,6 +640,60 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[test]
+    fn marks_validate_visible_lines_and_columns_and_reload_queues_a_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut app = App::new(root.clone(), false);
+        let mut data = crate::app::demo_data();
+        data.source = ReviewSource::Local {
+            repository: root.clone(),
+            label: "local".into(),
+        };
+        app.loaded(data).unwrap();
+        app.local_spec = Some(prpr::local::Spec::Directories {
+            repository: root.clone(),
+            left: root.clone(),
+            right: root.clone(),
+        });
+        let review = app.review.as_ref().unwrap();
+        let path = review.current_file().unwrap().filename.clone();
+        let row = review
+            .current_lines()
+            .iter()
+            .find(|row| row.new_line.is_some() && row.text.len() > 3)
+            .unwrap();
+        let line = row.new_line.unwrap();
+        let identity = Manifest {
+            id: "test".into(),
+            repository: root.clone(),
+            socket: root.join("socket"),
+            pid: 0,
+        };
+        let mark = |line, end_line, columns: Option<(u32, u32)>| Request::Mark {
+            mark: Mark {
+                path: path.clone(),
+                side: Side::Right,
+                line,
+                end_line,
+                start_column: columns.map(|columns| columns.0),
+                end_column: columns.map(|columns| columns.1),
+            },
+        };
+        handle(&mut app, &identity, mark(line, line, Some((1, 2)))).unwrap();
+        assert!(handle(&mut app, &identity, mark(99_999, 99_999, None)).is_err());
+        assert!(handle(&mut app, &identity, mark(line, line, Some((2, 1)))).is_err());
+        assert!(handle(&mut app, &identity, mark(line, line, Some((1, 10_000)))).is_err());
+        assert_eq!(app.review.as_ref().unwrap().marks.len(), 1);
+        let cleared = handle(&mut app, &identity, Request::ClearMarks { file: None }).unwrap();
+        assert_eq!(cleared["cleared"], 1);
+        handle(&mut app, &identity, Request::Reload).unwrap();
+        assert!(matches!(
+            app.requested,
+            Some(crate::app::Action::RefreshLocal)
+        ));
+    }
 
     #[test]
     fn live_client_reads_user_notes_replies_validates_anchors_and_cleans_up() {

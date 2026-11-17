@@ -495,6 +495,16 @@ pub fn run() -> Result<()> {
     }
     loop {
         session.poll(&mut app);
+        if let Some(action) = app.requested.take() {
+            dispatch(
+                action,
+                &mut app,
+                &args,
+                &sender,
+                &mut terminal,
+                &mut runtime,
+            )?;
+        }
         while let Ok(result) = receiver.try_recv() {
             let Some(result) = apply_background(result, &mut app, &sender, &mut runtime) else {
                 continue;

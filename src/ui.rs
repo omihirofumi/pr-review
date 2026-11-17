@@ -1848,7 +1848,32 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
         Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(diff_area);
     draw_file_header(frame, review, app.comments_loading, file_header);
     let rows = review_rows(review, content.width);
-    let start = viewport_start(&rows, review.position(), usize::from(content.height));
+    let height = usize::from(content.height);
+    let selected = selected_row(&rows, review.position());
+    let viewport = &review.viewport;
+    let previous = viewport.tops.borrow().get(&review.selected_file).copied();
+    let start = match previous {
+        Some(top) => scroll_viewport(
+            top,
+            selected,
+            rows.len(),
+            height,
+            app.settings.editor.scrolloff,
+            viewport
+                .keep_offset
+                .replace(false)
+                .then(|| viewport.cursor_offset.get()),
+        ),
+        None => {
+            viewport.keep_offset.set(false);
+            viewport_start(&rows, review.position(), height)
+        }
+    };
+    viewport
+        .tops
+        .borrow_mut()
+        .insert(review.selected_file, start);
+    viewport.cursor_offset.set(selected.saturating_sub(start));
     for (offset, row) in rows
         .into_iter()
         .skip(start)
@@ -2041,6 +2066,7 @@ fn review_rows(review: &ReviewState, width: u16) -> Vec<ViewRow> {
                 cursor: index == review.position(),
                 has_thread: anchored.contains_key(&index),
                 has_draft: drafts.contains_key(&index),
+                mark: mark_for(&review.marks, &file.filename, line),
             },
             review.horizontal,
             digits,
@@ -2110,6 +2136,78 @@ struct RowState {
     cursor: bool,
     has_thread: bool,
     has_draft: bool,
+    /// Highlighted character range in source columns; `(1, u32::MAX)` covers the whole line.
+    mark: Option<(u32, u32)>,
+}
+
+const MARK: Color = Color::Rgb(96, 76, 24);
+
+fn mark_for(marks: &[prpr::model::Mark], path: &str, line: &DiffLine) -> Option<(u32, u32)> {
+    marks
+        .iter()
+        .filter(|mark| mark.path == path)
+        .find(|mark| {
+            (mark.line..=mark.end_line)
+                .any(|number| prpr::thread::matches_anchor(line, &mark.side, number))
+        })
+        .map(|mark| {
+            (
+                mark.start_column.unwrap_or(1),
+                mark.end_column.unwrap_or(u32::MAX),
+            )
+        })
+}
+
+/// Converts 1-based inclusive source columns to the displayed character range, accounting for
+/// four-column tab expansion and horizontal scrolling.
+fn display_range(source: &str, (start, end): (u32, u32), horizontal: u16) -> (usize, usize) {
+    let mut display = 0;
+    let mut range = (usize::MAX, usize::MAX);
+    for (column, character) in source.chars().enumerate() {
+        let column = column as u32 + 1;
+        if column == start {
+            range.0 = display;
+        }
+        display += if character == '\t' { 4 } else { 1 };
+        if column == end {
+            range.1 = display;
+        }
+    }
+    if range.0 == usize::MAX {
+        return (0, 0);
+    }
+    if range.1 == usize::MAX {
+        range.1 = display;
+    }
+    let shift = usize::from(horizontal);
+    (range.0.saturating_sub(shift), range.1.saturating_sub(shift))
+}
+
+fn highlight_spans(spans: Vec<Span<'static>>, (start, end): (usize, usize)) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
+    let mut position = 0;
+    for span in spans {
+        let characters = span.content.chars().collect::<Vec<_>>();
+        let length = characters.len();
+        let from = start.clamp(position, position + length) - position;
+        let to = end.clamp(position, position + length) - position;
+        for (range, marked) in [(0..from, false), (from..to, true), (to..length, false)] {
+            if range.is_empty() {
+                continue;
+            }
+            let style = if marked {
+                span.style.bg(MARK)
+            } else {
+                span.style
+            };
+            result.push(Span::styled(
+                characters[range].iter().collect::<String>(),
+                style,
+            ));
+        }
+        position += length;
+    }
+    result
 }
 
 fn code_row(
@@ -2203,7 +2301,14 @@ fn code_row(
         Span::styled(format!("{marker}{old:>digits$} {new:>digits$} "), gutter),
         Span::styled(format!("{sign} "), Style::default().fg(sign_color)),
     ];
-    spans.extend(syntax_spans(&code, &file.filename));
+    let syntax = syntax_spans(&code, &file.filename);
+    spans.extend(match state.mark {
+        Some(columns) => highlight_spans(
+            syntax,
+            display_range(line.text.get(1..).unwrap_or_default(), columns, horizontal),
+        ),
+        None => syntax,
+    });
     ViewRow {
         line: Line::from(spans),
         source: None,
@@ -2428,14 +2533,45 @@ fn side_label(side: &Side) -> &'static str {
     if *side == Side::Left { "LEFT" } else { "RIGHT" }
 }
 
-fn viewport_start(rows: &[ViewRow], source: usize, height: usize) -> usize {
-    let selected = rows
-        .iter()
+fn selected_row(rows: &[ViewRow], source: usize) -> usize {
+    rows.iter()
         .position(|row| row.source == Some(source))
-        .unwrap_or(0);
-    selected
+        .unwrap_or(0)
+}
+
+/// First view of a file: the cursor sits a few rows below the top.
+fn viewport_start(rows: &[ViewRow], source: usize, height: usize) -> usize {
+    selected_row(rows, source)
         .saturating_sub((height / 4).min(3))
         .min(rows.len().saturating_sub(height))
+}
+
+/// Scrolls only as far as needed to keep `scrolloff` rows around the cursor; a cursor that
+/// jumped out of view is centered, and `keep_offset` preserves its screen row for paging.
+fn scroll_viewport(
+    previous_top: usize,
+    selected: usize,
+    total: usize,
+    height: usize,
+    scrolloff: usize,
+    keep_offset: Option<usize>,
+) -> usize {
+    if total <= height || height == 0 {
+        return 0;
+    }
+    let margin = scrolloff.min(height.saturating_sub(1) / 2);
+    let top = if let Some(offset) = keep_offset {
+        selected.saturating_sub(offset)
+    } else if selected < previous_top || selected >= previous_top + height {
+        selected.saturating_sub(height / 2)
+    } else if selected < previous_top + margin {
+        selected.saturating_sub(margin)
+    } else if selected + margin >= previous_top + height {
+        selected + margin + 1 - height
+    } else {
+        previous_top
+    };
+    top.min(total - height)
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -3126,6 +3262,50 @@ mod tests {
     use crate::app::{App, Selection, demo_data};
     use prpr::model::{DraftComment, ReviewComment};
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn marks_map_source_columns_through_tabs_and_horizontal_scroll() {
+        assert_eq!(display_range("let value = 1;", (5, 9), 0), (4, 9));
+        assert_eq!(display_range("\tvalue", (2, 6), 0), (4, 9));
+        assert_eq!(display_range("let value = 1;", (5, 9), 2), (2, 7));
+        assert_eq!(display_range("abc", (1, u32::MAX), 0), (0, 3));
+        let spans = highlight_spans(vec![Span::raw("let "), Span::raw("value = 1;")], (4, 9));
+        let marked = spans
+            .iter()
+            .filter(|span| span.style.bg == Some(MARK))
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(marked, "value");
+    }
+
+    #[test]
+    fn viewport_scrolls_only_near_edges_centers_jumps_and_keeps_paging_offset() {
+        let scroll = |top, selected, keep| scroll_viewport(top, selected, 100, 20, 5, keep);
+        assert_eq!(
+            scroll(10, 20, None),
+            10,
+            "moving inside the view keeps it still"
+        );
+        assert_eq!(scroll(10, 25, None), 11, "bottom margin scrolls by one row");
+        assert_eq!(scroll(10, 14, None), 9, "top margin scrolls by one row");
+        assert_eq!(scroll(10, 60, None), 50, "a jump out of view is centered");
+        assert_eq!(
+            scroll(10, 33, Some(8)),
+            25,
+            "paging keeps the cursor's screen row"
+        );
+        assert_eq!(scroll(10, 99, None), 80, "the view never passes the end");
+        assert_eq!(
+            scroll_viewport(3, 2, 10, 20, 5, None),
+            0,
+            "short files never scroll"
+        );
+        assert_eq!(
+            scroll_viewport(0, 3, 100, 4, 5, None),
+            1,
+            "scrolloff shrinks in tiny viewports"
+        );
+    }
 
     #[test]
     fn directory_segments_join_single_child_chains_but_keep_branches_separate() {

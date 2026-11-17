@@ -278,6 +278,16 @@ pub struct ReviewState {
     pub selection: Option<Selection>,
     pub drafts: Vec<DraftComment>,
     pub workspace: Option<PathBuf>,
+    pub viewport: Viewport,
+    pub marks: Vec<Mark>,
+}
+
+/// Diff scroll position, updated while drawing so it follows the rendered row layout.
+#[derive(Debug, Default)]
+pub struct Viewport {
+    pub tops: std::cell::RefCell<HashMap<usize, usize>>,
+    pub cursor_offset: std::cell::Cell<usize>,
+    pub keep_offset: std::cell::Cell<bool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -656,36 +666,8 @@ impl ReviewState {
             return;
         }
         self.selection = None;
-        let mut remaining = delta.unsigned_abs();
-        while remaining > 0 {
-            let max = self.current_lines().len().saturating_sub(1);
-            let available = if delta > 0 {
-                max.saturating_sub(self.position())
-            } else {
-                self.position()
-            };
-            let step = available.min(remaining);
-            if delta > 0 {
-                self.positions[self.selected_file] += step;
-            } else {
-                self.positions[self.selected_file] -= step;
-            }
-            remaining -= step;
-            if remaining == 0 {
-                break;
-            }
-            if delta > 0 && self.selected_file + 1 < self.data.files.len() {
-                self.selected_file += 1;
-                self.positions[self.selected_file] = 0;
-            } else if delta < 0 && self.selected_file > 0 {
-                self.selected_file -= 1;
-                self.positions[self.selected_file] = self.current_lines().len().saturating_sub(1);
-            } else {
-                break;
-            }
-            self.horizontal = 0;
-            remaining -= 1;
-        }
+        let max = self.current_lines().len().saturating_sub(1);
+        self.positions[self.selected_file] = self.position().saturating_add_signed(delta).min(max);
     }
 
     fn move_file(&mut self, delta: isize) {
@@ -794,6 +776,8 @@ pub enum Action {
 }
 
 pub struct App {
+    /// Action requested outside the key loop, such as an agent asking to reload.
+    pub requested: Option<Action>,
     /// Local checkout root and the GitHub repository it belongs to.
     pub checkout: Option<(PathBuf, String)>,
     pub file_sidebar: bool,
@@ -829,6 +813,7 @@ pub struct App {
 impl App {
     pub fn new(root: PathBuf, demo: bool) -> Self {
         Self {
+            requested: None,
             checkout: None,
             file_sidebar: true,
             local_spec: None,
@@ -1030,6 +1015,8 @@ impl App {
             selection: None,
             drafts,
             workspace: None,
+            viewport: Viewport::default(),
+            marks: Vec::new(),
         });
         self.tab = PageTab::Diff;
         self.goto_pending = false;
@@ -1558,13 +1545,21 @@ impl App {
                 }
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                review.viewport.keep_offset.set(true);
                 review.move_line(15)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                review.viewport.keep_offset.set(true);
                 review.move_line(-15)
             }
-            KeyCode::PageDown => review.move_line(20),
-            KeyCode::PageUp => review.move_line(-20),
+            KeyCode::PageDown => {
+                review.viewport.keep_offset.set(true);
+                review.move_line(20)
+            }
+            KeyCode::PageUp => {
+                review.viewport.keep_offset.set(true);
+                review.move_line(-20)
+            }
             KeyCode::Right => review.horizontal = review.horizontal.saturating_add(8),
             KeyCode::Left => review.horizontal = review.horizontal.saturating_sub(8),
             KeyCode::Char('b') => self.dialog = Some(Dialog::Description { scroll: 0 }),

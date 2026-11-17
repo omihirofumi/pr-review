@@ -44,7 +44,7 @@ fn range(app: &mut App, anchor: usize, cursor: usize) {
 }
 
 #[test]
-fn normal_line_navigation_crosses_empty_files_and_stops_at_global_bounds() {
+fn line_navigation_stays_in_the_file_and_period_comma_switch_files() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().into(), false);
     load(
@@ -58,26 +58,31 @@ fn normal_line_navigation_crosses_empty_files_and_stops_at_global_bounds() {
     app.key(key('k')).unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
     assert_eq!(app.review.as_ref().unwrap().position(), 0);
-    for _ in 0..3 {
+    for _ in 0..5 {
         app.key(key('j')).unwrap();
     }
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 2);
+    app.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+    app.key(key('.')).unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
-    app.key(key('j')).unwrap();
+    app.key(key('.')).unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 2);
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
     for _ in 0..3 {
         app.key(key('j')).unwrap();
     }
-    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     assert_eq!(
         app.review.as_ref().unwrap().anchor(),
         Some((Side::Right, 8))
     );
-    app.key(key('k')).unwrap();
-    app.key(key('k')).unwrap();
-    assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
-    app.key(key('k')).unwrap();
+    for _ in 0..3 {
+        app.key(key('k')).unwrap();
+    }
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 2);
+    app.key(key(',')).unwrap();
+    app.key(key(',')).unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
     assert_eq!(app.review.as_ref().unwrap().position(), 2);
 }
@@ -106,7 +111,7 @@ fn repeated_line_selection_extends_down_but_normal_movement_replaces_it() {
     app.key(key('X')).unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_range(), Some((1, 3)));
     app.key(key('j')).unwrap();
-    assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
     assert!(app.review.as_ref().unwrap().selected_range().is_none());
 }
 
@@ -134,7 +139,7 @@ fn x_grows_a_reversed_completed_selection_from_its_bottom_edge() {
 }
 
 #[test]
-fn saving_a_selected_comment_resumes_normal_navigation_into_the_next_file() {
+fn saving_a_selected_comment_resumes_normal_navigation_within_the_file() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().into(), false);
     load(
@@ -161,9 +166,10 @@ fn saving_a_selected_comment_resumes_normal_navigation_into_the_next_file() {
         store::load(directory.path(), &review.data.pr).unwrap(),
         review.drafts
     );
-    app.key(key('j')).unwrap();
-    assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    app.key(key('k')).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 2);
+    assert!(app.review.as_ref().unwrap().selection.is_none());
 }
 
 #[test]
@@ -210,7 +216,7 @@ fn extend_mode_never_crosses_files_and_escape_collapses_without_leaving_review()
     assert!(app.review.is_some());
     assert!(app.review.as_ref().unwrap().selected_range().is_none());
     app.key(key('j')).unwrap();
-    assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
 }
 
 #[test]

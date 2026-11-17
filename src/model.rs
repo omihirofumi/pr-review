@@ -257,3 +257,14 @@ impl PrActivity {
             .count()
     }
 }
+
+/// Source range an agent highlighted in the running review; columns are 1-based and inclusive.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Mark {
+    pub path: String,
+    pub side: Side,
+    pub line: u32,
+    pub end_line: u32,
+    pub start_column: Option<u32>,
+    pub end_column: Option<u32>,
+}

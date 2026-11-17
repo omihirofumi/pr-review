@@ -91,10 +91,21 @@ pub enum OpenIn {
     Workspace,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct EditorConfig {
     pub open_in: OpenIn,
+    /// Rows kept between the Diff cursor and the viewport edge before it scrolls.
+    pub scrolloff: usize,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            open_in: OpenIn::default(),
+            scrolloff: 5,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
