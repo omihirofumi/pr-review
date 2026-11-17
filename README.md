@@ -66,13 +66,23 @@ jj --no-pager diff --tool prpr
 jj --no-pager diff -r @- --tool prpr
 ```
 
-To make plain `jj diff` use prpr as well:
+To make plain `jj diff`, `jj show`, and `jj interdiff` open prpr while other commands such as `jj log -p` keep text diffs, add a scoped section to your Jujutsu configuration (`jj config path --user`):
 
-```sh
-jj config set --user ui.diff-formatter prpr
+```toml
+[merge-tools.prpr]
+program = "prpr"
+diff-args = ["difftool", "$left", "$right"]
+
+[[--scope]]
+--when.commands = ["diff", "show", "interdiff"]
+[--scope.ui]
+diff-formatter = "prpr"
+paginate = "never"   # return to the shell, not a pager, after closing the TUI
 ```
 
-`--no-pager` avoids returning to Jujutsu's own pager after closing the TUI. With prpr configured as the default formatter, use `jj --no-pager diff` for the same direct exit.
+Without a terminal, as when an agent or script runs `jj diff`, `prpr difftool` prints a Git-style diff of the two directories instead of opening the TUI, so tools that read `jj diff` output keep working. Explicit formats such as `jj diff --git` or `--stat` are unaffected.
+
+For one-off use without changing the default, `--no-pager` avoids returning to Jujutsu's own pager after closing the TUI.
 
 The external viewer reads the exact temporary directories supplied by Jujutsu. Reopen `jj diff` to refresh that snapshot; use native `prpr diff` for refreshes inside the TUI. Repository association uses the launching shell's `PWD`. When a wrapper uses `jj -R` to review a different repository, add `--repo-root /absolute/repository/path` to that wrapper's `difftool` arguments.
 

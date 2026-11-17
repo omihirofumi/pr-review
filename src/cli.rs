@@ -342,8 +342,12 @@ impl Drop for TerminalGuard {
 
 pub fn run() -> Result<()> {
     let args = Args::parse();
-    if matches!(&args.command, Some(Mode::Difftool { .. })) {
+    if let Some(Mode::Difftool { left, right, .. }) = &args.command {
         use std::{io::IsTerminal, os::unix::process::CommandExt};
+        if tty().is_err() {
+            print!("{}", local::plain_diff(left, right)?);
+            return Ok(());
+        }
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             let error = Command::new(std::env::current_exe()?)
                 .args(std::env::args_os().skip(1))

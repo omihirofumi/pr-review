@@ -389,6 +389,34 @@ fn load_directories(repository: &Path, left: &Path, right: &Path) -> Result<Snap
     ))
 }
 
+/// Git-style text of the changes between two directories, printed when no terminal is
+/// available so agents and scripts calling `jj diff` still read the diff instead of failing.
+pub fn plain_diff(left: &Path, right: &Path) -> Result<String> {
+    let snapshot = load_directories(right, left, right)?;
+    let mut text = String::new();
+    for file in &snapshot.data.files {
+        let name = &file.filename;
+        text.push_str(&format!("diff --git a/{name} b/{name}\n"));
+        let Some(patch) = &file.patch else {
+            text.push_str(&format!("Binary files a/{name} and b/{name} differ\n"));
+            continue;
+        };
+        let old = match file.status.as_str() {
+            "added" => "/dev/null".to_owned(),
+            _ => format!("a/{name}"),
+        };
+        let new = match file.status.as_str() {
+            "removed" => "/dev/null".to_owned(),
+            _ => format!("b/{name}"),
+        };
+        text.push_str(&format!("--- {old}\n+++ {new}\n{patch}"));
+        if !patch.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    Ok(text)
+}
+
 fn make_file(filename: String, status: &str, source: Option<&FileContext>) -> ChangedFile {
     let patch = source
         .map(|source| {
@@ -469,4 +497,36 @@ pub fn validate_path(path: &str) -> Result<()> {
         "Expected a relative source path"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn plain_diff_prints_git_style_sections_for_each_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let (left, right) = (
+            directory.path().join("left"),
+            directory.path().join("right"),
+        );
+        for side in [&left, &right] {
+            fs::create_dir_all(side.join("src")).unwrap();
+        }
+        fs::write(left.join("src/lib.rs"), "one\ntwo\n").unwrap();
+        fs::write(right.join("src/lib.rs"), "one\nthree\n").unwrap();
+        fs::write(left.join("gone.txt"), "bye\n").unwrap();
+        fs::write(right.join("new.txt"), "hello\n").unwrap();
+        fs::write(left.join("blob.bin"), b"a\0b").unwrap();
+        fs::write(right.join("blob.bin"), b"a\0c").unwrap();
+        let text = plain_diff(&left, &right).unwrap();
+        assert!(text.contains(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
+        ));
+        assert!(text.contains("--- a/gone.txt\n+++ /dev/null\n"));
+        assert!(text.contains("--- /dev/null\n+++ b/new.txt\n"));
+        assert!(text.contains("Binary files a/blob.bin and b/blob.bin differ\n"));
+        assert!(plain_diff(&left, &left).unwrap().is_empty());
+    }
 }
