@@ -1587,6 +1587,19 @@ impl App {
                 _ => {}
             }
         }
+        if self.overview.is_some()
+            && self.tab != PageTab::Diff
+            && key.code == KeyCode::Char('w')
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            if self.review.is_none() {
+                self.message("Wait for the diff to load before checking out", true);
+                return Ok(Action::None);
+            }
+            return self.open_selected(true);
+        }
         if self.overview.is_some() && self.tab != PageTab::Diff {
             return self.overview_key(key);
         }

@@ -324,7 +324,7 @@ Explanations are cached under the application data directory. The cache is tied 
 Press `R` in an opened GitHub PR to run your provider's own review command, so prpr follows each provider's review practice instead of a prompt of its own:
 
 - **Claude** runs `/code-review <PR number>` in print mode with read-only tools only (`Read`, `Grep`, `Glob`, subagents, and `gh pr view/diff/checks` and `git diff/log/show/blame`-style commands). Anything else, including posting to GitHub or editing files, is denied.
-- **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head; press `w` in Diff to get there.
+- **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head; press `w` to get there.
 
 The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review` or `codex review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
 
@@ -410,7 +410,7 @@ Press `B` in the PR list, Overview, or Diff to open the selected PR in your conf
 
 ## Checking out a PR
 
-Press `w` in Diff to check the PR head out in the repository you launched prpr from, so tests, editors, and AI review see the reviewed code. prpr fetches `refs/pull/<number>/head` from the base repository, so fork PRs work too, and stores it as the remote-tracking ref `prpr/pr-<number>` instead of creating a local branch.
+Press `w` on Overview, AI Guide, or Diff to check the PR head out in the repository you launched prpr from, so tests, editors, and AI review see the reviewed code. prpr fetches `refs/pull/<number>/head` from the base repository, so fork PRs work too, and stores it as the remote-tracking ref `prpr/pr-<number>` instead of creating a local branch.
 
 - **Jujutsu:** creates a new change on top of the PR head (`jj new`). The PR commit shows as the immutable bookmark `pr-<number>@prpr`, and your previous change stays where it was.
 - **Git:** switches to the PR head with a detached HEAD. If tracked files have uncommitted changes, prpr refuses and asks you to commit or stash them first.

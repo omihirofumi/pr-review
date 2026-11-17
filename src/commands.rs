@@ -225,6 +225,19 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             ),
         );
     }
+    if app.overview.is_some() && !diff && !local {
+        commands.push(
+            Command::new(
+                "Check out PR in this repository",
+                "w",
+                'w',
+                "checkout prepare local branch workspace switch",
+            )
+            .disabled_if(app.review.is_none(), "Wait for the diff to load")
+            .disabled_if(app.busy, busy)
+            .disabled_if(app.demo, "Checkout is unavailable in the offline demo"),
+        );
+    }
     if app.overview.is_some() {
         commands.extend([
             Command::new(

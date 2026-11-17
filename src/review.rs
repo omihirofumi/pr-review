@@ -76,7 +76,7 @@ pub fn run(
         Provider::Codex => {
             ensure!(
                 at_pr_head(checkout, pr),
-                "Codex reviews your checkout, which is not at PR #{} head {}; press w in Diff to check it out",
+                "Codex reviews your checkout, which is not at PR #{} head {}; press w to check it out",
                 pr.id.number,
                 &pr.head_sha[..pr.head_sha.len().min(8)],
             );

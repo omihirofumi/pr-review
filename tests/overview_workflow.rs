@@ -1721,3 +1721,34 @@ fn chat_panel_toggles_from_every_tab_and_attaches_the_cursor_when_sent() {
     app.tab = PageTab::Overview;
     assert!(screen(&mut app).contains("Attached: entire changeset"));
 }
+
+#[test]
+fn checkout_runs_from_overview_and_ai_guide() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.opened(overview());
+    for tab in [PageTab::Overview, PageTab::Guide] {
+        app.tab = tab;
+        assert!(matches!(press(&mut app, 'w').unwrap(), Action::None));
+        assert!(app.status.contains("Wait for the diff"));
+    }
+    app.accept_diff(app::demo_data()).unwrap();
+    let repo = app.review.as_ref().unwrap().data.pr.id.repo.clone();
+    app.checkout = Some((directory.path().join("launch"), repo));
+    for tab in [PageTab::Overview, PageTab::Guide] {
+        app.tab = tab;
+        assert!(matches!(
+            press(&mut app, 'w').unwrap(),
+            Action::CheckoutHere { .. }
+        ));
+    }
+    app.tab = PageTab::Overview;
+    app.dialog = Some(Dialog::Palette {
+        input: app::TextInput::new("check out".into()),
+        selected: 0,
+    });
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::CheckoutHere { .. }
+    ));
+}

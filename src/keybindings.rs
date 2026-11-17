@@ -134,7 +134,7 @@ specs! {
     ("drafts", "Manage GitHub drafts / local notes", D, ["D"]),
     ("comment", "GitHub comment draft / local note", D, ["c"]),
     ("local_note", "Add local note", D, ["C"]),
-    ("checkout", "Check out the PR in this repository", D, ["w"]),
+    ("checkout", "Check out the PR in this repository", REVIEW, ["w"]),
     ("open_file", "Open source in Helix", D, ["gf", "e"]),
     ("copy_selection", "Copy selected lines as Markdown", D, ["y"]),
     ("toggle_split", "Toggle unified / split diff", D, ["|"]),
