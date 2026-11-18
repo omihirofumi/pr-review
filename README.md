@@ -271,7 +271,7 @@ toggle_sidebar = ["Space b"]
 open_file = []
 ```
 
-Bindings apply to the PR list, Overview, AI Guide, and Diff. Dialog navigation and comment/question editing controls stay fixed, including `Esc`, `Ctrl-s`, and `Ctrl-h`. `o` does **not** open source files in Diff by default; `gf` and `e` do. It still opens PRs in the list and reading-guide steps in AI Guide.
+Bindings apply to the PR list, Overview, AI Guide, and Diff. Dialog navigation and comment/question editing controls stay fixed, including `Esc`, `Ctrl-s`, `Ctrl-h`, and `Enter` / `Shift-Enter` in the AI chat. `o` does **not** open source files in Diff by default; `gf` and `e` do. It still opens PRs in the list and reading-guide steps in AI Guide.
 
 Use characters directly (`Q`, `]`, `+`), named keys (`Enter`, `Tab`, `Shift-Tab`, `Space`, arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F24`), and `Ctrl-`, `Alt-`, or `Shift-` combinations. Use the resulting character directly for shifted punctuation. Multi-key sequences use spaces, such as `Space b` or `g p`; familiar lowercase sequences such as `gf` also work. Sequences contain up to four keys, and `Esc` cancels a pending sequence.
 
@@ -362,11 +362,14 @@ The review runs in the background from the repository you launched prpr in; keep
 
 The conversation lives in an AI chat panel on the right, next to whichever tab is open, so the code stays visible while you ask about it. Press `Ctrl-l` on Overview, AI Guide, or Diff to show or hide it. Terminals narrower than 120 columns show the panel over the review instead.
 
-- Press `Q` to type in the panel. On Diff, the line under the cursor, or the lines selected with `v` or repeated `x`, are attached to the question when you send it; the panel shows what is attached. On Overview and AI Guide the whole changeset is attached. AI questions can include both removed and added lines.
+The panel follows the layout of editor and terminal agent chats: your questions are marked with `›`, answers follow them, and the message box stays at the bottom with what is attached shown just above it.
+
+- Press `Q` to type in the panel. On Diff, the line under the cursor, or the lines selected with `v` or repeated `x`, are attached to the question when you send it. On Overview and AI Guide the whole changeset is attached. AI questions can include both removed and added lines.
 - Press `E` to immediately explain the attached lines: behavior before and after, purpose, how the change works, and review concerns.
-- Press `Ctrl-s` to send. `Enter` inserts a newline; `Ctrl-h` deletes backward.
-- `Esc` returns to the review and leaves the panel open, and a running request keeps going. Select other lines and press `Q` again to ask a follow-up about them in the same thread.
-- `Ctrl-x` cancels a running request, and `Ctrl-n` starts a new thread. `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation.
+- `Enter` sends. `Shift-Enter` inserts a newline in terminals that support the kitty keyboard protocol, such as Ghostty, kitty, and WezTerm; `Alt-Enter` and `Ctrl-j` work everywhere. `Ctrl-h` deletes backward. The box grows as you type.
+- `Up` in an empty box recalls earlier questions, and `Down` goes back. `/new` or `Ctrl-n` starts a new thread.
+- `Esc` returns to the review and leaves the panel open, and a running request keeps going while the panel shows how long it has been thinking. Select other lines and press `Q` again to ask a follow-up about them in the same thread.
+- `Ctrl-x` cancels a running request. `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation.
 
 Each turn shows its source scope, file/line references, unknowns, and context coverage. Questions include the selected lines, surrounding complete hunks, PR description, and additional patches that fit the budget. References are checked against the supplied diff. Older conversation turns are omitted when necessary to fit the budget, and that omission is reported.
 

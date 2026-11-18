@@ -19,7 +19,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -338,18 +341,40 @@ impl Drop for Runtime {
     }
 }
 
+/// Set once at startup when the terminal speaks the kitty keyboard protocol.
+static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Without the kitty keyboard protocol a terminal sends Shift-Enter as plain Enter, so the chat could not tell sending from a newline.
+fn enter_screen() -> std::io::Result<()> {
+    let mut output = tty()?;
+    execute!(output, EnterAlternateScreen, EnableBracketedPaste)?;
+    if KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::Relaxed) {
+        execute!(
+            output,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
+    Ok(())
+}
+
+fn leave_screen() -> std::io::Result<()> {
+    let mut output = tty()?;
+    if KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::Relaxed) {
+        execute!(output, PopKeyboardEnhancementFlags)?;
+    }
+    execute!(
+        output,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )
+}
+
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        if let Ok(mut output) = tty() {
-            let _ = execute!(
-                output,
-                DisableBracketedPaste,
-                LeaveAlternateScreen,
-                crossterm::cursor::Show
-            );
-        }
+        let _ = leave_screen();
     }
 }
 
@@ -486,19 +511,15 @@ pub fn run() -> Result<()> {
     let panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        if let Ok(mut output) = tty() {
-            let _ = execute!(
-                output,
-                DisableBracketedPaste,
-                LeaveAlternateScreen,
-                crossterm::cursor::Show
-            );
-        }
+        let _ = leave_screen();
         panic_hook(info);
     }));
     enable_raw_mode()?;
     let _guard = TerminalGuard;
-    execute!(tty()?, EnterAlternateScreen, EnableBracketedPaste)?;
+    let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    KEYBOARD_ENHANCED.store(enhanced, std::sync::atomic::Ordering::Relaxed);
+    app.keyboard_enhanced = enhanced;
+    enter_screen()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(tty()?))?;
     terminal.resize(terminal.size()?.into())?;
     let (sender, receiver) = mpsc::channel();
@@ -1371,6 +1392,7 @@ fn start_question(
         .map_or_else(|| "Entire changeset".into(), |focus| focus.label.clone());
     app.chat.error = None;
     app.chat.pending = Some((question.clone(), scope));
+    app.chat_asked_at = Some(std::time::Instant::now());
     let generation = app.generation;
     let request = runtime.ask_request;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1826,12 +1848,7 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
             }
         };
         disable_raw_mode()?;
-        execute!(
-            tty()?,
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        )?;
+        leave_screen()?;
         let result = Command::new("hx")
             .stdin(std::process::Stdio::from(tty()?))
             .stdout(std::process::Stdio::from(tty()?))
@@ -1844,7 +1861,7 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
             .context("Cannot start Helix; install hx and ensure it is on PATH");
         let resume = (|| -> Result<()> {
             enable_raw_mode()?;
-            execute!(tty()?, EnterAlternateScreen, EnableBracketedPaste)?;
+            enter_screen()?;
             terminal.resize(terminal.size()?.into())?;
             Ok(())
         })();

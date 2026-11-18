@@ -1710,10 +1710,7 @@ fn chat_panel_toggles_from_every_tab_and_attaches_the_cursor_when_sent() {
     let after = app.chat_focus().unwrap().unwrap().label;
     assert_ne!(before, after);
     let docked = screen(&mut app);
-    assert!(
-        docked.contains("Attached: src/client.rs"),
-        "{after}\n{docked}"
-    );
+    assert!(docked.contains("@ src/client.rs"), "{after}\n{docked}");
 
     press(&mut app, 'Q').unwrap();
     let Action::Ask { question, focus } = app
@@ -1728,7 +1725,70 @@ fn chat_panel_toggles_from_every_tab_and_attaches_the_cursor_when_sent() {
 
     app.key(key(KeyCode::Esc)).unwrap();
     app.tab = PageTab::Overview;
-    assert!(screen(&mut app).contains("Attached: entire changeset"));
+    assert!(screen(&mut app).contains("@ Entire changeset"));
+}
+
+#[test]
+fn chat_composer_sends_on_enter_keeps_newlines_and_recalls_questions() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.opened(overview());
+    app.accept_diff(app::demo_data()).unwrap();
+    app.settings.ai.provider = Provider::Codex;
+    app.tab = PageTab::Diff;
+    press(&mut app, 'Q').unwrap();
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::None
+    ));
+
+    for c in "Why".chars() {
+        press(&mut app, c).unwrap();
+    }
+    for newline in [
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+    ] {
+        app.key(newline).unwrap();
+    }
+    press(&mut app, '?').unwrap();
+    assert_eq!(app.chat_input.text, "Why\n\n\n?");
+    let Action::Ask { question, .. } = app.key(key(KeyCode::Enter)).unwrap() else {
+        panic!("Enter should send the question")
+    };
+    assert_eq!(question, "Why\n\n\n?");
+    app.chat.pending = Some((question, "selection".into()));
+    for c in "Next".chars() {
+        press(&mut app, c).unwrap();
+    }
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::None
+    ));
+    assert_eq!(
+        app.chat_input.text, "Next",
+        "a draft waits while the agent answers"
+    );
+    assert!(screen(&mut app).contains("Thinking"));
+
+    app.chat_input = app::TextInput::default();
+    app.key(key(KeyCode::Up)).unwrap();
+    assert_eq!(app.chat_input.text, "Why\n\n\n?");
+    app.key(key(KeyCode::Down)).unwrap();
+    assert!(app.chat_input.text.is_empty());
+
+    app.chat.pending = None;
+
+    for c in "/new".chars() {
+        press(&mut app, c).unwrap();
+    }
+    app.chat.error = Some("old".into());
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::None
+    ));
+    assert!(app.chat.error.is_none() && app.chat_input.text.is_empty());
 }
 
 #[test]

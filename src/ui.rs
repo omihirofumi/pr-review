@@ -14,8 +14,8 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
-        Wrap,
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Padding, Paragraph,
+        Row, Table, TableState, Wrap,
     },
 };
 
@@ -1579,115 +1579,269 @@ fn draw_chat(frame: &mut Frame, app: &App, area: Rect, focused: bool) -> u16 {
         .style(Style::default().fg(TEXT).bg(PANEL));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let scroll = app.chat_scroll;
-    let [scope, transcript, editor_label, editor] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(2),
+    let text_width = usize::from(inner.width.saturating_sub(4)).max(1);
+    let (rows, cursor) = wrap_input(&app.chat_input.text, app.chat_input.cursor, text_width);
+    let visible = rows.len().clamp(1, 8);
+    let [transcript, attached, composer, footer] = Layout::vertical([
+        Constraint::Min(1),
         Constraint::Length(1),
-        Constraint::Length(4),
+        Constraint::Length(visible as u16 + 2),
+        Constraint::Length(1),
     ])
     .areas(inner);
-    let attached = match app.chat_focus() {
-        Ok(Some(focus)) => format!("Attached: {}", focus.label),
-        Ok(None) => format!(
-            "Attached: entire changeset · open Diff ({}) to attach lines",
-            app.shortcut("diff")
-        ),
-        Err(error) => format!("Nothing attached: {error}"),
+
+    let content = Rect::new(
+        transcript.x + 1,
+        transcript.y,
+        transcript.width.saturating_sub(2),
+        transcript.height,
+    );
+    let (lines, latest) = chat_transcript(app, usize::from(content.width).max(1));
+    let total = lines.len();
+    let limit = total
+        .saturating_sub(usize::from(content.height))
+        .min(u16::MAX as usize) as u16;
+    let scroll = if app.chat_scroll == u16::MAX {
+        (latest.min(u16::MAX as usize) as u16).min(limit)
+    } else {
+        app.chat_scroll.min(limit)
     };
     frame.render_widget(
-        Paragraph::new(attached)
-            .style(Style::default().fg(ACCENT))
-            .wrap(Wrap { trim: false }),
-        scope,
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().fg(TEXT))
+            .scroll((scroll, 0)),
+        content,
     );
-    let mut text = String::new();
-    let mut latest_start = 0;
-    for turn in &app.chat.turns {
-        text.push_str(&format!(
-            "**You** · {}\n\n{}\n\n",
-            turn.scope, turn.question
-        ));
-        latest_start = text.len();
-        text.push_str(&format!(
-            "**{}**\n\n{}\n\n",
-            app.settings.ai.provider, turn.response.answer
-        ));
-        for reference in &turn.response.references {
-            text.push_str(&format!(
-                "- `{}{} · {:?}` — {}\n",
-                reference.path,
-                reference
-                    .line
-                    .map_or(String::new(), |line| format!(":{line}")),
-                reference.side,
-                reference.reason
-            ));
-        }
-        if !turn.response.unknowns.is_empty() {
-            text.push_str("\n**Unknowns**\n");
-        }
-        for unknown in &turn.response.unknowns {
-            text.push_str(&format!("- {unknown}\n"));
-        }
-        text.push_str(&format!(
-            "\n*Context: {} files included · {} omitted · {} unavailable.*\n\n---\n\n",
-            turn.response.coverage.included_files.len(),
-            turn.response.coverage.omitted_files.len(),
-            turn.response.coverage.unavailable_files.len()
-        ));
-    }
-    if let Some((question, scope)) = &app.chat.pending {
-        latest_start = text.len();
-        text.push_str(&format!(
-            "**You** · {scope}\n\n{question}\n\n*{} is thinking…*",
-            app.settings.ai.provider
-        ));
-    }
-    if let Some(error) = &app.chat.error {
-        latest_start = text.len();
-        text.push_str(&format!(
-            "\n\n**Request failed:** {error}\n\nYou can edit and resend your question."
-        ));
-    }
-    if text.is_empty() {
-        text.push_str("Ask about the behavior, intent, risks, or tests. On the Diff tab the line under the cursor, or the selection, is attached when you send, along with its surrounding hunks.\n\nFollow-up questions keep the earlier turns. Leave the panel, select other lines, and ask again to bring them into the same thread.\n\nCtrl-d / Ctrl-u scroll the conversation.");
-    }
-    let requested = if scroll == u16::MAX {
-        markdown_text(&text[..latest_start], markdown_area(transcript).width)
-            .lines
-            .len()
-            .min(u16::MAX as usize) as u16
-    } else {
-        scroll
+    draw_scrollbar(frame, transcript, total, usize::from(scroll));
+
+    let chip = match app.chat_focus() {
+        Ok(Some(focus)) => Line::from(vec![
+            Span::styled(" @ ", Style::default().fg(MUTED)),
+            Span::styled(focus.label, Style::default().fg(ACCENT)),
+        ]),
+        Ok(None) => Line::from(vec![
+            Span::styled(" @ ", Style::default().fg(MUTED)),
+            Span::styled("Entire changeset", Style::default().fg(ACCENT)),
+            Span::styled(
+                format!(" · lines attach on Diff ({})", app.shortcut("diff")),
+                Style::default().fg(MUTED),
+            ),
+        ]),
+        Err(error) => Line::styled(
+            format!(" Nothing attached: {error}"),
+            Style::default().fg(RED),
+        ),
     };
-    let actual = markdown(frame, &text, transcript, requested);
+    frame.render_widget(Paragraph::new(chip), attached);
+
+    let border = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { ACCENT } else { BORDER }))
+        .padding(Padding::horizontal(1));
+    let field = border.inner(composer);
+    frame.render_widget(border, composer);
+    if app.chat_input.text.is_empty() {
+        let placeholder = if focused {
+            "Ask about this change".to_string()
+        } else {
+            format!("{} to ask about this change", app.shortcut("ask"))
+        };
+        frame.render_widget(
+            Paragraph::new(placeholder).style(Style::default().fg(MUTED)),
+            field,
+        );
+    } else {
+        let top = cursor.0.saturating_sub(visible - 1);
+        frame.render_widget(
+            Paragraph::new(
+                rows[top..]
+                    .iter()
+                    .map(|row| Line::raw(row.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .style(Style::default().fg(if focused { TEXT } else { MUTED })),
+            field,
+        );
+    }
+    if focused && field.width > 0 && field.height > 0 {
+        let row = cursor.0 - cursor.0.saturating_sub(visible - 1);
+        frame.set_cursor_position((
+            field.x + (cursor.1 as u16).min(field.width - 1),
+            field.y + row as u16,
+        ));
+    }
+
+    let newline = if app.keyboard_enhanced {
+        "Shift-Enter"
+    } else {
+        "Alt-Enter"
+    };
     let hint = if !focused {
         format!(
-            "{} type a question · {} hide",
+            " {} ask · {} hide",
             app.shortcut("ask"),
             app.shortcut("toggle_chat")
         )
     } else if app.chat.pending.is_some() {
-        "Thinking… · Ctrl-x cancels · Esc back to review".into()
+        " Ctrl-x stop · Esc back".into()
     } else {
-        "Ctrl-s send · Ctrl-n new thread · Esc back to review".into()
+        format!(" Enter send · {newline} newline · Esc back")
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(MUTED)),
-        editor_label,
+        footer,
     );
-    if focused {
-        draw_input(frame, &app.chat_input, editor);
-    } else {
-        frame.render_widget(
-            Paragraph::new(app.chat_input.text.as_str())
-                .style(Style::default().fg(MUTED))
-                .wrap(Wrap { trim: false }),
-            editor,
-        );
+    scroll
+}
+const USER_MESSAGE: Color = Color::Rgb(47, 46, 42);
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Transcript lines and the row where the latest exchange starts, so a new answer opens at its question.
+fn chat_transcript(app: &App, width: usize) -> (Vec<Line<'static>>, usize) {
+    let mut lines = Vec::new();
+    let mut latest = 0;
+    let question = |lines: &mut Vec<Line<'static>>, text: &str, scope: &str| {
+        let background = Style::default().bg(USER_MESSAGE);
+        for (index, row) in wrap_comment(text.trim_end(), width.saturating_sub(4).max(1))
+            .into_iter()
+            .enumerate()
+        {
+            let pad = width.saturating_sub(3 + Line::raw(row.as_str()).width());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if index == 0 { " › " } else { "   " },
+                    background.fg(ACCENT),
+                ),
+                Span::styled(row, background.fg(TEXT)),
+                Span::styled(" ".repeat(pad), background),
+            ]));
+        }
+        lines.push(Line::styled(
+            format!("   @ {scope}"),
+            Style::default().fg(MUTED),
+        ));
+        lines.push(Line::default());
+    };
+    for turn in &app.chat.turns {
+        latest = lines.len();
+        question(&mut lines, &turn.question, &turn.scope);
+        lines.extend(markdown_text(&answer_markdown(&turn.response), width as u16).lines);
+        lines.push(Line::default());
     }
-    actual
+    if let Some((text, scope)) = &app.chat.pending {
+        latest = lines.len();
+        question(&mut lines, text, scope);
+        let elapsed = app.chat_asked_at.map(|at| at.elapsed()).unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    " {} ",
+                    SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()]
+                ),
+                Style::default().fg(ACCENT),
+            ),
+            Span::styled(
+                format!("Thinking… {}s", elapsed.as_secs()),
+                Style::default().fg(MUTED),
+            ),
+        ]));
+    }
+    if let Some(error) = &app.chat.error {
+        latest = lines.len();
+        for row in wrap_comment(&format!("Request failed: {error}"), width) {
+            lines.push(Line::styled(row, Style::default().fg(RED)));
+        }
+        lines.push(Line::styled(
+            "Edit the question below and press Enter to retry.",
+            Style::default().fg(MUTED),
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "Ask about this change",
+            Style::default().fg(ACCENT),
+        ));
+        lines.push(Line::default());
+        for row in wrap_comment(
+            "Each question carries what is attached below: the cursor line or selection on Diff, otherwise the whole changeset. Follow-ups keep the conversation, so select other lines and ask again.",
+            width,
+        ) {
+            lines.push(Line::styled(row, Style::default().fg(MUTED)));
+        }
+        lines.push(Line::default());
+        for row in wrap_comment(
+            "↑ recalls earlier questions · /new starts over · Ctrl-d / Ctrl-u scroll",
+            width,
+        ) {
+            lines.push(Line::styled(row, Style::default().fg(MUTED)));
+        }
+    }
+    (lines, latest)
+}
+
+fn answer_markdown(answer: &prpr::assistant::Answer) -> String {
+    let mut text = format!("{}\n\n", answer.answer);
+    for reference in &answer.references {
+        text.push_str(&format!(
+            "- `{}{} · {:?}` — {}\n",
+            reference.path,
+            reference
+                .line
+                .map_or(String::new(), |line| format!(":{line}")),
+            reference.side,
+            reference.reason
+        ));
+    }
+    if !answer.unknowns.is_empty() {
+        text.push_str("\n**Unknowns**\n");
+    }
+    for unknown in &answer.unknowns {
+        text.push_str(&format!("- {unknown}\n"));
+    }
+    text.push_str(&format!(
+        "\n*Context: {} files included · {} omitted · {} unavailable.*\n",
+        answer.coverage.included_files.len(),
+        answer.coverage.omitted_files.len(),
+        answer.coverage.unavailable_files.len()
+    ));
+    text
+}
+
+/// Wraps composer text by display width and returns the cursor's row and column in the wrapped rows.
+fn wrap_input(text: &str, cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
+    let width = width.max(1);
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    let mut position = None;
+    for (index, character) in text.char_indices() {
+        if character == '\n' {
+            if index == cursor {
+                position = Some((rows.len() - 1, used));
+            }
+            rows.push(String::new());
+            used = 0;
+            continue;
+        }
+        let next = Span::raw(character.to_string()).width();
+        if used + next > width {
+            rows.push(String::new());
+            used = 0;
+        }
+        if index == cursor {
+            position = Some((rows.len() - 1, used));
+        }
+        rows.last_mut().unwrap().push(character);
+        used += next;
+    }
+    let position = position.unwrap_or_else(|| {
+        if used >= width {
+            rows.push(String::new());
+            (rows.len() - 1, 0)
+        } else {
+            (rows.len() - 1, used)
+        }
+    });
+    (rows, position)
 }
 
 struct SidebarRow {
@@ -3242,7 +3396,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 }
                 text.push('\n');
             }
-            text.push_str("DIALOG CONTROLS (fixed)\n  Esc              Close / cancel\n  Ctrl-s           Save, send question, or preview review\n  Ctrl-h           Backspace in text editors\n  Up/Down          Select command or dialog item\n  Ctrl-n/Ctrl-p    Select a command in the palette\n  Ctrl-u           Clear palette search\n  Enter            Run selected command or confirm preview\n  j/k, Ctrl-d/u    Scroll read-only dialogs\n\n  Ctrl-c always exits immediately.\n\nConfigure shortcuts in the [keybindings] section of your config.\nUse --print-keybindings to inspect effective action names and keys.\n\nGitHub review submission still requires its final confirmation.\nLocal notes and agent replies stay on this computer.");
+            text.push_str("DIALOG CONTROLS (fixed)\n  Esc              Close / cancel\n  Ctrl-s           Save or preview review\n  Enter            Send an AI chat question\n  Shift/Alt-Enter  Newline in AI chat (also Ctrl-j)\n  Ctrl-h           Backspace in text editors\n  Up/Down          Select command or dialog item\n  Ctrl-n/Ctrl-p    Select a command in the palette\n  Ctrl-u           Clear palette search\n  Enter            Run selected command or confirm preview\n  j/k, Ctrl-d/u    Scroll read-only dialogs\n\n  Ctrl-c always exits immediately.\n\nConfigure shortcuts in the [keybindings] section of your config.\nUse --print-keybindings to inspect effective action names and keys.\n\nGitHub review submission still requires its final confirmation.\nLocal notes and agent replies stay on this computer.");
             frame.render_widget(
                 Paragraph::new(text)
                     .style(Style::default().fg(TEXT))
@@ -3594,6 +3748,71 @@ mod tests {
         assert_eq!((paired.source, paired.alt_source), (Some(2), Some(3)));
         assert_eq!(selected_row(&rows, 3), selected_row(&rows, 2));
         assert_eq!(paired.line.width(), 80);
+    }
+
+    #[test]
+    fn composer_wraps_long_questions_and_tracks_the_cursor() {
+        let (rows, cursor) = wrap_input("abcdef\nxy", 4, 4);
+        assert_eq!(rows, ["abcd", "ef", "xy"]);
+        assert_eq!(
+            cursor,
+            (1, 0),
+            "a cursor at a wrap point starts the next row"
+        );
+        assert_eq!(
+            wrap_input("abcd", 4, 4),
+            (vec!["abcd".into(), String::new()], (1, 0))
+        );
+        assert_eq!(wrap_input("ab\n", 3, 4).1, (1, 0));
+        assert_eq!(wrap_input("日本語", 9, 4).0, ["日本", "語"]);
+    }
+
+    #[test]
+    fn docked_chat_marks_questions_and_keeps_the_composer_at_the_bottom() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.loaded(demo_data()).unwrap();
+        app.settings.ai.provider = Provider::Claude;
+        app.chat_open = true;
+        app.dialog = Some(Dialog::Ask);
+        app.chat.turns.push(prpr::assistant::Turn {
+            question: "Why does the retry stop early?".into(),
+            scope: "src/client.rs:12".into(),
+            response: prpr::assistant::Answer {
+                answer: "The deadline is checked before each attempt.".into(),
+                references: Vec::new(),
+                unknowns: Vec::new(),
+                coverage: Default::default(),
+            },
+        });
+        app.chat_input = TextInput::new("And the backoff?".into());
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines = buffer
+            .content
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+        if std::env::var_os("PRPR_PRINT_SCREEN").is_some() {
+            println!("{text}");
+        }
+        let question = lines
+            .iter()
+            .position(|line| line.contains("› Why does the retry"))
+            .unwrap();
+        let answer = lines
+            .iter()
+            .position(|line| line.contains("The deadline is checked"))
+            .unwrap();
+        let composer = lines
+            .iter()
+            .position(|line| line.contains("And the backoff?"))
+            .unwrap();
+        assert!(question < answer && answer < composer);
+        assert!(lines[composer + 2].contains("Enter send"), "{text}");
+        assert!(!text.contains("**"), "{text}");
     }
 
     #[test]

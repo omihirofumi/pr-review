@@ -951,6 +951,11 @@ pub struct App {
     pub chat_input: TextInput,
     /// Transcript scroll offset; `u16::MAX` follows the latest answer.
     pub chat_scroll: u16,
+    pub chat_asked_at: Option<std::time::Instant>,
+    /// Position in the earlier questions while Up and Down recall them into the composer.
+    pub chat_recall: Option<usize>,
+    /// The terminal reports modified Enter keys, so Shift-Enter can insert a newline.
+    pub keyboard_enhanced: bool,
     /// Agent notes from `--notes`, added once the first local snapshot is loaded.
     pub pending_notes: Vec<notes::Seed>,
     /// A `--watch` reload is running in the background without blocking input.
@@ -997,6 +1002,9 @@ impl App {
             chat_open: false,
             chat_input: TextInput::default(),
             chat_scroll: u16::MAX,
+            chat_asked_at: None,
+            chat_recall: None,
+            keyboard_enhanced: false,
             pending_notes: Vec::new(),
             watch_loading: false,
             open_on_diff: false,
@@ -1348,6 +1356,21 @@ impl App {
                     .to_lowercase()
                     .contains(&filter)
             })
+            .collect()
+    }
+
+    /// Questions already asked in this conversation, oldest first.
+    fn chat_history(&self) -> Vec<String> {
+        self.chat
+            .turns
+            .iter()
+            .map(|turn| turn.question.clone())
+            .chain(
+                self.chat
+                    .pending
+                    .iter()
+                    .map(|(question, _)| question.clone()),
+            )
             .collect()
     }
 
@@ -2309,12 +2332,42 @@ impl App {
                     return Ok(Action::None);
                 }
                 let control = key.modifiers.contains(KeyModifiers::CONTROL);
-                if save && self.chat.pending.is_none() && !self.chat_input.text.trim().is_empty() {
+                let enter = key.code == KeyCode::Enter;
+                if enter
+                    && key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    || key.code == KeyCode::Char('j') && control
+                {
+                    self.chat_input.text.insert(self.chat_input.cursor, '\n');
+                    self.chat_input.cursor += 1;
+                    self.chat_recall = None;
+                    return Ok(Action::None);
+                }
+                if enter || save {
+                    let text = self.chat_input.text.trim();
+                    if text.is_empty() {
+                        return Ok(Action::None);
+                    }
+                    if self.chat.pending.is_some() {
+                        self.message("The agent is still answering; Ctrl-x stops it.", false);
+                        return Ok(Action::None);
+                    }
+                    self.chat_recall = None;
+                    if matches!(text, "/new" | "/clear") {
+                        self.chat = Chat::default();
+                        self.chat_input = TextInput::default();
+                        self.chat_scroll = u16::MAX;
+                        return Ok(Action::None);
+                    }
                     let focus = self.chat_focus()?;
                     let question = std::mem::take(&mut self.chat_input).text;
                     self.chat_scroll = u16::MAX;
                     return Ok(Action::Ask { question, focus });
                 }
+                let input = &self.chat_input;
+                let first_row = !input.text[..input.cursor].contains('\n');
+                let last_row = !input.text[input.cursor..].contains('\n');
                 match key.code {
                     KeyCode::Char('x') if control && self.chat.pending.is_some() => {
                         self.chat.pending = None;
@@ -2323,6 +2376,7 @@ impl App {
                     KeyCode::Char('n') if control && self.chat.pending.is_none() => {
                         self.chat = Chat::default();
                         self.chat_scroll = u16::MAX;
+                        self.chat_recall = None;
                     }
                     KeyCode::Char('d') if control => {
                         self.chat_scroll = self.chat_scroll.saturating_add(12)
@@ -2332,7 +2386,35 @@ impl App {
                     }
                     KeyCode::PageDown => self.chat_scroll = self.chat_scroll.saturating_add(15),
                     KeyCode::PageUp => self.chat_scroll = self.chat_scroll.saturating_sub(15),
-                    _ => self.chat_input.key(key),
+                    KeyCode::Up
+                        if first_row && (input.text.is_empty() || self.chat_recall.is_some()) =>
+                    {
+                        let history = self.chat_history();
+                        if let Some(index) =
+                            self.chat_recall.unwrap_or(history.len()).checked_sub(1)
+                        {
+                            self.chat_input = TextInput::new(history[index].clone());
+                            self.chat_recall = Some(index);
+                        }
+                    }
+                    KeyCode::Down if last_row && self.chat_recall.is_some() => {
+                        let history = self.chat_history();
+                        let next = self.chat_recall.unwrap_or_default() + 1;
+                        if let Some(question) = history.get(next) {
+                            self.chat_input = TextInput::new(question.clone());
+                            self.chat_recall = Some(next);
+                        } else {
+                            self.chat_input = TextInput::default();
+                            self.chat_recall = None;
+                        }
+                    }
+                    _ => {
+                        let before = self.chat_input.text.clone();
+                        self.chat_input.key(key);
+                        if before != self.chat_input.text {
+                            self.chat_recall = None;
+                        }
+                    }
                 }
                 return Ok(Action::None);
             }
