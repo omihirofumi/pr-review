@@ -609,3 +609,60 @@ fn split_view_moves_row_by_row_left_before_right_like_hunk() {
         "unified view keeps unified order"
     );
 }
+
+#[test]
+fn slash_searches_every_file_and_n_moves_between_matches_until_escape() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    load(
+        &mut app,
+        vec![
+            fixture_file(
+                "src/a.rs",
+                Some("@@ -1,2 +1,2 @@\n-let Timeout = 1;\n+let timeout = 2;\n keep"),
+            ),
+            fixture_file("src/b.rs", Some("@@ -1,1 +1,1 @@\n-old\n+retry(timeout)")),
+        ],
+    );
+    let position = |app: &App| {
+        let review = app.review.as_ref().unwrap();
+        (review.selected_file, review.position())
+    };
+    let search = |app: &mut App, text: &str| {
+        app.key(key('/')).unwrap();
+        for character in text.chars() {
+            app.key(key(character)).unwrap();
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+    };
+
+    search(&mut app, "timeout");
+    assert_eq!(position(&app), (0, 1));
+    assert!(app.status.contains("match 1 of 3"), "{}", app.status);
+    app.key(key('n')).unwrap();
+    assert_eq!(position(&app), (0, 2));
+    app.key(key('n')).unwrap();
+    assert_eq!(position(&app), (1, 2));
+    app.key(key('n')).unwrap();
+    assert_eq!(position(&app), (0, 1));
+    assert!(app.status.contains("wrapped"), "{}", app.status);
+    app.key(key('N')).unwrap();
+    assert_eq!(position(&app), (1, 2));
+
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.review.as_ref().unwrap().search.is_none());
+    assert!(app.review.is_some());
+    app.key(key('p')).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+
+    search(&mut app, "Timeout");
+    assert!(app.status.contains("match 1 of 1"), "{}", app.status);
+    search(&mut app, "absent");
+    assert!(
+        app.error && app.status.contains("No match"),
+        "{}",
+        app.status
+    );
+}

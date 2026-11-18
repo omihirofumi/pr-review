@@ -111,6 +111,12 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "clipboard yank snippet",
             )
             .disabled_if(!text, "Choose a textual hunk"),
+            Command::new(
+                "Search text in every diff file",
+                "/",
+                '/',
+                "find grep match next previous",
+            ),
             Command::new("Explain diff or selection", "E", 'E', "ai hunk code")
                 .disabled_if(!text, "Choose a textual hunk")
                 .disabled_if(

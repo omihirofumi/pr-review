@@ -227,6 +227,8 @@ The file sidebar shows changed files as a tree. Chains of directories that each 
 
 Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
 
+Press `/` in Diff, type text, and press `Enter` to jump to the first match after the cursor. The search covers the lines currently shown in every changed file, ignores case unless the text has a capital letter, and highlights each match. While a search is active, `n` / `N` move to the next / previous match and wrap around the changeset; `Esc` clears the search, after which `n` again means next file. The keys are configurable as `search`, `search_next`, and `search_previous`.
+
 ## Unified and split view
 
 Diff starts in the unified layout. Press `|` to switch to a side-by-side split for the rest of the session: deletions on the left with old line numbers, additions on the right with new line numbers, and unchanged lines on both sides. A run of deleted lines pairs row by row with the added lines that follow it, and the shorter side is padded.
@@ -395,6 +397,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `j` / `k`, up / down | Move through lines within the current file |
 | `.` / `,`, `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous hunk, continuing across files |
+| `/`, then `n` / `N` | Search every file's diff text; jump to the next / previous match |
 | `gg` / `ge` | Top / end of current file, or first / last item in lists |
 | `gf` | Open selected source location in your editor |
 | `G`, Home / End | Legacy file or list boundary shortcuts |

@@ -300,6 +300,8 @@ pub struct ReviewState {
     pub workspace: Option<PathBuf>,
     pub viewport: Viewport,
     pub marks: Vec<Mark>,
+    /// Text searched with `/`; matches across all files until Esc clears it.
+    pub search: Option<String>,
     /// File shown when the sidebar took focus, so returning to another file can start at its top.
     pub sidebar_origin: Option<usize>,
     /// Whether the last draw used split view, which changes the order line movement follows.
@@ -871,6 +873,58 @@ impl ReviewState {
         }
     }
 
+    fn search_hits(&self, query: &str) -> Vec<(usize, usize)> {
+        self.lines
+            .iter()
+            .enumerate()
+            .flat_map(|(file, rows)| {
+                rows.iter().enumerate().filter_map(move |(position, row)| {
+                    (!search_ranges(query, row).is_empty()).then_some((file, position))
+                })
+            })
+            .collect()
+    }
+
+    /// Moves to the next or previous match, wrapping around the changeset, and describes the result.
+    fn search_step(&mut self, forward: bool, include_current: bool) -> (String, bool) {
+        let Some(query) = self.search.clone() else {
+            return ("No search; / starts one".into(), false);
+        };
+        let hits = self.search_hits(&query);
+        if hits.is_empty() {
+            return (format!("No match for /{query} in the shown lines"), false);
+        }
+        let here = (self.selected_file, self.position());
+        let found = if forward {
+            hits.iter()
+                .position(|&hit| hit > here || (include_current && hit == here))
+        } else {
+            hits.iter().rposition(|&hit| hit < here)
+        };
+        let wrapped = found.is_none();
+        let index = found.unwrap_or(if forward { 0 } else { hits.len() - 1 });
+        let (file, position) = hits[index];
+        if file != self.selected_file {
+            self.selection = None;
+            self.horizontal = 0;
+        }
+        self.selected_file = file;
+        self.positions[file] = position;
+        self.focus = Focus::Diff;
+        if self.selection.is_some_and(|selection| !selection.extending) {
+            self.selection = None;
+        }
+        (
+            format!(
+                "/{query} · match {} of {}{} · n/N move · Esc clears",
+                index + 1,
+                hits.len(),
+                if wrapped { " · wrapped" } else { "" }
+            ),
+            true,
+        )
+    }
+
     fn hunk(&mut self, forward: bool) {
         if let Some((file, position)) = self.hunk_target(forward) {
             if file != self.selected_file {
@@ -885,6 +939,44 @@ impl ReviewState {
             self.selection = None;
         }
     }
+}
+
+/// Character ranges of `query` in a diff row's code, ignoring case unless the query has capitals.
+pub fn search_ranges(query: &str, row: &DiffLine) -> Vec<(usize, usize)> {
+    if query.is_empty()
+        || !matches!(
+            row.kind,
+            LineKind::Addition | LineKind::Deletion | LineKind::Context
+        )
+    {
+        return Vec::new();
+    }
+    let fold = |character: char| -> char {
+        if query.chars().any(char::is_uppercase) {
+            character
+        } else {
+            character.to_lowercase().next().unwrap_or(character)
+        }
+    };
+    let code = row
+        .text
+        .get(1..)
+        .unwrap_or_default()
+        .chars()
+        .map(fold)
+        .collect::<Vec<_>>();
+    let needle = query.chars().map(fold).collect::<Vec<_>>();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start + needle.len() <= code.len() {
+        if code[start..start + needle.len()] == needle[..] {
+            ranges.push((start, start + needle.len()));
+            start += needle.len();
+        } else {
+            start += 1;
+        }
+    }
+    ranges
 }
 
 pub enum Action {
@@ -988,6 +1080,7 @@ pub struct App {
     pub root: PathBuf,
     pub filter: String,
     pub filtering: bool,
+    pub search_prompt: Option<TextInput>,
     pub demo: bool,
 }
 
@@ -1037,6 +1130,7 @@ impl App {
             root,
             filter: String::new(),
             filtering: false,
+            search_prompt: None,
             demo,
         }
     }
@@ -1217,6 +1311,7 @@ impl App {
             workspace: None,
             viewport: Viewport::default(),
             marks: Vec::new(),
+            search: None,
             sidebar_origin: None,
             split: std::cell::Cell::new(false),
         });
@@ -1478,6 +1573,41 @@ impl App {
                 _ => {}
             }
             return Ok(Action::None);
+        }
+        if let Some(input) = &mut self.search_prompt {
+            match key.code {
+                KeyCode::Esc => self.search_prompt = None,
+                KeyCode::Enter => {
+                    let query = input.text.trim().to_owned();
+                    self.search_prompt = None;
+                    if let Some(review) = &mut self.review {
+                        if query.is_empty() {
+                            review.search = None;
+                        } else {
+                            review.search = Some(query);
+                            let (text, found) = review.search_step(true, true);
+                            self.message(text, !found);
+                        }
+                    }
+                }
+                _ => input.key(key),
+            }
+            return Ok(Action::None);
+        }
+        if self.pending_keys.is_empty()
+            && self.binding_view() == View::Diff
+            && let Some(review) = self
+                .review
+                .as_mut()
+                .filter(|review| review.search.is_some())
+        {
+            for (id, forward) in [("search_next", true), ("search_previous", false)] {
+                if self.settings.keybindings.single_matches(id, key) {
+                    let (text, found) = review.search_step(forward, false);
+                    self.message(text, !found);
+                    return Ok(Action::None);
+                }
+            }
         }
         if !self.pending_keys.is_empty() && Stroke::from_event(key).is_escape() {
             self.pending_keys.clear();
@@ -1820,7 +1950,12 @@ impl App {
             KeyCode::Esc if review.selection.is_some() => {
                 review.selection = None;
             }
+            KeyCode::Esc if review.search.is_some() => {
+                review.search = None;
+                self.message("Search cleared", false);
+            }
             KeyCode::Esc if !self.busy => return Ok(self.leave_pr()),
+            KeyCode::Char('/') => self.search_prompt = Some(TextInput::default()),
             KeyCode::Tab | KeyCode::BackTab => {
                 if review.focus == Focus::Files {
                     review.leave_files();

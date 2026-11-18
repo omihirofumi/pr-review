@@ -35,6 +35,8 @@ const I: u8 = 1;
 const O: u8 = 2;
 const D: u8 = 4;
 const G: u8 = 8;
+/// Diff while a `/` search is active; these keys take precedence over the Diff bindings.
+const S: u8 = 16;
 const ALL: u8 = I | O | G | D;
 const REVIEW: u8 = O | G | D;
 
@@ -45,6 +47,7 @@ pub const HELP_GROUPS: &[(u8, &str)] = &[
     (O, "OVERVIEW"),
     (G, "AI GUIDE"),
     (D, "DIFF"),
+    (S, "DIFF SEARCH (while a search is active)"),
 ];
 
 pub struct BindingSpec {
@@ -63,6 +66,7 @@ impl BindingSpec {
             .into_iter()
             .filter(|view| self.applies(*view))
             .map(View::name)
+            .chain((self.scope & S != 0).then_some("Diff search"))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -112,7 +116,7 @@ specs! {
     ("refresh", "Refresh", ALL, ["r"]),
     ("help", "Show keyboard shortcuts", ALL, ["?"]),
     ("status", "Show operation details", ALL, ["!"]),
-    ("back", "Clear selection / back / exit local review", ALL, ["Esc"]),
+    ("back", "Clear selection or search / back / exit local review", ALL, ["Esc"]),
     ("quit", "Quit", ALL, ["q"]),
     ("focus_files", "Show and focus file sidebar", D, ["h"]),
     ("focus_diff", "Focus diff", D, ["l", "Enter"]),
@@ -138,6 +142,9 @@ specs! {
     ("checkout", "Check out the PR in this repository", REVIEW, ["w"]),
     ("open_file", "Open source in editor", D, ["gf", "e"]),
     ("copy_selection", "Copy selected lines as Markdown", D, ["y"]),
+    ("search", "Search text in every diff file", D, ["/"]),
+    ("search_next", "Next search match", S, ["n"]),
+    ("search_previous", "Previous search match", S, ["N"]),
     ("toggle_split", "Toggle unified / split diff", D, ["|"]),
     ("toggle_wrap", "Toggle line wrapping in the diff", D, ["W"]),
     ("copy_permalink", "Copy GitHub permalink to selected lines", D, ["gy", "Y"]),
@@ -407,9 +414,15 @@ impl Keybindings {
                 "Unknown shortcut action {id}; use --print-keybindings to list action names"
             );
         }
-        for view in [View::Inbox, View::Overview, View::Guide, View::Diff] {
+        for (flag, name) in [
+            (I, View::Inbox.name()),
+            (O, View::Overview.name()),
+            (G, View::Guide.name()),
+            (D, View::Diff.name()),
+            (S, "Diff search"),
+        ] {
             let mut seen: Vec<(Vec<Stroke>, &str)> = Vec::new();
-            for spec in SPECS.iter().filter(|spec| spec.applies(view)) {
+            for spec in SPECS.iter().filter(|spec| spec.scope & flag != 0) {
                 for text in self.keys(spec.id) {
                     let sequence = parse_sequence(&text)
                         .with_context(|| format!("Invalid keybindings.{}", spec.id))?;
@@ -417,7 +430,7 @@ impl Keybindings {
                         ensure!(
                             !sequence.starts_with(previous) && !previous.starts_with(&sequence),
                             "Shortcut conflict in {}: {} ({}) overlaps {} ({})",
-                            view.name(),
+                            name,
                             spec.id,
                             text,
                             id,

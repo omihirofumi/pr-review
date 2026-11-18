@@ -340,25 +340,39 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         draw_inbox(frame, app, body);
     }
-    frame.render_widget(
-        Paragraph::new(format!(
-            " {}{}",
-            if app.busy { "Working · " } else { "" },
-            app.status
-        ))
-        .style(
-            Style::default()
-                .fg(if app.error {
-                    RED
-                } else if app.busy {
-                    ACCENT
-                } else {
-                    MUTED
-                })
-                .bg(SIDEBAR),
-        ),
-        status,
-    );
+    if let Some(input) = &app.search_prompt {
+        frame.render_widget(
+            Paragraph::new(" /").style(Style::default().fg(ACCENT).bg(SIDEBAR)),
+            status,
+        );
+        let field = Rect {
+            x: status.x + 2,
+            width: status.width.saturating_sub(2),
+            ..status
+        };
+        frame.render_widget(Block::default().style(Style::default().bg(SIDEBAR)), field);
+        draw_input(frame, input, field);
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!(
+                " {}{}",
+                if app.busy { "Working · " } else { "" },
+                app.status
+            ))
+            .style(
+                Style::default()
+                    .fg(if app.error {
+                        RED
+                    } else if app.busy {
+                        ACCENT
+                    } else {
+                        MUTED
+                    })
+                    .bg(SIDEBAR),
+            ),
+            status,
+        );
+    }
     let keys = if app.goto_pending {
         if app.pending_keys.is_empty() {
             " Sequence pending · Esc cancels ".into()
@@ -1810,7 +1824,7 @@ fn answer_markdown(answer: &prpr::assistant::Answer) -> String {
     text
 }
 
-/// Wraps composer text by display width and returns the cursor's row and column in the wrapped rows.
+/// Wraps input text by display width and returns the cursor's row and column in the wrapped rows.
 fn wrap_input(text: &str, cursor: usize, width: usize) -> (Vec<String>, (usize, usize)) {
     let width = width.max(1);
     let mut rows = vec![String::new()];
@@ -2275,6 +2289,12 @@ fn review_rows(review: &ReviewState, width: u16, split: bool, wrap: bool) -> Vec
         has_thread: anchored.contains_key(&index),
         has_draft: drafts.contains_key(&index),
         mark: mark_for(&review.marks, &file.filename, line),
+        matches: review.search.as_deref().map_or_else(Vec::new, |query| {
+            crate::app::search_ranges(query, line)
+                .into_iter()
+                .map(|(start, end)| (start as u32 + 1, end as u32))
+                .collect()
+        }),
     };
     let row = |index: usize, gutter: Gutter, columns: usize| {
         let line = &lines[index];
@@ -2400,9 +2420,12 @@ struct RowState {
     has_draft: bool,
     /// Highlighted character range in source columns; `(1, u32::MAX)` covers the whole line.
     mark: Option<(u32, u32)>,
+    /// Search matches as source columns, in the same form as `mark`.
+    matches: Vec<(u32, u32)>,
 }
 
 const MARK: Color = Color::Rgb(96, 76, 24);
+const SEARCH_MATCH: Color = Color::Rgb(38, 79, 120);
 
 fn mark_for(marks: &[prpr::model::Mark], path: &str, line: &DiffLine) -> Option<(u32, u32)> {
     marks
@@ -2445,7 +2468,11 @@ fn display_range(source: &str, (start, end): (u32, u32), horizontal: u16) -> (us
     (range.0.saturating_sub(shift), range.1.saturating_sub(shift))
 }
 
-fn highlight_spans(spans: Vec<Span<'static>>, (start, end): (usize, usize)) -> Vec<Span<'static>> {
+fn highlight_spans(
+    spans: Vec<Span<'static>>,
+    (start, end): (usize, usize),
+    color: Color,
+) -> Vec<Span<'static>> {
     let mut result = Vec::new();
     let mut position = 0;
     for span in spans {
@@ -2458,7 +2485,7 @@ fn highlight_spans(spans: Vec<Span<'static>>, (start, end): (usize, usize)) -> V
                 continue;
             }
             let style = if marked {
-                span.style.bg(MARK)
+                span.style.bg(color)
             } else {
                 span.style
             };
@@ -2579,12 +2606,17 @@ fn code_row(
         ),
         Span::styled(format!("{sign} "), Style::default().fg(sign_color)),
     ];
-    let syntax = syntax_spans(&code, &file.filename);
-    spans.extend(match state.mark {
-        Some(columns) => highlight_spans(
+    let source = line.text.get(1..).unwrap_or_default();
+    let mut syntax = syntax_spans(&code, &file.filename);
+    for columns in state.matches {
+        syntax = highlight_spans(
             syntax,
-            display_range(line.text.get(1..).unwrap_or_default(), columns, horizontal),
-        ),
+            display_range(source, columns, horizontal),
+            SEARCH_MATCH,
+        );
+    }
+    spans.extend(match state.mark {
+        Some(columns) => highlight_spans(syntax, display_range(source, columns, horizontal), MARK),
         None => syntax,
     });
     ViewRow {
@@ -3045,6 +3077,18 @@ fn wrap_comment(text: &str, width: usize) -> Vec<String> {
 }
 
 fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
+    popup_block(frame, Block::bordered().title(title), width, height)
+}
+
+/// Keeps the save keys on the bottom border, where a long file path in the title cannot push them out.
+fn editor_popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
+    let block = Block::bordered()
+        .title(title)
+        .title_bottom(Line::from(" Ctrl-s save · Esc cancel ").right_aligned());
+    popup_block(frame, block, width, height)
+}
+
+fn popup_block(frame: &mut Frame, block: Block, width: u16, height: u16) -> Rect {
     let area = frame.area();
     let width = width.min(area.width.saturating_sub(4));
     let height = height.min(area.height.saturating_sub(2));
@@ -3055,8 +3099,7 @@ fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
         height,
     );
     frame.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .title(title)
+    let block = block
         .border_style(Style::default().fg(BORDER))
         .style(Style::default().fg(TEXT).bg(PANEL));
     let inner = block.inner(rect);
@@ -3515,10 +3558,10 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
             reply_to,
             input,
         } => {
-            let inner = popup(
+            let inner = editor_popup(
                 frame,
                 format!(
-                    " Local {} {}:{} / Ctrl-s save / Esc cancel ",
+                    " Local {} {}:{} ",
                     if reply_to.is_some() { "reply" } else { "note" },
                     anchor.path,
                     anchor.line_label()
@@ -3585,10 +3628,10 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
             );
         }
         Dialog::Compose { draft, input, .. } => {
-            let inner = popup(
+            let inner = editor_popup(
                 frame,
                 format!(
-                    " Draft {}:{} {:?} / Ctrl-s save / Esc cancel ",
+                    " Draft {}:{} {:?} ",
                     draft.path,
                     draft.line_label(),
                     draft.side
@@ -3679,24 +3722,15 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
 }
 
 fn draw_input(frame: &mut Frame, input: &TextInput, area: Rect) {
-    let before = &input.text[..input.cursor];
-    let row = before.bytes().filter(|&c| c == b'\n').count();
-    let last_line = before.rsplit('\n').next().unwrap_or_default();
-    let col = Line::from(last_line).width();
+    let (rows, (row, col)) = wrap_input(&input.text, input.cursor, usize::from(area.width));
     let vertical = row.saturating_sub(usize::from(area.height.saturating_sub(1)));
-    let horizontal = col.saturating_sub(usize::from(area.width.saturating_sub(1)));
     frame.render_widget(
-        Paragraph::new(Text::raw(input.text.as_str())).scroll((
-            vertical.min(u16::MAX as usize) as u16,
-            horizontal.min(u16::MAX as usize) as u16,
-        )),
+        Paragraph::new(rows.into_iter().map(Line::from).collect::<Vec<_>>())
+            .scroll((vertical.min(u16::MAX as usize) as u16, 0)),
         area,
     );
     if area.width > 0 && area.height > 0 {
-        frame.set_cursor_position((
-            area.x + (col - horizontal) as u16,
-            area.y + (row - vertical) as u16,
-        ));
+        frame.set_cursor_position((area.x + col as u16, area.y + (row - vertical) as u16));
     }
 }
 
@@ -3706,6 +3740,77 @@ mod tests {
     use crate::app::{App, Selection, demo_data};
     use prpr::model::{DraftComment, ReviewComment};
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn text_inputs_wrap_long_lines_and_keep_the_cursor_visible() {
+        let mut terminal = Terminal::new(TestBackend::new(10, 2)).unwrap();
+        let input = TextInput::new("abcdefghijklmnopqrstuvwxyz".into());
+        terminal
+            .draw(|frame| draw_input(frame, &input, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..2)
+            .map(|y| (0..10).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        assert_eq!(rows, ["klmnopqrst", "uvwxyz    "]);
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(6, 1)
+        );
+    }
+
+    #[test]
+    fn search_matches_are_highlighted_in_the_diff() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.loaded(demo_data()).unwrap();
+        app.review.as_mut().unwrap().search = Some("is_zero".into());
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..30)
+            .find_map(|y| {
+                let row: String = (0..160).map(|x| buffer[(x, y)].symbol()).collect();
+                row.find("is_zero")
+                    .map(|byte| (row[..byte].chars().count() as u16, y))
+            })
+            .expect("the matched line must be visible");
+        for offset in 0..7 {
+            assert_eq!(buffer[(x + offset, y)].bg, SEARCH_MATCH);
+        }
+        assert_ne!(buffer[(x + 7, y)].bg, SEARCH_MATCH);
+    }
+
+    #[test]
+    fn comment_editor_wraps_its_text_and_keeps_save_keys_beside_a_long_path() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.loaded(demo_data()).unwrap();
+        let press = |app: &mut App, character| {
+            app.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        };
+        press(&mut app, 'j');
+        press(&mut app, 'c');
+        if let Some(Dialog::Compose { draft, input, .. }) = &mut app.dialog {
+            draft.path = format!("{}/client.rs", "very/deep/directory".repeat(4));
+            *input = TextInput::new(format!("START {} END", "word ".repeat(30)));
+        } else {
+            panic!("c must open the draft editor");
+        }
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..20)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        assert!(screen.contains("Ctrl-s save · Esc cancel"), "{screen}");
+        assert!(
+            screen.contains("START") && screen.contains("END"),
+            "{screen}"
+        );
+    }
 
     #[test]
     fn split_pairs_deletion_runs_with_following_additions() {
@@ -3892,7 +3997,11 @@ mod tests {
         assert_eq!(display_range("\tvalue", (2, 6), 0), (4, 9));
         assert_eq!(display_range("let value = 1;", (5, 9), 2), (2, 7));
         assert_eq!(display_range("abc", (1, u32::MAX), 0), (0, 3));
-        let spans = highlight_spans(vec![Span::raw("let "), Span::raw("value = 1;")], (4, 9));
+        let spans = highlight_spans(
+            vec![Span::raw("let "), Span::raw("value = 1;")],
+            (4, 9),
+            MARK,
+        );
         let marked = spans
             .iter()
             .filter(|span| span.style.bg == Some(MARK))
