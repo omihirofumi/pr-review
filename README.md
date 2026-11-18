@@ -24,7 +24,7 @@ Install only the tools needed for the features you use, using your preferred ins
 | GitHub PR browsing and reviews | [GitHub CLI](https://cli.github.com/) (`gh`), authenticated with `gh auth login`; Git (`git`) for repository discovery |
 | Local Jujutsu review | [Jujutsu](https://docs.jj-vcs.dev/latest/install-and-setup/) (`jj`) |
 | Isolated PR checkout | Jujutsu (`jj`) and Git (`git`) |
-| Open source in Helix | [Helix](https://docs.helix-editor.com/install.html) (`hx`) |
+| Open source in an editor | [Helix](https://docs.helix-editor.com/install.html) (`hx`) by default; any editor can be configured |
 | AI explanations | Codex or Claude CLI, installed and authenticated separately |
 
 Opening GitHub source in the isolated review workspace (`[editor] open_in = "workspace"`) also requires the isolated PR checkout tools. When using a custom [`HELIX_RUNTIME`](https://docs.helix-editor.com/building-from-source.html), keep it compatible with the `hx` binary on your `PATH`.
@@ -152,7 +152,7 @@ Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr
 In Diff:
 
 1. Press `j` / `k` to move through the current file; the cursor stops at its first and last lines. Press `.` / `,` (or `n` / `p`) for the next / previous file, and `gg` / `ge` for the current file's top / bottom. The view scrolls only when the cursor comes within `scrolloff` rows (default 5) of an edge; `Ctrl-d` / `Ctrl-u` move the view and cursor together.
-2. Press `gf` or `e` to open the selected source line in Helix. Quit Helix to resume the review at the same position.
+2. Press `gf` or `e` to open the selected source line in your editor (Helix by default). Quit it to resume the review at the same position.
 3. Press `c` to comment on one line. For three lines, press `xxx`, then `c`; for a variable range, press `v`, move with `j` / `k`, then press `c`. In the diff view, `Esc` or `;` clears a selection. Ranges cannot combine removed and added lines or span separate hunks.
 4. Write the comment and press `Ctrl-s` to save a **local draft**. `Ctrl-h` deletes backward. Press `D` to inspect or edit saved drafts.
 5. To publish the review, press `s`, write its summary, and use `Tab` to choose comment, approve, or request changes. Press `Ctrl-s` to preview, then `Enter` to send it to GitHub. `Esc` cancels the preview.
@@ -354,7 +354,7 @@ Press `R` in an opened GitHub PR to run your provider's own review command, so p
 - **Claude** runs `/code-review <PR number>` in print mode with read-only tools only (`Read`, `Grep`, `Glob`, subagents, and `gh pr view/diff/checks` and `git diff/log/show/blame`-style commands). Anything else, including posting to GitHub or editing files, is denied.
 - **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head; press `w` to get there.
 
-The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review` or `codex review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
+The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. `Ctrl-x` outside the chat (or **Stop running AI work** in the command palette) stops every AI job that is still running: a chat answer, the AI guide, and provider reviews. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review` or `codex review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
 
 ## Ask your agent and explain a diff
 
@@ -369,7 +369,7 @@ The panel follows the layout of editor and terminal agent chats: your questions 
 - `Enter` sends. `Shift-Enter` inserts a newline in terminals that support the kitty keyboard protocol, such as Ghostty, kitty, and WezTerm; `Alt-Enter` and `Ctrl-j` work everywhere. `Ctrl-h` deletes backward. The box grows as you type.
 - `Up` in an empty box recalls earlier questions, and `Down` goes back. `/new` or `Ctrl-n` starts a new thread.
 - `Esc` returns to the review and leaves the panel open, and a running request keeps going while the panel shows how long it has been thinking. Select other lines and press `Q` again to ask a follow-up about them in the same thread.
-- `Ctrl-x` cancels a running request. `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation.
+- `Ctrl-x` in the panel cancels the running answer. `Ctrl-d` / `Ctrl-u` and PageDown / PageUp scroll the conversation while you are typing in the panel.
 
 Each turn shows its source scope, file/line references, unknowns, and context coverage. Questions include the selected lines, surrounding complete hunks, PR description, and additional patches that fit the budget. References are checked against the supplied diff. Older conversation turns are omitted when necessary to fit the budget, and that omission is reported.
 
@@ -396,7 +396,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `.` / `,`, `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous hunk, continuing across files |
 | `gg` / `ge` | Top / end of current file, or first / last item in lists |
-| `gf` | Open selected source location in Helix |
+| `gf` | Open selected source location in your editor |
 | `G`, Home / End | Legacy file or list boundary shortcuts |
 | `v` | Toggle selection-extension mode |
 | `x` / `X` | Select/extend whole lines downward / select whole-line bounds |
@@ -415,7 +415,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `T` / `V` | Full inline thread list / PR conversation and reviews |
 | `#` | Open a PR by number in the selected repository |
 | `o` | Open the selected PR or saved item |
-| `w` / `e` | Check out the PR in this repository / open source in Helix |
+| `w` / `e` | Check out the PR in this repository / open source in your editor |
 | `c` / `D` | Compose comment / manage saved drafts |
 | `s` | Preview and submit review |
 | `u` | Recover a submission with an unknown result |
@@ -460,11 +460,27 @@ Drafts are written atomically and scoped to the repository, PR number, head SHA,
 
 GitHub access uses your existing `gh` authentication. Checkout fetches `refs/pull/<number>/head` from the base repository, so fork PRs use the same workflow. Raw Git is used only to fetch arbitrary PR refs into the isolated Jujutsu store; workspace management and revision inspection use `jj`.
 
-## Opening GitHub PR source in Helix
+## Choosing the editor
+
+`gf` / `e` run Helix as `hx +LINE FILE` in the terminal, and prpr resumes when it exits. Set `[editor] command` to use another terminal editor, and add rules to open some languages elsewhere, for example Kotlin and Java in IntelliJ IDEA:
+
+```toml
+[editor]
+command = ["hx", "+{line}", "{file}"]   # files no rule matches
+
+[[editor.rules]]
+extensions = ["kt", "kts", "java"]
+command = ["idea", "--line", "{line}", "{file}"]
+background = true
+```
+
+`{file}` becomes the absolute path and `{line}` the line number, anywhere inside an argument, so `["code", "--goto", "{file}:{line}"]` works too. The first rule whose extension ends the file name wins, case-insensitively, so put `gradle.kts` before `kts`. `background = true` is for GUI editors: prpr starts the editor and keeps the review on screen instead of waiting for it to exit. Read-only copies opened this way stay available until prpr exits. `idea` is the launcher IntelliJ IDEA creates from **Tools > Create Command-line Launcher**.
+
+## Opening GitHub PR source
 
 By default, `gf` / `e` open the repository you launched prpr from, as it is now:
 
-- A RIGHT-side (added or context) line opens that file in your checkout at the PR's line number. Your checkout may be on another revision, so the content can differ from the PR head; the status line says so after Helix exits.
+- A RIGHT-side (added or context) line opens that file in your checkout at the PR's line number. Your checkout may be on another revision, so the content can differ from the PR head; the status line says so after the editor opens it.
 - A LEFT-side (deleted) line opens a read-only copy of the diff merge base fetched from GitHub, using the previous filename for renamed files.
 - A file missing from your checkout, or a PR from a different repository than the launch directory, opens a read-only copy of the PR head.
 

@@ -87,7 +87,7 @@ impl AiConfig {
     }
 }
 
-/// Where GitHub PR source opens in Helix.
+/// Where GitHub PR source opens in the editor.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenIn {
@@ -104,6 +104,10 @@ pub struct EditorConfig {
     pub open_in: OpenIn,
     /// Rows kept between the Diff cursor and the viewport edge before it scrolls.
     pub scrolloff: usize,
+    /// Terminal editor for files no rule matches; `{file}` and `{line}` are substituted.
+    pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<EditorRule>,
 }
 
 impl Default for EditorConfig {
@@ -111,6 +115,80 @@ impl Default for EditorConfig {
         Self {
             open_in: OpenIn::default(),
             scrolloff: 5,
+            command: ["hx", "+{line}", "{file}"].map(String::from).into(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+/// Opens files with these extensions in another editor, such as an IDE for one language.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EditorRule {
+    pub extensions: Vec<String>,
+    pub command: Vec<String>,
+    /// A GUI editor runs beside prpr instead of taking over the terminal until it exits.
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// A program and arguments ready to run for one file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EditorCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub background: bool,
+}
+
+impl EditorConfig {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.command.is_empty(),
+            "editor command needs at least a program"
+        );
+        for rule in &self.rules {
+            ensure!(
+                !rule.command.is_empty(),
+                "editor rule command needs at least a program"
+            );
+            ensure!(
+                !rule.extensions.is_empty()
+                    && rule
+                        .extensions
+                        .iter()
+                        .all(|extension| !extension.trim_start_matches('.').is_empty()),
+                "editor rule extensions cannot be empty"
+            );
+        }
+        Ok(())
+    }
+
+    /// The first rule whose extension ends the file name wins, so `gradle.kts` can precede `kts`.
+    pub fn command_for(&self, file: &Path, line: u32) -> EditorCommand {
+        let name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let rule = self.rules.iter().find(|rule| {
+            rule.extensions.iter().any(|extension| {
+                name.ends_with(&format!(
+                    ".{}",
+                    extension.trim_start_matches('.').to_lowercase()
+                ))
+            })
+        });
+        let (command, background) = rule.map_or((&self.command, false), |rule| {
+            (&rule.command, rule.background)
+        });
+        let file = file.to_string_lossy();
+        let mut words = command.iter().map(|word| {
+            word.replace("{file}", &file)
+                .replace("{line}", &line.to_string())
+        });
+        EditorCommand {
+            program: words.next().unwrap_or_default(),
+            args: words.collect(),
+            background,
         }
     }
 }
@@ -166,6 +244,10 @@ pub fn load(path: &Path) -> Result<Settings> {
         .with_context(|| format!("Invalid configuration {}", path.display()))?;
     settings.ai.validate()?;
     settings
+        .editor
+        .validate()
+        .with_context(|| format!("Invalid configuration {}", path.display()))?;
+    settings
         .keybindings
         .validate()
         .with_context(|| format!("Invalid configuration {}", path.display()))?;
@@ -174,6 +256,7 @@ pub fn load(path: &Path) -> Result<Settings> {
 
 pub fn save(path: &Path, settings: &Settings) -> Result<()> {
     settings.ai.validate()?;
+    settings.editor.validate()?;
     settings.keybindings.validate()?;
     // Renaming over a symlink would replace the link, so write where it points, as dotfiles setups expect.
     let resolved = fs::canonicalize(path).ok();
@@ -192,4 +275,51 @@ pub fn save(path: &Path, settings: &Settings) -> Result<()> {
         .persist(path)
         .with_context(|| format!("Cannot save configuration {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_rules_pick_a_command_by_extension_and_fill_placeholders() {
+        let config: EditorConfig = toml::from_str(
+            r#"
+            [[rules]]
+            extensions = ["gradle.kts"]
+            command = ["gradle-editor", "{file}"]
+
+            [[rules]]
+            extensions = [".KT", "java"]
+            command = ["idea", "--line", "{line}", "{file}"]
+            background = true
+            "#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.command_for(Path::new("/repo/src/Main.kt"), 42),
+            EditorCommand {
+                program: "idea".into(),
+                args: ["--line", "42", "/repo/src/Main.kt"]
+                    .map(String::from)
+                    .into(),
+                background: true,
+            }
+        );
+        assert_eq!(
+            config
+                .command_for(Path::new("/repo/build.gradle.kts"), 1)
+                .program,
+            "gradle-editor"
+        );
+        let fallback = config.command_for(Path::new("/repo/src/main.rs"), 7);
+        assert_eq!(fallback.program, "hx");
+        assert_eq!(fallback.args, ["+7", "/repo/src/main.rs"]);
+        assert!(!fallback.background);
+
+        let empty: EditorConfig =
+            toml::from_str("[[rules]]\nextensions = []\ncommand = [\"idea\"]").unwrap();
+        assert!(empty.validate().is_err());
+    }
 }

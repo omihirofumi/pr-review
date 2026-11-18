@@ -349,7 +349,7 @@ mod cli {
                 pending_ai: None,
                 ai_cancel: None,
                 ai_handle: None,
-                review_cancels: Vec::new(),
+                review_cancels: Default::default(),
             };
             let (sender, _receiver) = mpsc::channel();
             for result in [
@@ -385,6 +385,61 @@ mod cli {
         }
 
         #[test]
+        fn stopping_ai_work_cancels_every_job_and_ignores_their_late_results() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = App::new(directory.path().into(), false);
+            app.generation = 7;
+            app.opened(crate::overview());
+            app.overview.as_mut().unwrap().ai = app::AiStatus::Loading;
+            app.chat.pending = Some(("Why?".into(), "Entire PR".into()));
+            app.ai_reviews.insert(
+                "review".into(),
+                app::AiReviewStatus::Running(Provider::Claude),
+            );
+            let guide = Arc::new(AtomicBool::new(false));
+            let ask = Arc::new(AtomicBool::new(false));
+            let review = Arc::new(AtomicBool::new(false));
+            let mut runtime = Runtime {
+                provider: None,
+                ask_request: 0,
+                ask_cancel: Some(ask.clone()),
+                ask_handle: None,
+                generation: 7,
+                ai_request: 9,
+                pending_comments: None,
+                pending_ai: None,
+                ai_cancel: Some(guide.clone()),
+                ai_handle: None,
+                review_cancels: [("review".to_owned(), review.clone())].into(),
+            };
+
+            stop_ai_work(&mut app, &mut runtime);
+            assert!(ask.load(Ordering::Relaxed) && guide.load(Ordering::Relaxed));
+            assert!(review.load(Ordering::Relaxed));
+            assert!(app.chat.pending.is_none());
+            assert!(matches!(
+                app.overview.as_ref().unwrap().ai,
+                app::AiStatus::Waiting
+            ));
+            assert!(app.ai_reviews.is_empty());
+            assert_eq!(app.status, "Stopped: chat answer, AI guide, AI review.");
+
+            let (sender, _receiver) = mpsc::channel();
+            let late = JobResult::AiReview {
+                key: "review".into(),
+                cancel: review,
+                provider: Provider::Claude,
+                anchored: false,
+                result: Err(anyhow::anyhow!("AI review canceled")),
+            };
+            apply_background(late, &mut app, &sender, &mut runtime);
+            assert!(app.ai_reviews.is_empty(), "a stopped review stays gone");
+
+            stop_ai_work(&mut app, &mut runtime);
+            assert_eq!(app.status, "No AI work is running.");
+        }
+
+        #[test]
         fn changing_ai_request_rejects_an_old_result_for_the_same_pr() {
             let directory = tempfile::tempdir().unwrap();
             let mut app = App::new(directory.path().into(), false);
@@ -403,7 +458,7 @@ mod cli {
                 pending_ai: None,
                 ai_cancel: None,
                 ai_handle: None,
-                review_cancels: Vec::new(),
+                review_cancels: Default::default(),
             };
             let (sender, _receiver) = mpsc::channel();
             let stale = JobResult::Analysis {
@@ -550,7 +605,7 @@ mod cli {
                 ai_request: 9,
                 ai_cancel: Some(cancel.clone()),
                 ai_handle: Some(handle),
-                review_cancels: Vec::new(),
+                review_cancels: Default::default(),
             };
             runtime.sync(8);
             assert!(cancel.load(Ordering::Relaxed));
@@ -585,7 +640,7 @@ mod cli {
                     ai_request: 0,
                     ai_cancel: Some(cancel.clone()),
                     ai_handle: Some(handle),
-                    review_cancels: Vec::new(),
+                    review_cancels: Default::default(),
                 };
             }
             assert!(cancel.load(Ordering::Relaxed));
@@ -622,7 +677,7 @@ mod cli {
                 pending_ai: None,
                 ai_cancel: None,
                 ai_handle: None,
-                review_cancels: Vec::new(),
+                review_cancels: Default::default(),
             };
             let (sender, _) = mpsc::channel();
             for (generation, request) in [(6, 3), (7, 2)] {

@@ -188,7 +188,10 @@ pub fn editor_location(
     workspace: &Path,
 ) -> Result<PathBuf> {
     validate_pr(pr)?;
-    ensure!(line > 0, "Choose a numbered diff line before opening Helix");
+    ensure!(
+        line > 0,
+        "Choose a numbered diff line before opening the editor"
+    );
     validate_workspace(pr, workspace)?;
     let relative = match side {
         Side::Left => file.previous_filename.as_deref().unwrap_or(&file.filename),

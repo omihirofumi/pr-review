@@ -154,7 +154,7 @@ pub fn file_at(repo: &str, path: &str, revision: &str) -> Result<String> {
         .context("GitHub did not return a file size")?;
     ensure!(
         size <= MAX_CONTEXT_BYTES as u64,
-        "File exceeds the 2 MiB context limit; open it in Helix"
+        "File exceeds the 2 MiB context limit; open it in your editor"
     );
     if value["encoding"] == "none" {
         let sha = value["sha"].as_str().context("Missing file blob SHA")?;
@@ -188,7 +188,7 @@ pub fn file_at(repo: &str, path: &str, revision: &str) -> Result<String> {
         bytes.len() == size as usize && !bytes.contains(&0),
         "Binary or incomplete file content cannot be expanded"
     );
-    String::from_utf8(bytes).context("The file is not UTF-8 text; open it in Helix")
+    String::from_utf8(bytes).context("The file is not UTF-8 text; open it in your editor")
 }
 
 #[derive(Debug)]

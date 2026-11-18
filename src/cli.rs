@@ -5,6 +5,7 @@ mod watch;
 use crate::{app, store, ui};
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -210,6 +211,7 @@ pub(crate) enum JobResult {
     },
     AiReview {
         key: String,
+        cancel: Arc<AtomicBool>,
         provider: Provider,
         anchored: bool,
         result: Result<review::ReviewOutput>,
@@ -296,7 +298,7 @@ pub(crate) struct Runtime {
     ai_cancel: Option<Arc<AtomicBool>>,
     ai_handle: Option<thread::JoinHandle<()>>,
     /// Provider reviews outlive PR reloads because they take minutes; quitting stops them.
-    review_cancels: Vec<Arc<AtomicBool>>,
+    review_cancels: HashMap<String, Arc<AtomicBool>>,
 }
 
 impl Runtime {
@@ -333,7 +335,7 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        for cancel in &self.review_cancels {
+        for cancel in self.review_cancels.values() {
             cancel.store(true, Ordering::Relaxed);
         }
         self.stop_ai();
@@ -1007,10 +1009,20 @@ pub(crate) fn apply_background(
         }
         JobResult::AiReview {
             key,
+            cancel,
             provider,
             anchored,
             result,
         } => {
+            // A stopped or replaced review must not overwrite the status of the one that followed it.
+            if !runtime
+                .review_cancels
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &cancel))
+            {
+                return None;
+            }
+            runtime.review_cancels.remove(&key);
             let status = match result {
                 Ok(output) => {
                     let current = app
@@ -1103,6 +1115,51 @@ pub(crate) fn apply_background(
     None
 }
 
+fn stop_ai_work(app: &mut App, runtime: &mut Runtime) {
+    let mut stopped = Vec::new();
+    if app.chat.pending.take().is_some() {
+        runtime.stop_ask();
+        stopped.push("chat answer");
+    }
+    let guide = app
+        .overview
+        .as_ref()
+        .is_some_and(|overview| matches!(overview.ai, app::AiStatus::Loading));
+    let preview = app
+        .preview
+        .guides
+        .values()
+        .any(|guide| matches!(guide.status, app::AiStatus::Loading));
+    if guide || preview {
+        runtime.stop_ai();
+        if let Some(overview) = app.overview.as_mut().filter(|_| guide) {
+            overview.ai = app::AiStatus::Waiting;
+        }
+        for guide in app.preview.guides.values_mut() {
+            if matches!(guide.status, app::AiStatus::Loading) {
+                guide.status = app::AiStatus::Waiting;
+            }
+        }
+        stopped.push("AI guide");
+    }
+    let reviews = std::mem::take(&mut runtime.review_cancels);
+    for (key, cancel) in &reviews {
+        cancel.store(true, Ordering::Relaxed);
+        app.ai_reviews.remove(key);
+    }
+    if !reviews.is_empty() {
+        stopped.push("AI review");
+    }
+    app.message(
+        if stopped.is_empty() {
+            "No AI work is running.".to_owned()
+        } else {
+            format!("Stopped: {}.", stopped.join(", "))
+        },
+        false,
+    );
+}
+
 fn start_ai_review(app: &mut App, sender: &mpsc::Sender<JobResult>, runtime: &mut Runtime) {
     app.dialog = None;
     if app.demo {
@@ -1134,13 +1191,14 @@ fn start_ai_review(app: &mut App, sender: &mpsc::Sender<JobResult>, runtime: &mu
     app.ai_reviews
         .insert(key.clone(), app::AiReviewStatus::Running(provider));
     let cancel = Arc::new(AtomicBool::new(false));
-    runtime.review_cancels.push(cancel.clone());
+    runtime.review_cancels.insert(key.clone(), cancel.clone());
     let anchored = review::at_pr_head(&checkout, &pr);
     let sender = sender.clone();
     thread::spawn(move || {
         let result = review::run(&config, &pr, &checkout, &cancel);
         let _ = sender.send(JobResult::AiReview {
             key,
+            cancel,
             provider,
             anchored,
             result,
@@ -1541,6 +1599,10 @@ fn dispatch(
             runtime.stop_ask();
             return Ok(());
         }
+        Action::StopAi => {
+            stop_ai_work(app, runtime);
+            return Ok(());
+        }
         Action::Explain { force: _ } if app.overview.is_none() => {
             if let Some(pr) = app.visible_prs().get(app.selected_pr) {
                 let id = pr.id.clone();
@@ -1700,6 +1762,7 @@ fn dispatch(
         | Action::PreviewGuide(_)
         | Action::Ask { .. }
         | Action::CancelAsk
+        | Action::StopAi
         | Action::Browse(_)
         | Action::Copy { .. }
         | Action::AiReview
@@ -1754,11 +1817,11 @@ fn read_only_snapshot(directory: &Path, filename: &str, text: &str) -> Result<Pa
 }
 
 fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarget) {
-    let result = (|| -> Result<&'static str> {
+    let result = (|| -> Result<String> {
         let review = app.review.as_ref().context("No review is open")?;
         let line = target.line;
-        let snapshot_directory;
-        let mut opened = "Returned from Helix. Review position preserved.";
+        let mut snapshot_directory = None;
+        let mut source = "";
         let (workspace, path) = if let ReviewSource::Local { repository, .. } = &review.data.source
         {
             local::validate_path(&target.file.filename)?;
@@ -1778,12 +1841,11 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
                     .is_ok_and(|path| path.starts_with(repository))
                 && std::fs::read(&candidate).is_ok_and(|bytes| bytes == text.as_bytes());
             if editable {
-                (repository.as_path(), candidate)
+                (repository.clone(), candidate)
             } else {
-                snapshot_directory = tempfile::tempdir()?;
-                let path =
-                    read_only_snapshot(snapshot_directory.path(), &target.file.filename, text)?;
-                (repository.as_path(), path)
+                let directory = snapshot_directory.insert(tempfile::tempdir()?);
+                let path = read_only_snapshot(directory.path(), &target.file.filename, text)?;
+                (repository.clone(), path)
             }
         } else if app.settings.editor.open_in == OpenIn::Workspace {
             let workspace = review
@@ -1797,7 +1859,7 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
                 line,
                 workspace,
             )?;
-            (workspace.as_path(), path)
+            (workspace.clone(), path)
         } else {
             let pr = &review.data.pr;
             let relative = match target.side {
@@ -1824,8 +1886,8 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
                             .is_ok_and(|path| path.starts_with(root))
                 });
             if let Some((root, candidate)) = existing {
-                opened = "Returned from Helix. It showed your checkout as it is now, which may differ from the PR head.";
-                (root.as_path(), candidate)
+                source = "It shows your checkout as it is now, which may differ from the PR head.";
+                (root.clone(), candidate)
             } else {
                 let (revision, label) = match target.side {
                     Side::Left => (&pr.base_sha, "base"),
@@ -1834,31 +1896,48 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
                 let text = github::file_at(&pr.id.repo, relative, revision).with_context(|| {
                     format!("Cannot open a read-only copy of the PR {label}; set [editor] open_in = \"workspace\" to use a checkout")
                 })?;
-                snapshot_directory = tempfile::tempdir()?;
-                let path = read_only_snapshot(snapshot_directory.path(), relative, &text)?;
-                opened = if target.side == Side::Left {
-                    "Returned from Helix. It showed a read-only copy from the PR base."
+                let directory = snapshot_directory.insert(tempfile::tempdir()?);
+                let path = read_only_snapshot(directory.path(), relative, &text)?;
+                source = if target.side == Side::Left {
+                    "It shows a read-only copy from the PR base."
                 } else {
-                    "Returned from Helix. The file is not in your checkout, so it showed a read-only copy from the PR head."
+                    "The file is not in your checkout, so it shows a read-only copy from the PR head."
                 };
                 (
-                    checkout.map_or(snapshot_directory.path(), PathBuf::as_path),
+                    checkout.map_or_else(|| directory.path().to_path_buf(), PathBuf::clone),
                     path,
                 )
             }
         };
+        let editor = app.settings.editor.command_for(&path, line);
+        let name = Path::new(&editor.program).file_name().map_or_else(
+            || editor.program.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let mut command = Command::new(&editor.program);
+        command.args(&editor.args).current_dir(&workspace);
+        if editor.background {
+            let mut child = command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .with_context(|| format!("Cannot start {name}; ensure it is on PATH"))?;
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+            // The editor reads the copy after this returns, so it must outlive this call.
+            app.editor_snapshots.extend(snapshot_directory);
+            return Ok(format!("Opened in {name}. {source}").trim_end().to_owned());
+        }
         disable_raw_mode()?;
         leave_screen()?;
-        let result = Command::new("hx")
+        let result = command
             .stdin(std::process::Stdio::from(tty()?))
             .stdout(std::process::Stdio::from(tty()?))
             .stderr(std::process::Stdio::from(tty()?))
-            .current_dir(workspace)
-            .arg(format!("+{line}"))
-            .arg("--")
-            .arg(&path)
             .status()
-            .context("Cannot start Helix; install hx and ensure it is on PATH");
+            .with_context(|| format!("Cannot start {name}; ensure it is on PATH"));
         let resume = (|| -> Result<()> {
             enable_raw_mode()?;
             enter_screen()?;
@@ -1867,9 +1946,13 @@ fn open_editor_action(app: &mut App, terminal: &mut Tui, target: app::EditorTarg
         })();
         resume?;
         if !result?.success() {
-            bail!("Helix exited unsuccessfully");
+            bail!("{name} exited unsuccessfully");
         }
-        Ok(opened)
+        Ok(if source.is_empty() {
+            format!("Returned from {name}. Review position preserved.")
+        } else {
+            format!("Returned from {name}. {source}")
+        })
     })();
     match result {
         Ok(opened) => app.message(opened, false),

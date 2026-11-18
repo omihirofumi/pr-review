@@ -512,7 +512,7 @@ fn call(root: &Path, selector: &Selector, request: Request) -> Result<Value> {
     BufReader::new(stream.take(16 * 1024 * 1024))
         .read_line(&mut response)
         .context(
-            "Session did not respond; close Helix or wait for the current operation to finish",
+            "Session did not respond; close the editor or wait for the current operation to finish",
         )?;
     let response: Value = serde_json::from_str(&response).context("Invalid session response")?;
     if response["ok"] != true {

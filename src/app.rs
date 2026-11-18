@@ -902,6 +902,8 @@ pub enum Action {
         focus: Option<Box<assistant::Focus>>,
     },
     CancelAsk,
+    /// Stops the pending chat answer, AI guide, and provider reviews.
+    StopAi,
     None,
     Quit,
     LoadInbox,
@@ -956,6 +958,8 @@ pub struct App {
     pub chat_recall: Option<usize>,
     /// The terminal reports modified Enter keys, so Shift-Enter can insert a newline.
     pub keyboard_enhanced: bool,
+    /// Read-only copies opened by background editors, removed when prpr exits.
+    pub editor_snapshots: Vec<tempfile::TempDir>,
     /// Agent notes from `--notes`, added once the first local snapshot is loaded.
     pub pending_notes: Vec<notes::Seed>,
     /// A `--watch` reload is running in the background without blocking input.
@@ -1005,6 +1009,7 @@ impl App {
             chat_asked_at: None,
             chat_recall: None,
             keyboard_enhanced: false,
+            editor_snapshots: Vec::new(),
             pending_notes: Vec::new(),
             watch_loading: false,
             open_on_diff: false,
@@ -1529,6 +1534,11 @@ impl App {
                         selected: 0,
                     });
                     return Ok(Action::None);
+                }
+                KeyCode::Char('x') => {
+                    self.goto_pending = false;
+                    self.pending_keys.clear();
+                    return Ok(Action::StopAi);
                 }
                 KeyCode::Char('l') if self.review.is_some() => {
                     self.goto_pending = false;
@@ -2109,7 +2119,7 @@ impl App {
         if let Some(review) = &self.review {
             if self.demo {
                 self.message(
-                    "Demo is offline. Workspace and Helix actions require a real PR.",
+                    "Demo is offline. Workspace and editor actions require a real PR.",
                     true,
                 );
                 return Ok(Action::None);

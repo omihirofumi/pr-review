@@ -177,7 +177,7 @@ impl FullFile {
         let head = source.head.lines().map(str::to_owned).collect::<Vec<_>>();
         ensure!(
             base.len() <= 100_000 && head.len() <= 100_000,
-            "File context exceeds 100000 lines; open it in Helix"
+            "File context exceeds 100000 lines; open it in your editor"
         );
         let rows = diff::parse_patch(file.patch.as_deref().unwrap_or_default());
         let mut hunks = Vec::new();
@@ -185,7 +185,7 @@ impl FullFile {
         while index < rows.len() {
             ensure!(
                 rows[index].kind == LineKind::Hunk,
-                "The patch contains unsupported metadata; open the file in Helix"
+                "The patch contains unsupported metadata; open the file in your editor"
             );
             let ((old, old_count), (new, new_count)) = diff::parse_header(&rows[index].text)
                 .ok_or_else(|| anyhow::anyhow!("The patch has an incomplete hunk"))?;
@@ -238,7 +238,7 @@ impl FullFile {
                     }
                     LineKind::Meta if row.text == "\\ No newline at end of file" => {}
                     _ => anyhow::bail!(
-                        "An incomplete patch cannot be expanded safely; open the file in Helix"
+                        "An incomplete patch cannot be expanded safely; open the file in your editor"
                     ),
                 }
                 index += 1;
@@ -260,14 +260,14 @@ impl FullFile {
         for hunk in &hunks {
             ensure!(
                 hunk.old >= old && hunk.new >= new && base[old..hunk.old] == head[new..hunk.new],
-                "The patch omits changes between hunks; refresh or open the file in Helix"
+                "The patch omits changes between hunks; refresh or open the file in your editor"
             );
             old = hunk.old_end;
             new = hunk.new_end;
         }
         ensure!(
             base[old..] == head[new..],
-            "The patch omits trailing changes; refresh or open the file in Helix"
+            "The patch omits trailing changes; refresh or open the file in your editor"
         );
         if hunks.is_empty() {
             hunks.push(Hunk {

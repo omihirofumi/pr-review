@@ -80,13 +80,18 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             ),
             Command::new("Previous file", "p", 'p', "prev backward path")
                 .disabled_if(review.selected_file == 0, "Already at the first file"),
-            Command::new("Open file in Helix", "gf / e", 'e', "editor source")
-                .disabled_if(!file, "Choose a file")
-                .disabled_if(app.busy, busy)
-                .disabled_if(
-                    app.demo,
-                    "Source opening is unavailable in the offline demo",
-                ),
+            Command::new(
+                "Open file in editor",
+                "gf / e",
+                'e',
+                "editor source helix ide",
+            )
+            .disabled_if(!file, "Choose a file")
+            .disabled_if(app.busy, busy)
+            .disabled_if(
+                app.demo,
+                "Source opening is unavailable in the offline demo",
+            ),
             Command::new(
                 "Toggle unified / split view",
                 "|",
@@ -336,7 +341,29 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             ),
         ]);
     }
+    let running = app.chat.pending.is_some()
+        || app
+            .overview
+            .as_ref()
+            .is_some_and(|state| matches!(state.ai, AiStatus::Loading))
+        || app
+            .preview
+            .guides
+            .values()
+            .any(|guide| matches!(guide.status, AiStatus::Loading))
+        || app
+            .ai_reviews
+            .values()
+            .any(|status| matches!(status, super::AiReviewStatus::Running(_)));
     commands.extend([
+        Command::new(
+            "Stop running AI work",
+            "Ctrl-x",
+            'x',
+            "cancel abort interrupt chat answer guide review agent",
+        )
+        .control()
+        .disabled_if(!running, "No AI work is running"),
         Command::new("Refresh review", "r", 'r', "reload update").disabled_if(app.busy, busy),
         Command::new("Show keyboard shortcuts", "?", '?', "help bindings"),
         Command::new("Show operation details", "!", '!', "status errors log"),
