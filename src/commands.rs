@@ -31,6 +31,12 @@ impl Command {
         self
     }
 
+    /// Names the action directly, for bindings whose default is a key sequence rather than one key.
+    fn action(mut self, id: &'static str) -> Self {
+        self.id = id;
+        self
+    }
+
     fn control(mut self) -> Self {
         self.key.modifiers = KeyModifiers::CONTROL;
         self
@@ -112,11 +118,25 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             )
             .disabled_if(!text, "Choose a textual hunk"),
             Command::new(
-                "Search text in every diff file",
+                "Search in the current file",
                 "/",
                 '/',
                 "find grep match next previous",
             ),
+            Command::new(
+                "Search every file",
+                "Space /",
+                '/',
+                "global find grep match picker",
+            )
+            .action("global_search"),
+            Command::new(
+                "Open a changed file by name",
+                "Space f",
+                'f',
+                "file picker fuzzy jump goto path",
+            )
+            .action("file_picker"),
             Command::new("Explain diff or selection", "E", 'E', "ai hunk code")
                 .disabled_if(!text, "Choose a textual hunk")
                 .disabled_if(
@@ -325,6 +345,17 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             ),
         ]);
     }
+    if opened && !local {
+        commands.push(
+            Command::new(
+                "Comment on the PR conversation",
+                "M",
+                'M',
+                "message reply discussion issue comment draft",
+            )
+            .disabled_if(app.busy, busy),
+        );
+    }
     if !local {
         commands.extend([
             Command::new("Open PR on GitHub", "B", 'B', "browser web")
@@ -376,8 +407,10 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
         Command::new("Quit prpr", "q", 'q', "exit close").disabled_if(app.busy, busy),
     ]);
     for command in &mut commands {
-        command.id = Keybindings::default_action(app.binding_view(), command.key)
-            .expect("Palette command must have a normal-view action");
+        if command.id.is_empty() {
+            command.id = Keybindings::default_action(app.binding_view(), command.key)
+                .expect("Palette command must have a normal-view action");
+        }
         command.shortcut = if command.id == "local_note" && local {
             let mut keys = app.settings.keybindings.keys("comment");
             keys.extend(app.settings.keybindings.keys("local_note"));

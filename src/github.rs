@@ -690,6 +690,20 @@ fn review_payload(
     }))
 }
 
+/// Posts to the PR conversation and returns the comment URL.
+pub fn post_conversation_comment(id: &PrId, body: &str) -> Result<String> {
+    validate_id(id)?;
+    ensure!(!body.trim().is_empty(), "Write a comment first");
+    let path = format!("repos/{}/issues/{}/comments", id.repo, id.number);
+    let bytes = gh(
+        &["api", "--method", "POST", &path, "--input", "-"],
+        Some(serde_json::to_vec(&json!({ "body": body }))?),
+    )?;
+    let response: Value =
+        serde_json::from_slice(&bytes).context("Invalid comment response from GitHub")?;
+    Ok(response["html_url"].as_str().unwrap_or_default().to_owned())
+}
+
 fn fetch_pr(id: &PrId) -> Result<ApiPr> {
     validate_id(id)?;
     let path = format!("repos/{}/pulls/{}", id.repo, id.number);

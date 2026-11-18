@@ -23,7 +23,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::{
     ActivityStatus, AiReviewStatus, AiStatus, App, Dialog, Focus, OverviewState, PageTab,
-    PreviewTab, ReviewState, TextInput,
+    PickerKind, PreviewTab, ReviewState, TextInput,
 };
 
 const BACKGROUND: Color = Color::Rgb(24, 24, 23);
@@ -3042,6 +3042,313 @@ fn truncate_path(path: &str, width: usize) -> String {
     truncate(path, width)
 }
 
+struct CommentEditor<'a> {
+    title: &'static str,
+    target: Vec<Line<'static>>,
+    placeholder: &'static str,
+    hint: &'static str,
+    input: &'a TextInput,
+}
+
+/// Describes the commented lines: path, range and side, then the code itself, quoted.
+fn anchor_context(app: &App, anchor: &prpr::model::DraftComment, width: u16) -> Vec<Line<'static>> {
+    let side = match anchor.side {
+        Side::Left => "old code",
+        Side::Right => "new code",
+    };
+    let suffix = format!(" · line {} · {side}", anchor.line_label());
+    let room = usize::from(width.saturating_sub(10).min(94)).saturating_sub(suffix.len());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            path_tail(&anchor.path, room),
+            Style::default().fg(ACCENT).bold(),
+        ),
+        Span::styled(suffix, Style::default().fg(MUTED)),
+    ])];
+    let Some(review) = app.review.as_ref() else {
+        return lines;
+    };
+    let Some(file) = review
+        .data
+        .files
+        .iter()
+        .position(|file| file.filename == anchor.path)
+    else {
+        return lines;
+    };
+    let start = anchor
+        .start_line
+        .filter(|_| {
+            anchor
+                .start_side
+                .as_ref()
+                .is_none_or(|side| *side == anchor.side)
+        })
+        .unwrap_or(anchor.line);
+    let quoted = review.lines[file]
+        .iter()
+        .filter(|row| (start..=anchor.line).any(|number| matches_anchor(row, &anchor.side, number)))
+        .collect::<Vec<_>>();
+    const SHOWN: usize = 4;
+    for row in quoted.iter().take(SHOWN) {
+        let (sign, color) = match row.kind {
+            LineKind::Addition => ("+", GREEN),
+            LineKind::Deletion => ("-", RED),
+            _ => (" ", TEXT),
+        };
+        let number = row
+            .new_line
+            .or(row.old_line)
+            .map_or_else(String::new, |line| line.to_string());
+        let code = row.text.get(1..).unwrap_or_default().replace('\t', "    ");
+        lines.push(Line::from(vec![
+            Span::styled("▎", Style::default().fg(BORDER)),
+            Span::styled(format!("{number:>5} {sign} "), Style::default().fg(MUTED)),
+            Span::styled(
+                truncate(&code, usize::from(width.saturating_sub(20))),
+                Style::default().fg(color),
+            ),
+        ]));
+    }
+    if quoted.len() > SHOWN {
+        lines.push(Line::from(Span::styled(
+            format!("▎      … {} more lines", quoted.len() - SHOWN),
+            Style::default().fg(MUTED),
+        )));
+    }
+    lines
+}
+
+/// Lays out a comment editor: what is being commented on, a bordered composer with a placeholder, and its keys.
+fn draw_comment_editor(frame: &mut Frame, editor: CommentEditor<'_>) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(100);
+    let text_width = usize::from(width.saturating_sub(6));
+    let (rows, _) = wrap_input(&editor.input.text, editor.input.cursor, text_width.max(1));
+    let composer = (rows.len() as u16).clamp(5, 14) + 2;
+    let height = editor.target.len() as u16 + composer + 5;
+    let inner = popup(frame, editor.title.into(), width, height);
+    let [target, _, field, hint] = Layout::vertical([
+        Constraint::Length(editor.target.len() as u16),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner.inner(ratatui::layout::Margin::new(1, 0)));
+    frame.render_widget(Paragraph::new(editor.target), target);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .padding(Padding::horizontal(1));
+    let text = block.inner(field);
+    frame.render_widget(block, field);
+    if editor.input.text.is_empty() {
+        frame.render_widget(
+            Paragraph::new(editor.placeholder)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(MUTED)),
+            text,
+        );
+        if text.width > 0 && text.height > 0 {
+            frame.set_cursor_position((text.x, text.y));
+        }
+    } else {
+        draw_input(frame, editor.input, text);
+    }
+    frame.render_widget(
+        Paragraph::new(format!(" {}", editor.hint)).style(Style::default().fg(MUTED)),
+        hint,
+    );
+}
+
+/// Shortens a path from the left when even the first-and-last form is too wide, so the file name stays visible.
+fn path_tail(path: &str, width: usize) -> String {
+    let shortened = truncate_path(path, width);
+    if Line::from(shortened.as_str()).width() <= width {
+        return shortened;
+    }
+    let mut tail = Vec::new();
+    let mut used = 1;
+    for character in path.chars().rev() {
+        let next = Line::from(character.to_string()).width();
+        if used + next > width {
+            break;
+        }
+        tail.push(character);
+        used += next;
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
+}
+
+/// Draws a Helix-style picker: a query line and result list beside a diff preview of the selected item.
+fn draw_picker(frame: &mut Frame, app: &App, kind: PickerKind, input: &TextInput, selected: usize) {
+    let Some(review) = app.review.as_ref() else {
+        return;
+    };
+    let area = frame.area();
+    let inner = popup(
+        frame,
+        match kind {
+            PickerKind::Files => " Open file / Enter opens / Esc closes ".into(),
+            PickerKind::Global => " Search every file / Enter jumps / Esc closes ".into(),
+        },
+        area.width.saturating_sub(4).min(160),
+        area.height.saturating_sub(2),
+    );
+    let items = review.picker_items(kind, &input.text);
+    let selected = selected.min(items.len().saturating_sub(1));
+    let (list, preview) = if inner.width >= 90 {
+        let [list, preview] =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .areas(inner);
+        (list, Some(preview))
+    } else {
+        (inner, None)
+    };
+    let [prompt, rule, rows] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(list);
+    let count = format!(" {}/{} ", items.len().min(selected + 1), items.len());
+    let [field, counter] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(count.chars().count() as u16),
+    ])
+    .areas(prompt);
+    frame.render_widget(
+        Paragraph::new(count).style(Style::default().fg(MUTED)),
+        counter,
+    );
+    let [marker, field] =
+        Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(field);
+    frame.render_widget(
+        Paragraph::new("> ").style(Style::default().fg(ACCENT)),
+        marker,
+    );
+    if input.text.is_empty() {
+        frame.render_widget(
+            Paragraph::new(match kind {
+                PickerKind::Files => "Type part of a file name",
+                PickerKind::Global => "Type text to find in every file",
+            })
+            .style(Style::default().fg(MUTED)),
+            field,
+        );
+        if field.width > 0 {
+            frame.set_cursor_position((field.x, field.y));
+        }
+    } else {
+        draw_input(frame, input, field);
+    }
+    frame.render_widget(
+        Paragraph::new("─".repeat(usize::from(rule.width))).style(Style::default().fg(BORDER)),
+        rule,
+    );
+    let height = usize::from(rows.height);
+    let offset = selected.saturating_sub(height.saturating_sub(1));
+    let width = usize::from(rows.width).saturating_sub(2);
+    let lines = items
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, item)| {
+            let chosen = index == selected;
+            let style = if chosen {
+                Style::default().fg(TEXT).bg(SELECTED)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let mut spans = vec![Span::styled(
+                if chosen { "› " } else { "  " },
+                style.fg(ACCENT),
+            )];
+            match item.line {
+                Some(line) => {
+                    let location = format!("{}:{line} ", path_tail(&item.path, width / 2));
+                    let rest = width.saturating_sub(Line::from(location.as_str()).width());
+                    spans.push(Span::styled(location, style.fg(MUTED)));
+                    spans.push(Span::styled(truncate(&item.text, rest), style));
+                }
+                None => spans.push(Span::styled(path_tail(&item.path, width), style)),
+            }
+            Line::from(spans).style(style)
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() && !input.text.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matches").style(Style::default().fg(MUTED)),
+            rows,
+        );
+    } else {
+        frame.render_widget(Paragraph::new(lines), rows);
+    }
+    let (Some(preview), Some(item)) = (preview, items.get(selected)) else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(BORDER))
+        .title(format!(
+            " {} ",
+            path_tail(&item.path, usize::from(preview.width).saturating_sub(4))
+        ));
+    let body = block.inner(preview);
+    frame.render_widget(block, preview);
+    let rows = &review.lines[item.file];
+    let height = usize::from(body.height);
+    let start = item.position.saturating_sub(height / 3);
+    let query = (kind == PickerKind::Global).then_some(input.text.as_str());
+    let lines = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, row)| {
+            let color = match row.kind {
+                LineKind::Addition => GREEN,
+                LineKind::Deletion => RED,
+                LineKind::Hunk | LineKind::Meta => MUTED,
+                LineKind::Context => TEXT,
+            };
+            let number = row
+                .new_line
+                .or(row.old_line)
+                .map_or_else(String::new, |line| line.to_string());
+            let background = if index == item.position {
+                SELECTED
+            } else {
+                PANEL
+            };
+            let text = row.text.replace('\t', "    ");
+            let mut spans = vec![Span::styled(
+                format!("{number:>5} "),
+                Style::default().fg(MUTED).bg(background),
+            )];
+            let code = vec![Span::styled(
+                text,
+                Style::default().fg(color).bg(background),
+            )];
+            let code = match query {
+                Some(query) => crate::app::search_ranges(query, row).into_iter().fold(
+                    code,
+                    |code, (from, to)| {
+                        let source = row.text.get(1..).unwrap_or_default();
+                        let (from, to) = display_range(source, (from as u32 + 1, to as u32), 0);
+                        highlight_spans(code, (from + 1, to + 1), SEARCH_MATCH)
+                    },
+                ),
+                None => code,
+            };
+            spans.extend(code);
+            Line::from(spans).style(Style::default().bg(background))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
 fn wrap_comment(text: &str, width: usize) -> Vec<String> {
     let mut result = Vec::new();
     for logical in text.lines() {
@@ -3078,14 +3385,6 @@ fn wrap_comment(text: &str, width: usize) -> Vec<String> {
 
 fn popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
     popup_block(frame, Block::bordered().title(title), width, height)
-}
-
-/// Keeps the save keys on the bottom border, where a long file path in the title cannot push them out.
-fn editor_popup(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
-    let block = Block::bordered()
-        .title(title)
-        .title_bottom(Line::from(" Ctrl-s save · Esc cancel ").right_aligned());
-    popup_block(frame, block, width, height)
 }
 
 fn popup_block(frame: &mut Frame, block: Block, width: u16, height: u16) -> Rect {
@@ -3557,20 +3856,20 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
             anchor,
             reply_to,
             input,
-        } => {
-            let inner = editor_popup(
-                frame,
-                format!(
-                    " Local {} {}:{} ",
-                    if reply_to.is_some() { "reply" } else { "note" },
-                    anchor.path,
-                    anchor.line_label()
-                ),
-                100,
-                17,
-            );
-            draw_input(frame, input, inner);
-        }
+        } => draw_comment_editor(
+            frame,
+            CommentEditor {
+                title: if reply_to.is_some() {
+                    " Reply to local note "
+                } else {
+                    " New local note "
+                },
+                target: anchor_context(app, anchor, frame.area().width),
+                placeholder: "Write the note here. It stays on this computer; agents can read and reply to it.",
+                hint: "Ctrl-s save note · Esc discard",
+                input,
+            },
+        ),
         Dialog::Notes { selected } => {
             let inner = popup(
                 frame,
@@ -3627,19 +3926,77 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 inner,
             );
         }
-        Dialog::Compose { draft, input, .. } => {
-            let inner = editor_popup(
+        Dialog::Compose {
+            draft,
+            editing,
+            input,
+        } => draw_comment_editor(
+            frame,
+            CommentEditor {
+                title: if editing.is_some() {
+                    " Edit GitHub comment draft "
+                } else {
+                    " New GitHub comment draft "
+                },
+                target: anchor_context(app, draft, frame.area().width),
+                placeholder: "Write the review comment here (Markdown). It is saved as a draft and sent only with your review.",
+                hint: "Ctrl-s save draft · Esc discard · s submits the review later",
+                input,
+            },
+        ),
+        Dialog::Picker {
+            kind,
+            input,
+            selected,
+        } => draw_picker(frame, app, *kind, input, *selected),
+        Dialog::Conversation { id, input } => draw_comment_editor(
+            frame,
+            CommentEditor {
+                title: " PR conversation comment ",
+                target: vec![
+                    Line::from(Span::styled(
+                        format!("{}#{} · conversation", id.repo, id.number),
+                        Style::default().fg(ACCENT).bold(),
+                    )),
+                    Line::from(Span::styled(
+                        "A normal comment below the PR description, not attached to any line.",
+                        Style::default().fg(MUTED),
+                    )),
+                ],
+                placeholder: "Write the comment here (Markdown). Esc keeps it as a draft while you check other files.",
+                hint: "Ctrl-s preview before posting · Esc keep draft",
+                input,
+            },
+        ),
+        Dialog::ConversationPreview { id, body, scroll } => {
+            let inner = popup(
                 frame,
-                format!(
-                    " Draft {}:{} {:?} ",
-                    draft.path,
-                    draft.line_label(),
-                    draft.side
-                ),
+                " Post to conversation / Enter posts / Esc edits / j,k scroll ".into(),
                 100,
-                17,
+                frame.area().height.saturating_sub(4),
             );
-            draw_input(frame, input, inner);
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    format!("Comment on {}#{}", id.repo, id.number),
+                    Style::default().fg(ACCENT).bold(),
+                )),
+                Line::from("Posts immediately to the PR conversation, outside any review."),
+                Line::from(""),
+            ];
+            lines.extend(body.lines().map(|line| Line::from(line.to_owned())));
+            if app.demo {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "OFFLINE DEMO: nothing will be posted.",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((*scroll, 0)),
+                inner,
+            );
         }
         Dialog::Submit { event, input } => {
             let inner = popup(
@@ -3760,6 +4117,41 @@ mod tests {
     }
 
     #[test]
+    fn global_search_picker_lists_matches_beside_a_diff_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp.path().into(), true);
+        app.loaded(demo_data()).unwrap();
+        app.dialog = Some(Dialog::Picker {
+            kind: PickerKind::Global,
+            input: TextInput::new("is_zero".into()),
+            selected: 0,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..30)
+            .map(|y| {
+                (0..160)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        if std::env::var_os("PRPR_PRINT_SCREEN").is_some() {
+            println!("{screen}");
+        }
+        assert!(screen.contains("1/1"), "{screen}");
+        assert!(
+            screen.contains("› src/client.rs:20 if delay.is_zero() {"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("return Err(Error::DeadlineExceeded);"),
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn search_matches_are_highlighted_in_the_diff() {
         let temp = tempfile::tempdir().unwrap();
         let mut app = App::new(temp.path().into(), true);
@@ -3805,11 +4197,37 @@ mod tests {
         let screen: String = (0..20)
             .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
             .collect();
-        assert!(screen.contains("Ctrl-s save · Esc cancel"), "{screen}");
+        assert!(
+            screen.contains("Ctrl-s save draft · Esc discard"),
+            "{screen}"
+        );
+        assert!(screen.contains("client.rs · line"), "{screen}");
         assert!(
             screen.contains("START") && screen.contains("END"),
             "{screen}"
         );
+
+        if let Some(Dialog::Compose { draft, input, .. }) = &mut app.dialog {
+            draft.path = "src/client.rs".into();
+            *input = TextInput::default();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..30)
+            .map(|y| {
+                (0..110)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        if std::env::var_os("PRPR_PRINT_SCREEN").is_some() {
+            println!("{screen}");
+        }
+        assert!(screen.contains("New GitHub comment draft"), "{screen}");
+        assert!(screen.contains("Write the review comment here"), "{screen}");
+        assert!(screen.contains("▎   18       pub fn retry"), "{screen}");
     }
 
     #[test]

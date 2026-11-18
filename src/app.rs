@@ -124,6 +124,21 @@ pub enum Dialog {
         input: TextInput,
         selected: usize,
     },
+    Picker {
+        kind: PickerKind,
+        input: TextInput,
+        selected: usize,
+    },
+    /// A PR conversation comment; Esc keeps the text as a draft for later.
+    Conversation {
+        id: PrId,
+        input: TextInput,
+    },
+    ConversationPreview {
+        id: PrId,
+        body: String,
+        scroll: u16,
+    },
     Note {
         anchor: DraftComment,
         reply_to: Option<String>,
@@ -885,14 +900,23 @@ impl ReviewState {
             .collect()
     }
 
-    /// Moves to the next or previous match, wrapping around the changeset, and describes the result.
+    /// Moves to the next or previous match in the current file, wrapping at its ends, and describes the result.
     fn search_step(&mut self, forward: bool, include_current: bool) -> (String, bool) {
         let Some(query) = self.search.clone() else {
             return ("No search; / starts one".into(), false);
         };
-        let hits = self.search_hits(&query);
+        let hits = self
+            .search_hits(&query)
+            .into_iter()
+            .filter(|&(file, _)| file == self.selected_file)
+            .collect::<Vec<_>>();
         if hits.is_empty() {
-            return (format!("No match for /{query} in the shown lines"), false);
+            return (
+                format!(
+                    "No match for /{query} in this file's shown lines; Space / searches every file"
+                ),
+                false,
+            );
         }
         let here = (self.selected_file, self.position());
         let found = if forward {
@@ -916,13 +940,66 @@ impl ReviewState {
         }
         (
             format!(
-                "/{query} · match {} of {}{} · n/N move · Esc clears",
+                "/{query} · match {} of {} in this file{} · n/N move · Esc clears",
                 index + 1,
                 hits.len(),
                 if wrapped { " · wrapped" } else { "" }
             ),
             true,
         )
+    }
+
+    /// Candidates for a picker: changed files ranked by fuzzy name match, or matching lines across every file.
+    pub fn picker_items(&self, kind: PickerKind, query: &str) -> Vec<PickerItem> {
+        match kind {
+            PickerKind::Files => {
+                let mut ranked = self
+                    .data
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(file, changed)| {
+                        fuzzy_score(query, &changed.filename).map(|score| (score, file))
+                    })
+                    .collect::<Vec<_>>();
+                ranked.sort_by_key(|&(score, file)| (std::cmp::Reverse(score), file));
+                ranked
+                    .into_iter()
+                    .map(|(_, file)| PickerItem {
+                        file,
+                        position: self.positions.get(file).copied().unwrap_or(0),
+                        path: self.data.files[file].filename.clone(),
+                        line: None,
+                        text: String::new(),
+                    })
+                    .collect()
+            }
+            PickerKind::Global => self
+                .search_hits(query)
+                .into_iter()
+                .take(PICKER_LIMIT)
+                .map(|(file, position)| {
+                    let row = &self.lines[file][position];
+                    PickerItem {
+                        file,
+                        position,
+                        path: self.data.files[file].filename.clone(),
+                        line: row.new_line.or(row.old_line),
+                        text: row.text.get(1..).unwrap_or_default().trim().to_owned(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn pick(&mut self, item: &PickerItem) {
+        if item.file != self.selected_file {
+            self.selection = None;
+            self.horizontal = 0;
+        }
+        self.selected_file = item.file;
+        self.positions[item.file] = item.position;
+        self.focus = Focus::Diff;
     }
 
     fn hunk(&mut self, forward: bool) {
@@ -939,6 +1016,56 @@ impl ReviewState {
             self.selection = None;
         }
     }
+}
+
+const PICKER_LIMIT: usize = 1000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerKind {
+    Files,
+    Global,
+}
+
+pub struct PickerItem {
+    pub file: usize,
+    pub position: usize,
+    pub path: String,
+    pub line: Option<u32>,
+    pub text: String,
+}
+
+/// Scores `path` when every query character appears in order, favoring file-name hits, word starts, and runs.
+pub fn fuzzy_score(query: &str, path: &str) -> Option<i64> {
+    let query = query
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    let path = path.chars().collect::<Vec<_>>();
+    let name_start = path
+        .iter()
+        .rposition(|&character| character == '/')
+        .map_or(0, |index| index + 1);
+    let mut score = -(path.len() as i64) / 8;
+    let mut next = 0;
+    let mut previous = None;
+    for wanted in query {
+        let index = (next..path.len())
+            .find(|&index| path[index].to_lowercase().eq(std::iter::once(wanted)))?;
+        score += 1;
+        if index >= name_start {
+            score += 4;
+        }
+        if index == 0 || matches!(path[index - 1], '/' | '_' | '-' | '.') {
+            score += 3;
+        }
+        if previous == Some(index.wrapping_sub(1)) {
+            score += 5;
+        }
+        previous = Some(index);
+        next = index + 1;
+    }
+    Some(score)
 }
 
 /// Character ranges of `query` in a diff row's code, ignoring case unless the query has capitals.
@@ -1006,6 +1133,10 @@ pub enum Action {
     },
     DisableAi,
     Activity(PrId),
+    PostComment {
+        id: PrId,
+        body: String,
+    },
     Prepare {
         pr: PullRequest,
         open_editor: Option<Box<EditorTarget>>,
@@ -1446,8 +1577,16 @@ impl App {
                 Dialog::Note { input, .. }
                 | Dialog::Compose { input, .. }
                 | Dialog::Submit { input, .. }
+                | Dialog::Conversation { input, .. }
                 | Dialog::OpenPr { input },
             ) => input,
+            Some(Dialog::Picker {
+                input, selected, ..
+            }) => {
+                *selected = 0;
+                text = text.replace(['\r', '\n'], " ");
+                input
+            }
             Some(Dialog::Ask) => &mut self.chat_input,
             _ => return,
         };
@@ -1516,6 +1655,21 @@ impl App {
             keybindings::spec(id).ok_or_else(|| anyhow::anyhow!("Unknown shortcut action {id}"))?;
         self.goto_pending = false;
         self.pending_keys.clear();
+        let kind = match id {
+            "file_picker" => Some(PickerKind::Files),
+            "global_search" => Some(PickerKind::Global),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            if self.review.is_some() && self.binding_view() == View::Diff {
+                self.dialog = Some(Dialog::Picker {
+                    kind,
+                    input: TextInput::default(),
+                    selected: 0,
+                });
+            }
+            return Ok(Action::None);
+        }
         for key in binding.canonical() {
             let action = self.default_key(key)?;
             if !matches!(action, Action::None) {
@@ -1700,6 +1854,11 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        if key == KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE)
+            && (self.overview.is_some() || self.review.is_some())
+        {
+            return self.open_conversation_comment();
         }
         if self.local_spec.is_some() {
             match key.code {
@@ -2424,9 +2583,51 @@ impl App {
         }
     }
 
+    fn open_conversation_comment(&mut self) -> Result<Action> {
+        if self.local_spec.is_some()
+            || self
+                .review
+                .as_ref()
+                .is_some_and(|review| review.data.source.is_local())
+        {
+            self.message("Conversation comments need a GitHub PR", true);
+            return Ok(Action::None);
+        }
+        let Some(id) = self
+            .overview
+            .as_ref()
+            .map(|overview| overview.metadata.id.clone())
+            .or_else(|| self.review.as_ref().map(|review| review.data.pr.id.clone()))
+        else {
+            return Ok(Action::None);
+        };
+        let text = store::conversation_draft(&self.root, &id)?;
+        self.dialog = Some(Dialog::Conversation {
+            id,
+            input: TextInput::new(text),
+        });
+        Ok(Action::None)
+    }
+
     fn dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
         let dialog = self.dialog.take().unwrap();
         if key.code == KeyCode::Esc {
+            match dialog {
+                Dialog::Conversation { id, input } => {
+                    store::save_conversation_draft(&self.root, &id, &input.text)?;
+                    if !input.text.trim().is_empty() {
+                        let key = self.shortcut("conversation_comment");
+                        self.message(format!("Comment draft kept; {key} continues it"), false);
+                    }
+                }
+                Dialog::ConversationPreview { id, body, .. } => {
+                    self.dialog = Some(Dialog::Conversation {
+                        id,
+                        input: TextInput::new(body),
+                    });
+                }
+                _ => {}
+            }
             return Ok(Action::None);
         }
         let save = key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2911,6 +3112,87 @@ impl App {
                     input.key(key);
                 }
                 Some(Dialog::Submit { event, input })
+            }
+            Dialog::Picker {
+                kind,
+                mut input,
+                mut selected,
+            } => {
+                let review = self.review.as_mut().context("No diff is open")?;
+                let items = review.picker_items(kind, &input.text);
+                let last = items.len().saturating_sub(1);
+                let control = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some(item) = items.get(selected.min(last)) {
+                            review.pick(item);
+                            if kind == PickerKind::Global {
+                                review.search = Some(input.text.clone());
+                                let matches = items.len();
+                                self.message(
+                                    format!(
+                                        "{} matches for {} · n/N move in this file · Esc clears",
+                                        matches, input.text
+                                    ),
+                                    false,
+                                );
+                            }
+                            return Ok(Action::None);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Tab => selected = (selected + 1).min(last),
+                    KeyCode::Up | KeyCode::BackTab => selected = selected.saturating_sub(1),
+                    KeyCode::Char('n') if control => selected = (selected + 1).min(last),
+                    KeyCode::Char('p') if control => selected = selected.saturating_sub(1),
+                    KeyCode::PageDown => selected = (selected + 10).min(last),
+                    KeyCode::PageUp => selected = selected.saturating_sub(10),
+                    _ => {
+                        let previous = input.text.clone();
+                        input.key(key);
+                        if previous != input.text {
+                            selected = 0;
+                        }
+                    }
+                }
+                Some(Dialog::Picker {
+                    kind,
+                    input,
+                    selected,
+                })
+            }
+            Dialog::Conversation { id, mut input } => {
+                if save {
+                    store::save_conversation_draft(&self.root, &id, &input.text)?;
+                    if input.text.trim().is_empty() {
+                        self.message("Write a comment first", true);
+                        Some(Dialog::Conversation { id, input })
+                    } else {
+                        let body = input.text.trim().to_owned();
+                        Some(Dialog::ConversationPreview {
+                            id,
+                            body,
+                            scroll: 0,
+                        })
+                    }
+                } else {
+                    input.key(key);
+                    Some(Dialog::Conversation { id, input })
+                }
+            }
+            Dialog::ConversationPreview {
+                id,
+                body,
+                mut scroll,
+            } => {
+                if key.code == KeyCode::Enter && !self.busy {
+                    if self.demo {
+                        self.message("Demo: preview complete. Nothing was sent to GitHub.", false);
+                        return Ok(Action::None);
+                    }
+                    return Ok(Action::PostComment { id, body });
+                }
+                scroll_key(&mut scroll, key);
+                Some(Dialog::ConversationPreview { id, body, scroll })
             }
             Dialog::Confirm {
                 event,

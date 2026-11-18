@@ -227,7 +227,9 @@ The file sidebar shows changed files as a tree. Chains of directories that each 
 
 Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
 
-Press `/` in Diff, type text, and press `Enter` to jump to the first match after the cursor. The search covers the lines currently shown in every changed file, ignores case unless the text has a capital letter, and highlights each match. While a search is active, `n` / `N` move to the next / previous match and wrap around the changeset; `Esc` clears the search, after which `n` again means next file. The keys are configurable as `search`, `search_next`, and `search_previous`.
+Press `/` in Diff, type text, and press `Enter` to jump to the first match after the cursor in the current file. Matches are highlighted, case is ignored unless the text has a capital letter, and only the lines currently shown are searched. While a search is active, `n` / `N` move to the next / previous match in the file and wrap at its ends; `Esc` clears the search, after which `n` again means next file.
+
+`Space /` opens a picker that searches every file as you type, like Helix's global search: results list `path:line` with the line text, and a preview shows the selected match in its diff. `Space f` opens a picker over the changed files, ranked by fuzzy file-name match. In both, `Up` / `Down` (or `Ctrl-n` / `Ctrl-p`) select and `Enter` jumps; after a global search, `n` / `N` continue in the opened file. The keys are configurable as `search`, `global_search`, `file_picker`, `search_next`, and `search_previous`.
 
 ## Unified and split view
 
@@ -397,7 +399,10 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `j` / `k`, up / down | Move through lines within the current file |
 | `.` / `,`, `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous hunk, continuing across files |
-| `/`, then `n` / `N` | Search every file's diff text; jump to the next / previous match |
+| `M` | Write a PR conversation comment; `Esc` keeps the draft |
+| `/`, then `n` / `N` | Search the current file; jump to the next / previous match |
+| `Space /` | Search every file in a picker with a preview |
+| `Space f` | Open a changed file by fuzzy name |
 | `gg` / `ge` | Top / end of current file, or first / last item in lists |
 | `gf` | Open selected source location in your editor |
 | `G`, Home / End | Legacy file or list boundary shortcuts |
@@ -443,6 +448,10 @@ Full-file context supports UTF-8 text without NUL bytes, up to 2 MiB and 100,000
 Expanded lines can be selected, opened in Helix, or used with `Q` / `E`. For selections within one displayed hunk, agent questions use the selected region and up to 20 nearby source rows. Selections spanning multiple hunks include those hunks and remain subject to the configured context budget. GitHub review drafts remain limited to the original patch's complete hunks.
 
 Press `B` in the PR list, Overview, or Diff to open the selected PR in your configured browser through GitHub CLI. The shortcut follows the selected repository and PR number. In text editors and the list filter, `B` remains ordinary text input.
+
+## Commenting on the PR conversation
+
+Press `M` in an opened GitHub PR to write a normal conversation comment, the kind posted below the PR description rather than on a line. `Esc` keeps what you wrote as a draft, so you can check another file or the conversation (`V`) and press `M` again to continue. The draft is stored per PR under the drafts directory and survives new pushes and restarts. `Ctrl-s` shows a preview, and `Enter` there posts immediately, outside any review; `Esc` returns to editing. After posting, the draft is deleted and Overview reloads the conversation. If posting fails, the draft stays; check the conversation before posting again, since a network error can hide a comment that was created.
 
 ## Checking out a PR
 

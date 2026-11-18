@@ -611,7 +611,7 @@ fn split_view_moves_row_by_row_left_before_right_like_hunk() {
 }
 
 #[test]
-fn slash_searches_every_file_and_n_moves_between_matches_until_escape() {
+fn slash_searches_the_current_file_and_space_pickers_reach_every_file() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().into(), false);
     load(
@@ -621,48 +621,89 @@ fn slash_searches_every_file_and_n_moves_between_matches_until_escape() {
                 "src/a.rs",
                 Some("@@ -1,2 +1,2 @@\n-let Timeout = 1;\n+let timeout = 2;\n keep"),
             ),
-            fixture_file("src/b.rs", Some("@@ -1,1 +1,1 @@\n-old\n+retry(timeout)")),
+            fixture_file(
+                "src/nested/b.rs",
+                Some("@@ -1,1 +1,1 @@\n-old\n+retry(timeout)"),
+            ),
         ],
     );
     let position = |app: &App| {
         let review = app.review.as_ref().unwrap();
         (review.selected_file, review.position())
     };
-    let search = |app: &mut App, text: &str| {
-        app.key(key('/')).unwrap();
+    let type_text = |app: &mut App, text: &str| {
         for character in text.chars() {
             app.key(key(character)).unwrap();
         }
-        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
     };
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
 
-    search(&mut app, "timeout");
+    app.key(key('/')).unwrap();
+    type_text(&mut app, "timeout");
+    app.key(enter).unwrap();
     assert_eq!(position(&app), (0, 1));
-    assert!(app.status.contains("match 1 of 3"), "{}", app.status);
+    assert!(
+        app.status.contains("match 1 of 2 in this file"),
+        "{}",
+        app.status
+    );
     app.key(key('n')).unwrap();
     assert_eq!(position(&app), (0, 2));
-    app.key(key('n')).unwrap();
-    assert_eq!(position(&app), (1, 2));
     app.key(key('n')).unwrap();
     assert_eq!(position(&app), (0, 1));
     assert!(app.status.contains("wrapped"), "{}", app.status);
     app.key(key('N')).unwrap();
-    assert_eq!(position(&app), (1, 2));
-
+    assert_eq!(position(&app), (0, 2));
     app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     assert!(app.review.as_ref().unwrap().search.is_none());
-    assert!(app.review.is_some());
-    app.key(key('p')).unwrap();
-    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
-
-    search(&mut app, "Timeout");
-    assert!(app.status.contains("match 1 of 1"), "{}", app.status);
-    search(&mut app, "absent");
+    app.key(key('n')).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
+    app.key(key('/')).unwrap();
+    type_text(&mut app, "Timeout");
+    app.key(enter).unwrap();
     assert!(
-        app.error && app.status.contains("No match"),
+        app.error && app.status.contains("Space / searches every file"),
         "{}",
         app.status
     );
+
+    app.key(key(' ')).unwrap();
+    app.key(key('/')).unwrap();
+    assert!(matches!(app.dialog, Some(Dialog::Picker { .. })));
+    type_text(&mut app, "timeout");
+    let review = app.review.as_ref().unwrap();
+    let items = review.picker_items(app::PickerKind::Global, "timeout");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| (item.file, item.line))
+            .collect::<Vec<_>>(),
+        [(0, Some(1)), (0, Some(1)), (1, Some(1))]
+    );
+    app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    app.key(enter).unwrap();
+    assert!(app.dialog.is_none());
+    assert_eq!(position(&app), (0, 2));
+    assert_eq!(
+        app.review.as_ref().unwrap().search.as_deref(),
+        Some("timeout")
+    );
+
+    app.key(key(' ')).unwrap();
+    app.key(key('f')).unwrap();
+    type_text(&mut app, "nb");
+    app.key(enter).unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 1);
+}
+
+#[test]
+fn file_picker_prefers_file_name_matches_and_word_starts() {
+    assert!(app::fuzzy_score("xyz", "src/client.rs").is_none());
+    let name = app::fuzzy_score("client", "src/client.rs").unwrap();
+    let scattered =
+        app::fuzzy_score("client", "crates/lib/integration/test.rs").unwrap_or(i64::MIN);
+    assert!(name > scattered);
+    assert!(app::fuzzy_score("", "any/path.rs").is_some());
 }

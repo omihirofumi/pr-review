@@ -508,3 +508,52 @@ fn checkout_targets_the_launch_repository_when_it_holds_the_pr() {
         }
     ));
 }
+
+#[test]
+fn conversation_comment_keeps_its_draft_across_escape_and_posts_after_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(dir.path().into(), false);
+    app.loaded(app::demo_data()).unwrap();
+    let id = app.review.as_ref().unwrap().data.pr.id.clone();
+    let type_text = |app: &mut App, text: &str| {
+        for character in text.chars() {
+            app.key(key(KeyCode::Char(character))).unwrap();
+        }
+    };
+    let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+    app.key(key(KeyCode::Char('M'))).unwrap();
+    type_text(&mut app, "Looks good");
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(app.dialog.is_none());
+    assert_eq!(
+        store::conversation_draft(dir.path(), &id).unwrap(),
+        "Looks good"
+    );
+
+    app.key(key(KeyCode::Char('n'))).unwrap();
+    app.key(key(KeyCode::Char('M'))).unwrap();
+    type_text(&mut app, " overall");
+    app.key(ctrl_s).unwrap();
+    assert!(matches!(
+        app.dialog,
+        Some(Dialog::ConversationPreview { .. })
+    ));
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Conversation { input, .. }) if input.text == "Looks good overall")
+    );
+    app.key(ctrl_s).unwrap();
+    match app.key(key(KeyCode::Enter)).unwrap() {
+        Action::PostComment { id: posted, body } => {
+            assert_eq!(posted, id);
+            assert_eq!(body, "Looks good overall");
+        }
+        _ => panic!("Enter in the preview must post the comment"),
+    }
+
+    app.key(key(KeyCode::Char('M'))).unwrap();
+    app.key(key(KeyCode::Esc)).unwrap();
+    store::save_conversation_draft(dir.path(), &id, "  ").unwrap();
+    assert_eq!(store::conversation_draft(dir.path(), &id).unwrap(), "");
+}

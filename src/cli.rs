@@ -232,6 +232,10 @@ pub(crate) enum JobResult {
         body: String,
         event: ReviewEvent,
     },
+    Commented {
+        id: PrId,
+        result: Result<String>,
+    },
 }
 
 type Tui = Terminal<CrosstermBackend<std::fs::File>>;
@@ -644,6 +648,30 @@ pub fn run() -> Result<()> {
                     }
                     app.message(format!("{error:#}. Drafts remain saved. V shows published reviews; u recovers an uncertain submission."), true);
                 }
+                JobResult::Commented { id, result } => match result {
+                    Ok(url) => {
+                        let cleared = store::save_conversation_draft(&app.root, &id, "");
+                        if let Some(overview) = app
+                            .overview
+                            .as_mut()
+                            .filter(|overview| overview.metadata.id == id)
+                        {
+                            overview.activity = app::ActivityStatus::Loading;
+                            spawn_activity(&sender, app.generation, id);
+                        }
+                        match cleared {
+                            Ok(()) => app.message(format!("Comment posted: {url}"), false),
+                            Err(error) => app.message(
+                                format!("Comment posted: {url}. Could not delete its draft: {error:#}. Do not post it again."),
+                                true,
+                            ),
+                        }
+                    }
+                    Err(error) => app.message(
+                        format!("{error:#}. The draft is kept; check the conversation with V before posting again."),
+                        true,
+                    ),
+                },
                 JobResult::Inbox(Err(error))
                 | JobResult::Activity(Err(error))
                 | JobResult::CheckedOut(Err(error))
@@ -1518,6 +1546,7 @@ fn dispatch(
                 | Action::CheckoutHere { .. }
                 | Action::Activity(_)
                 | Action::Submit { .. }
+                | Action::PostComment { .. }
                 | Action::PreviewGuide(_)
         )
     {
@@ -1722,6 +1751,13 @@ fn dispatch(
                     result,
                     open_editor,
                 });
+            });
+        }
+        Action::PostComment { id, body } => {
+            app.message("Posting the conversation comment…", false);
+            thread::spawn(move || {
+                let result = github::post_conversation_comment(&id, &body);
+                let _ = sender.send(JobResult::Commented { id, result });
             });
         }
         Action::Submit {

@@ -115,6 +115,39 @@ pub fn clear_attempt(root: &Path, pr: &PullRequest) -> Result<()> {
     }
 }
 
+/// A conversation comment is not tied to a revision, so its draft survives new pushes to the PR.
+fn conversation_path(root: &Path, id: &PrId) -> PathBuf {
+    root.join("drafts")
+        .join(&id.repo)
+        .join(format!("{}-conversation.md", id.number))
+}
+
+pub fn conversation_draft(root: &Path, id: &PrId) -> Result<String> {
+    match std::fs::read_to_string(conversation_path(root, id)) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).context("Cannot read the conversation comment draft"),
+    }
+}
+
+/// Saves the draft, or removes it when the text is blank.
+pub fn save_conversation_draft(root: &Path, id: &PrId, text: &str) -> Result<()> {
+    let path = conversation_path(root, id);
+    if text.trim().is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        };
+    }
+    let parent = path.parent().context("Draft path has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut temp, text.as_bytes())?;
+    temp.persist(&path)
+        .with_context(|| format!("Cannot save the conversation draft to {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
