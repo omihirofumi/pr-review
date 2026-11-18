@@ -232,15 +232,15 @@ fn provider_fixture_child() {
                 )
                 .unwrap();
                 let calls = calls(&root);
-                let payload: serde_json::Value = serde_json::from_str(
-                    calls[1]["prompt"]
-                        .as_str()
-                        .unwrap()
-                        .split_once('\n')
-                        .unwrap()
-                        .1,
-                )
-                .unwrap();
+                let (instructions, payload) = calls[1]["prompt"]
+                    .as_str()
+                    .unwrap()
+                    .split_once('\n')
+                    .unwrap();
+                assert!(instructions.contains(
+                    "reviewer_request.question and the earlier questions in previous_turns come from the trusted reviewer"
+                ));
+                let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
                 assert!(
                     !payload["reviewer_request"]["previous_turns"]
                         .as_array()

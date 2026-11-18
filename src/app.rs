@@ -977,6 +977,8 @@ pub struct App {
     pub pending_keys: Vec<Stroke>,
     pub repo: Option<String>,
     pub inbox: Vec<PrSummary>,
+    /// False until a PR list fetch succeeds, which a launch straight into one PR skips.
+    pub inbox_loaded: bool,
     pub selected_pr: usize,
     pub review: Option<ReviewState>,
     pub dialog: Option<Dialog>,
@@ -1025,6 +1027,7 @@ impl App {
             pending_keys: Vec::new(),
             repo: None,
             inbox: Vec::new(),
+            inbox_loaded: false,
             selected_pr: 0,
             review: None,
             dialog: None,
@@ -1090,7 +1093,7 @@ impl App {
         Ok(())
     }
 
-    fn leave_pr(&mut self) {
+    fn leave_pr(&mut self) -> Action {
         if let Some(overview) = self.overview.take() {
             let status = if matches!(overview.ai, AiStatus::Loading) {
                 AiStatus::Waiting
@@ -1115,6 +1118,11 @@ impl App {
         self.goto_pending = false;
         self.pending_keys.clear();
         self.message("Back to PR inbox", false);
+        if self.inbox_loaded || self.local_spec.is_some() {
+            Action::None
+        } else {
+            Action::LoadInbox
+        }
     }
 
     fn jump_to_reading_step(&mut self) -> Result<()> {
@@ -1708,7 +1716,7 @@ impl App {
         }
         if self.overview.is_some() && self.review.is_none() {
             match key.code {
-                KeyCode::Esc if !self.busy => self.leave_pr(),
+                KeyCode::Esc if !self.busy => return Ok(self.leave_pr()),
                 KeyCode::Char('r') if !self.diff_loading => return Ok(Action::LoadDiff),
                 KeyCode::Char('q') if !self.busy => return Ok(Action::Quit),
                 KeyCode::Char('?') => self.dialog = Some(Dialog::Help { scroll: 0 }),
@@ -1812,9 +1820,7 @@ impl App {
             KeyCode::Esc if review.selection.is_some() => {
                 review.selection = None;
             }
-            KeyCode::Esc if !self.busy => {
-                self.leave_pr();
-            }
+            KeyCode::Esc if !self.busy => return Ok(self.leave_pr()),
             KeyCode::Tab | KeyCode::BackTab => {
                 if review.focus == Focus::Files {
                     review.leave_files();
@@ -2237,7 +2243,7 @@ impl App {
             KeyCode::Char('r') if !self.busy => {
                 return Ok(Action::LoadPr(overview.metadata.id.clone()));
             }
-            KeyCode::Esc if !self.busy => self.leave_pr(),
+            KeyCode::Esc if !self.busy => return Ok(self.leave_pr()),
             KeyCode::Char('q') if !self.busy => {
                 if self
                     .review

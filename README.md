@@ -358,7 +358,7 @@ The review runs in the background from the repository you launched prpr in; keep
 
 ## Ask your agent and explain a diff
 
-**Ask** and **Explain diff** use the configured Codex or Claude CLI and its existing login. They share the guide's language, model, timeout, and context budget.
+**Ask** and **Explain diff** use the configured Codex or Claude CLI and its existing login. They share the guide's model, timeout, and context budget, and answer in the guide's language unless a question asks for another one.
 
 The conversation lives in an AI chat panel on the right, next to whichever tab is open, so the code stays visible while you ask about it. Press `Ctrl-l` on Overview, AI Guide, or Diff to show or hide it. Terminals narrower than 120 columns show the panel over the review instead.
 

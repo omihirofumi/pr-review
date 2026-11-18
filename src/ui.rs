@@ -1399,6 +1399,9 @@ fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(
             Paragraph::new(if app.busy {
                 "Loading pull requests…"
+            } else if !app.inbox_loaded {
+                "Pull requests are not loaded.
+r loads them · # opens a PR"
             } else {
                 "No matching pull requests.
 # opens a PR · / filters · r refreshes"

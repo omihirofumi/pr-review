@@ -310,6 +310,25 @@ fn escape_from_either_pending_tab_invalidates_the_old_generation() {
 }
 
 #[test]
+fn leaving_a_pr_opened_by_number_loads_the_pr_list_it_never_fetched() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().into(), false);
+    app.opened(overview());
+    assert!(matches!(
+        app.key(key(KeyCode::Esc)).unwrap(),
+        Action::LoadInbox
+    ));
+    app.loaded(app::demo_data()).unwrap();
+    assert!(matches!(
+        app.key(key(KeyCode::Esc)).unwrap(),
+        Action::LoadInbox
+    ));
+    app.inbox_loaded = true;
+    app.opened(overview());
+    assert!(matches!(app.key(key(KeyCode::Esc)).unwrap(), Action::None));
+}
+
+#[test]
 fn mutating_operations_keep_escape_from_orphaning_the_active_review() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().into(), false);

@@ -505,6 +505,7 @@ pub fn run() -> Result<()> {
             author: demo.pr.author.clone(),
             draft: false,
         }];
+        app.inbox_loaded = true;
         app.message(
             "Offline demo. Use the command palette to open Diff or prepare a sample guide. Nothing is sent.",
             false,
@@ -583,6 +584,7 @@ pub fn run() -> Result<()> {
             match result {
                 JobResult::Inbox(Ok(prs)) => {
                     app.inbox = prs;
+                    app.inbox_loaded = true;
                     app.selected_pr = 0;
                     app.message(format!("{} pull requests loaded", app.inbox.len()), false);
                 }
