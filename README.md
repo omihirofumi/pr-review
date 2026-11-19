@@ -4,9 +4,9 @@ A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Juj
 
 Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex, Claude, or Agy reading guide, review diffs and inline threads, check the PR out where you are, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
 
-![prpr walkthrough: PR inbox, overview, AI reading guide, split diff, inline AI explanation, draft comments, command palette, and batch review preview](assets/demo.gif)
+![A Day with prpr: morning PR triage, CI overview, AI reading guide, split diff, docked AI explanation, afternoon local Jujutsu diff with agent reply and highlight, and evening batch review submit](assets/demo.gif)
 
-*[Watch full-resolution video (1080p MP4)](assets/demo.mp4) · Try it offline anytime with `prpr --demo`*
+*A Day with prpr (subtitled) · [Watch full-resolution video (1080p MP4)](assets/demo.mp4) · Try it offline anytime with `prpr --demo`*
 
 ## Install
 
