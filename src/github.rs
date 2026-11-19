@@ -18,7 +18,7 @@ use crate::{
     diff::validate_comment,
     model::{
         ChangedFile, Check, CheckState, ConversationEntry, DraftComment, PrActivity, PrId,
-        PrOverview, PrSummary, PullRequest, ReviewComment, ReviewData, ReviewEvent,
+        PrOverview, PrSummary, PullRequest, ReviewComment, ReviewData, ReviewEvent, ReviewStatus,
     },
 };
 
@@ -292,7 +292,7 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
         "--limit",
         "100",
         "--json",
-        "number,title,body,author,isDraft,url,latestReviews",
+        "number,title,body,author,isDraft,url,latestReviews,reviewDecision",
     ];
     if let Some(search) = search.filter(|search| !search.trim().is_empty()) {
         args.extend(["--search", search]);
@@ -307,6 +307,10 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
                 "GitHub returned an inconsistent PR number"
             );
             let author = login(pr.author);
+            let review_status = review_status(
+                pr.review_decision.as_deref().unwrap_or_default(),
+                &pr.latest_reviews,
+            );
             let reviewed = pr
                 .latest_reviews
                 .into_iter()
@@ -316,11 +320,25 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
                 id,
                 title: pr.title,
                 awaiting_review: !reviewed && !author.eq_ignore_ascii_case(&viewer),
+                review_status,
                 author,
                 draft: pr.is_draft,
             })
         })
         .collect()
+}
+
+/// GitHub fills `reviewDecision` only where branch protection requires reviews, so other
+/// repositories fall back to the latest review of each reviewer.
+fn review_status(decision: &str, latest: &[SearchReview]) -> ReviewStatus {
+    let any = |state: &str| latest.iter().any(|review| review.state == state);
+    match decision {
+        "APPROVED" => ReviewStatus::Approved,
+        "CHANGES_REQUESTED" => ReviewStatus::ChangesRequested,
+        "" if any("CHANGES_REQUESTED") => ReviewStatus::ChangesRequested,
+        "" if any("APPROVED") => ReviewStatus::Approved,
+        _ => ReviewStatus::Pending,
+    }
 }
 
 /// Login of the signed-in GitHub user, fetched once per process.
@@ -1010,11 +1028,15 @@ struct SearchPr {
     url: String,
     #[serde(rename = "latestReviews", default)]
     latest_reviews: Vec<SearchReview>,
+    #[serde(rename = "reviewDecision", default)]
+    review_decision: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct SearchReview {
     author: Option<ApiUser>,
+    #[serde(default)]
+    state: String,
 }
 
 #[cfg(test)]

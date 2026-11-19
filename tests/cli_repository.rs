@@ -41,8 +41,32 @@ mod unix {
                     .collect::<Vec<_>>();
                 assert_eq!(
                     awaiting,
-                    [(42, true), (43, false), (44, false)],
+                    [
+                        (42, true),
+                        (43, false),
+                        (44, false),
+                        (45, true),
+                        (46, true),
+                        (47, true)
+                    ],
                     "only others' PRs without the viewer's review are marked"
+                );
+                use prpr::model::ReviewStatus::{Approved, ChangesRequested, Pending};
+                let status = prs
+                    .iter()
+                    .map(|pr| (pr.id.number, pr.review_status))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    status,
+                    [
+                        (42, Pending),
+                        (43, Approved),
+                        (44, Pending),
+                        (45, ChangesRequested),
+                        (46, Approved),
+                        (47, ChangesRequested)
+                    ],
+                    "GitHub's review decision wins; without one, latest reviews decide"
                 );
             }
             "url" => {
@@ -180,15 +204,25 @@ if args[:2] == ['repo', 'view']:
 elif args[:2] == ['api', 'user']:
     print(json.dumps({'login': 'Viewer'}))
 elif args[:2] == ['pr', 'list']:
-    assert 'latestReviews' in args[args.index('--json') + 1]
+    assert {'latestReviews', 'reviewDecision'} <= set(args[args.index('--json') + 1].split(','))
     if scenario == 'query':
         print('[]')
     elif scenario == 'reviews':
-        def pr(number, author, reviewers):
-            return {'number': number, 'title': 'PR', 'author': {'login': author}, 'isDraft': False,
-                    'url': 'https://github.com/scope/repo/pull/' + str(number),
-                    'latestReviews': [{'author': {'login': login}, 'state': 'COMMENTED'} for login in reviewers]}
-        print(json.dumps([pr(42, 'author', ['someone']), pr(43, 'author', ['viewer']), pr(44, 'viewer', [])]))
+        def pr(number, author, reviews, decision=None):
+            result = {'number': number, 'title': 'PR', 'author': {'login': author}, 'isDraft': False,
+                      'url': 'https://github.com/scope/repo/pull/' + str(number),
+                      'latestReviews': [{'author': {'login': login}, 'state': state} for login, state in reviews]}
+            if decision is not None:
+                result['reviewDecision'] = decision
+            return result
+        print(json.dumps([
+            pr(42, 'author', [('someone', 'COMMENTED')], 'REVIEW_REQUIRED'),
+            pr(43, 'author', [('viewer', 'APPROVED')], 'APPROVED'),
+            pr(44, 'viewer', [], ''),
+            pr(45, 'author', [('someone', 'APPROVED'), ('other', 'CHANGES_REQUESTED')], ''),
+            pr(46, 'author', [('someone', 'APPROVED')], None) | {'reviewDecision': None},
+            pr(47, 'author', [('someone', 'APPROVED')], 'CHANGES_REQUESTED'),
+        ]))
     else:
         repo = 'other/repo' if scenario == 'hostile_results' else 'scope/repo'
         print(json.dumps([{'number': 42, 'title': 'Scoped PR', 'author': {'login': 'author'}, 'isDraft': False, 'url': 'https://github.com/' + repo + '/pull/42'}]))

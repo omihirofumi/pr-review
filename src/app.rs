@@ -3534,6 +3534,7 @@ mod tests {
             author: data.pr.author.clone(),
             draft: false,
             awaiting_review: false,
+            review_status: prpr::model::ReviewStatus::Pending,
         });
         assert!(matches!(app.key(key('o')).unwrap(), Action::LoadPr(id) if id == data.pr.id));
         app.loaded(data).unwrap();

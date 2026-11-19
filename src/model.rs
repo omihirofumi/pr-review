@@ -29,6 +29,17 @@ pub struct PrSummary {
     /// Someone else's PR that the signed-in user has not submitted a review on.
     #[serde(default)]
     pub awaiting_review: bool,
+    #[serde(default)]
+    pub review_status: ReviewStatus,
+}
+
+/// Where a PR's reviews stand overall, regardless of who reviewed it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ReviewStatus {
+    #[default]
+    Pending,
+    Approved,
+    ChangesRequested,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

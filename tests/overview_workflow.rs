@@ -871,6 +871,11 @@ fn browsing_app(root: std::path::PathBuf) -> App {
             author: "author".into(),
             draft: number == 2,
             awaiting_review: number == 1,
+            review_status: if number == 2 {
+                prpr::model::ReviewStatus::Approved
+            } else {
+                prpr::model::ReviewStatus::Pending
+            },
             body: format!(
                 "# Description {number}\n\nSelected body {number}\n\n{}",
                 (0..150)
@@ -933,8 +938,24 @@ fn pr_list_marks_prs_awaiting_the_viewers_review() {
             .to_owned()
     };
     assert!(row(1).contains('●'), "{}", row(1));
+    assert!(!row(1).contains('✓'), "{}", row(1));
     assert!(!row(2).contains('●'), "{}", row(2));
+    assert!(row(2).contains('✓'), "{}", row(2));
     assert!(output.contains("● 1 awaiting your review"), "{output}");
+}
+
+#[test]
+fn pr_list_shows_changes_requested_and_approval_beside_the_review_mark() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = browsing_app(directory.path().into());
+    app.inbox[0].review_status = prpr::model::ReviewStatus::ChangesRequested;
+    let output = screen(&mut app);
+    let row = output.lines().find(|line| line.contains("#1 ")).unwrap();
+    assert!(row.contains('✗') && row.contains('●'), "{row}");
+    assert!(
+        row.find('✗') < row.find('●'),
+        "status comes before the review mark: {row}"
+    );
 }
 
 #[test]
@@ -1451,6 +1472,7 @@ fn palette_tracks_inbox_overview_local_and_busy_contexts() {
         author: "someone".into(),
         draft: false,
         awaiting_review: false,
+        review_status: prpr::model::ReviewStatus::Pending,
     }];
     inbox.filtering = true;
     inbox.filter = "fix".into();

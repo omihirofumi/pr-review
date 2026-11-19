@@ -514,6 +514,7 @@ pub fn run() -> Result<()> {
             author: demo.pr.author.clone(),
             draft: false,
             awaiting_review: true,
+            review_status: prpr::model::ReviewStatus::Pending,
         }];
         app.inbox_loaded = true;
         app.message(

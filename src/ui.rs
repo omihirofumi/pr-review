@@ -4,7 +4,7 @@ use prpr::{
     analysis::Analysis,
     diff::{DiffLine, LineKind},
     keybindings::{self, View},
-    model::{ChangedFile, CheckState, Side},
+    model::{ChangedFile, CheckState, ReviewStatus, Side},
     settings::{DiffLayout, Provider},
     thread::{Thread, matches_anchor, threads},
 };
@@ -390,7 +390,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let hints: &[(&str, &str)] = match app.binding_view() {
             View::Inbox => &[
                 ("command_palette", "commands"),
-                ("open_pr", "diff"),
+                ("open_pr", "open"),
                 ("toggle_preview", "preview"),
                 ("help", "help"),
             ],
@@ -1440,6 +1440,13 @@ r loads them · # opens a PR"
     } else {
         let rows = prs.iter().map(|pr| {
             Row::new(vec![
+                match pr.review_status {
+                    ReviewStatus::Approved => Cell::from("✓").style(Style::default().fg(GREEN)),
+                    ReviewStatus::ChangesRequested => {
+                        Cell::from("✗").style(Style::default().fg(RED))
+                    }
+                    ReviewStatus::Pending => Cell::from(" "),
+                },
                 Cell::from(if pr.awaiting_review { "●" } else { " " })
                     .style(Style::default().fg(ACCENT)),
                 Cell::from(if pr.draft { "D" } else { " " }),
@@ -1453,13 +1460,14 @@ r loads them · # opens a PR"
             [
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Length(6),
                 Constraint::Min(12),
                 Constraint::Length(if inner.width >= 50 { 12 } else { 0 }),
             ],
         )
         .header(
-            Row::new(["", "", "PR", "TITLE", "AUTHOR"])
+            Row::new(["", "", "", "PR", "TITLE", "AUTHOR"])
                 .style(Style::default().fg(MUTED))
                 .bottom_margin(1),
         )
