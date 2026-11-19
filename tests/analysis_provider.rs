@@ -10,6 +10,7 @@ use std::{
 use prpr::{
     analysis, assistant,
     model::{ChangedFile, PrId, PrOverview, PullRequest, ReviewData},
+    review,
     settings::{self, AiConfig, Provider, Settings},
 };
 
@@ -87,6 +88,8 @@ fn settings_defaults_partial_configuration_and_atomic_roundtrip() {
     assert_eq!(partial.ai.timeout_seconds, 180);
     assert_eq!(partial.ai.max_input_bytes, 160_000);
     assert!(!partial.ai.auto_explain);
+    std::fs::write(&path, "[ai]\nprovider = 'agy'\n").unwrap();
+    assert_eq!(settings::load(&path).unwrap().ai.provider, Provider::Agy);
     std::fs::write(&path, "[ai]\nprovider = 'missing-provider'\n").unwrap();
     assert!(settings::load(&path).is_err());
 }
@@ -115,10 +118,10 @@ fn provider_fixture_child() {
         review.pr.id = overview.id.clone();
     }
     let mut config = AiConfig {
-        provider: if std::env::var("PRPR_AI_PROVIDER").unwrap() == "claude" {
-            Provider::Claude
-        } else {
-            Provider::Codex
+        provider: match std::env::var("PRPR_AI_PROVIDER").unwrap().as_str() {
+            "claude" => Provider::Claude,
+            "agy" => Provider::Agy,
+            _ => Provider::Codex,
         },
         model: Some("fixture-model".into()),
         language: "ja".into(),
@@ -162,6 +165,40 @@ fn provider_fixture_child() {
             std::thread::sleep(Duration::from_millis(150));
             signal.store(true, Ordering::Relaxed);
         });
+    }
+    if scenario == "review_agy" {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| -> String {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init"]);
+        git(&["commit", "--allow-empty", "-m", "base"]);
+        let base_sha = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "--allow-empty", "-m", "head"]);
+        let head_sha = git(&["rev-parse", "HEAD"]);
+        review.pr.base_sha = base_sha;
+        review.pr.head_sha = "0".repeat(40);
+        let mismatch = review::run(&config, &review.pr, &repo, &cancel).unwrap_err();
+        assert!(mismatch.to_string().contains("not at PR #42"));
+        review.pr.head_sha = head_sha;
+        let output = review::run(&config, &review.pr, &repo, &cancel).unwrap();
+        assert!(output.text.contains("Review text"));
+        assert_eq!(output.findings.len(), 1);
+        assert_eq!(output.findings[0].file, "src/lib.rs");
+        assert_eq!(output.findings[0].line, 8);
+        assert_eq!(output.findings[0].summary, "Check bound");
+        return;
     }
     if scenario.starts_with("ask_") {
         let focus = assistant::Focus::from_file(&review.files[0], 2, Some((2, 3))).unwrap();
@@ -345,6 +382,8 @@ fn provider_fixture_child() {
             run(&overview, &review, &config, 9);
             config.provider = Provider::Claude;
             run(&overview, &review, &config, 10);
+            config.provider = Provider::Agy;
+            run(&overview, &review, &config, 11);
             analysis::generate(
                 &overview,
                 &review,
@@ -354,7 +393,7 @@ fn provider_fixture_child() {
                 true,
             )
             .unwrap();
-            assert_eq!(calls(&root).len(), 11);
+            assert_eq!(calls(&root).len(), 12);
         }
         "coverage" => {
             let result = result.unwrap();
@@ -422,7 +461,7 @@ fn run_fixture(scenario: &str, provider: &str) -> Vec<serde_json::Value> {
     let local = scenario.starts_with("local_");
     let scenario = scenario.strip_prefix("local_").unwrap_or(scenario);
     let directory = tempfile::tempdir().unwrap();
-    for program in ["codex", "claude"] {
+    for program in ["codex", "claude", "agy"] {
         let path = directory.path().join(program);
         std::fs::write(&path, PROVIDER_FIXTURE).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -458,7 +497,7 @@ fn run_fixture(scenario: &str, provider: &str) -> Vec<serde_json::Value> {
 #[cfg(unix)]
 #[test]
 fn provider_commands_use_schema_stdin_isolated_cwd_and_existing_auth() {
-    for provider in ["codex", "claude"] {
+    for provider in ["codex", "claude", "agy"] {
         let calls = run_fixture("success", provider);
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
@@ -505,7 +544,7 @@ fn provider_commands_use_schema_stdin_isolated_cwd_and_existing_auth() {
                     .unwrap()
                     .contains("existing-codex-auth")
             );
-        } else {
+        } else if provider == "claude" {
             for flag in [
                 "-p",
                 "--output-format",
@@ -524,6 +563,18 @@ fn provider_commands_use_schema_stdin_isolated_cwd_and_existing_auth() {
                     .unwrap()
                     .contains("existing-claude-auth")
             );
+        } else {
+            for flag in [
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "--json-schema",
+                "--disable-slash-commands",
+                "--sandbox",
+                "--model",
+            ] {
+                assert!(args.iter().any(|arg| arg == flag));
+            }
         }
     }
 }
@@ -545,11 +596,15 @@ fn providers_reject_invalid_structured_results_and_citations_without_caching() {
     for (scenario, provider) in [
         ("invalid_line", "codex"),
         ("invalid_file", "claude"),
+        ("invalid_line", "agy"),
         ("invented_test", "codex"),
         ("malformed", "codex"),
+        ("malformed", "agy"),
         ("unstructured", "claude"),
+        ("unstructured", "agy"),
         ("missing_line", "codex"),
         ("provider_error", "codex"),
+        ("provider_error", "agy"),
         ("too_much_output", "claude"),
     ] {
         run_fixture(scenario, provider);
@@ -577,8 +632,26 @@ root = Path(os.environ['PRPR_AI_FIXTURE'])
 scenario = os.environ['PRPR_AI_SCENARIO']
 program = Path(sys.argv[0]).name
 args = sys.argv[1:]
-prompt = sys.stdin.read()
-schema = json.loads(Path(args[args.index('--output-schema') + 1]).read_text()) if program == 'codex' else json.loads(args[args.index('--json-schema') + 1])
+raw_stdin = sys.stdin.read()
+if program == 'agy' and scenario == 'review_agy':
+    with (root / 'calls.jsonl').open('a') as log:
+        log.write(json.dumps({'program': program, 'args': args, 'cwd': os.getcwd()}) + '\n')
+    print(json.dumps({
+        'status': 'SUCCESS',
+        'response': 'Review text\n```json\n[{"file":"src/lib.rs","line":8,"summary":"Check bound"}]\n```',
+    }))
+    sys.exit(0)
+if program == 'agy':
+    event = json.loads(raw_stdin)
+    assert event['event'] == 'user'
+    prompt = event['message']['content']
+    schema = json.loads(Path(args[args.index('--json-schema') + 1]).read_text())
+elif program == 'codex':
+    prompt = raw_stdin
+    schema = json.loads(Path(args[args.index('--output-schema') + 1]).read_text())
+else:
+    prompt = raw_stdin
+    schema = json.loads(args[args.index('--json-schema') + 1])
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps({'program': program, 'args': args, 'cwd': os.getcwd(), 'prompt': prompt, 'schema': schema, 'codex_home': os.environ.get('CODEX_HOME'), 'claude_config': os.environ.get('CLAUDE_CONFIG_DIR')}) + '\n')
 if scenario in ['timeout', 'canceled', 'ask_canceled']:
@@ -618,6 +691,14 @@ if scenario.startswith('ask_'):
 if program == 'codex':
     answer = Path(args[args.index('--output-last-message') + 1])
     answer.write_text('PRIVATE_SENTINEL not json' if scenario == 'malformed' else json.dumps(response))
+elif program == 'agy':
+    print(json.dumps({'event': 'init', 'conversation_id': 'test-id'}))
+    if scenario == 'malformed':
+        print('PRIVATE_SENTINEL not json')
+    elif scenario == 'unstructured':
+        print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': json.dumps(response)}}))
+    else:
+        print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'structured_output': response}}))
 else:
     print(json.dumps({'result': json.dumps(response)} if scenario == 'unstructured' else {'is_error': False, 'structured_output': response}))
 "#;
@@ -625,7 +706,7 @@ else:
 #[cfg(unix)]
 #[test]
 fn questions_and_followups_use_both_providers_with_validated_focus_and_bounded_history() {
-    for provider in ["codex", "claude"] {
+    for provider in ["codex", "claude", "agy"] {
         assert_eq!(run_fixture("ask_success", provider).len(), 2);
         assert_eq!(run_fixture("ask_history", provider).len(), 2);
         for scenario in [
@@ -668,8 +749,33 @@ fn focused_questions_preserve_both_diff_sides_and_complete_hunks() {
 
 #[cfg(unix)]
 #[test]
+fn agy_review_runs_read_only_against_pr_head_and_parses_findings() {
+    let calls = run_fixture("review_agy", "agy");
+    assert_eq!(calls.len(), 1);
+    let args = calls[0]["args"].as_array().unwrap();
+    for flag in [
+        "--output-format",
+        "json",
+        "--mode",
+        "plan",
+        "--sandbox",
+        "-p",
+        "--model",
+        "fixture-model",
+    ] {
+        assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+    }
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.as_str().is_some_and(|arg| arg.contains("dangerously")))
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn local_diffs_use_the_same_structured_guide_and_question_providers() {
-    for provider in ["codex", "claude"] {
+    for provider in ["codex", "claude", "agy"] {
         let guide = run_fixture("local_success", provider);
         let payload: serde_json::Value = serde_json::from_str(
             guide[0]["prompt"]

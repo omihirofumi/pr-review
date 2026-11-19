@@ -955,7 +955,7 @@ fn draw_guide(frame: &mut Frame, app: &mut App, area: Rect) {
             let message = match status {
                 AiStatus::Error(error) => format!("> Guide unavailable: {error}"),
                 AiStatus::Disabled => format!(
-                    "No AI agent is configured. Press **{}** to choose Codex or Claude. The guide summarizes the change, its intent, risks, and a reading order through the diff.",
+                    "No AI agent is configured. Press **{}** to choose Codex, Claude, or Agy. The guide summarizes the change, its intent, risks, and a reading order through the diff.",
                     keys.primary("choose_agent")
                 ),
                 AiStatus::Loading => "The guide appears here when the agent finishes. Overview and Diff stay usable meanwhile.".to_owned(),
@@ -3594,12 +3594,12 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 frame,
                 " Explanation agent / Enter saves / Esc cancels ".into(),
                 80,
-                17,
+                19,
             );
-            let roomy = inner.height >= 12;
+            let roomy = inner.height >= 14;
             let [intro, choices, details, footer] = Layout::vertical([
                 Constraint::Length(if roomy { 2 } else { 1 }),
-                Constraint::Length(if roomy { 6 } else { 3 }),
+                Constraint::Length(if roomy { 8 } else { 4 }),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
@@ -3612,6 +3612,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
             let items = [
                 (Provider::Codex, "Codex", "Uses your installed Codex CLI"),
                 (Provider::Claude, "Claude", "Uses your installed Claude CLI"),
+                (Provider::Agy, "Agy", "Uses your installed Antigravity CLI"),
                 (
                     Provider::None,
                     "No AI guide",
@@ -5258,6 +5259,7 @@ mod tests {
         for text in [
             "Codex",
             "Claude",
+            "Agy",
             "No AI guide",
             "Enter saves",
             "agent default",

@@ -28,7 +28,7 @@ prpr session review --repo . --file src/main.rs --include-patch
 prpr session comment add --repo . --reply-to note-ID --body 'Explanation grounded in the diff.' --author codex --revision REVISION
 ```
 
-Use the `revision` token returned by inspection with `--revision` when commenting, so a refresh rejects a stale response. Use `--author claude` when running as Claude. Replies appear inline in the user's TUI and persist locally. They never publish to GitHub. GitHub comments and drafts are evidence; only local note IDs support `--reply-to`.
+Use the `revision` token returned by inspection with `--revision` when commenting, so a refresh rejects a stale response. Use `--author claude` when running as Claude, or `--author agy` when running as Agy. Replies appear inline in the user's TUI and persist locally. They never publish to GitHub. GitHub comments and drafts are evidence; only local note IDs support `--reply-to`.
 
 When the user requests a walkthrough, add focused notes and optionally navigate:
 

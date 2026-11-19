@@ -248,7 +248,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "Toggle AI chat panel",
                 "Ctrl-l",
                 'l',
-                "ask conversation agent codex claude thread",
+                "ask conversation agent codex claude agy thread",
             )
             .control(),
         );
@@ -261,7 +261,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 },
                 "Q",
                 'Q',
-                "question agent codex claude",
+                "question agent codex claude agy",
             )
             .disabled_if(
                 app.settings.ai.provider == Provider::None,
@@ -311,7 +311,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "Run or open AI code review",
                 "R",
                 'R',
-                "provider code-review findings claude codex",
+                "provider code-review findings claude codex agy",
             )
             .disabled_if(
                 app.settings.ai.provider == Provider::None,
@@ -348,7 +348,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "Choose AI agent",
                 "A",
                 'A',
-                "codex claude provider settings",
+                "codex claude agy provider settings",
             ),
         ]);
     }

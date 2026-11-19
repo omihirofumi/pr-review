@@ -217,6 +217,20 @@ pub enum Dialog {
     Quit,
 }
 
+const AGENT_PICKER_PROVIDERS: [Provider; 4] = [
+    Provider::Codex,
+    Provider::Claude,
+    Provider::Agy,
+    Provider::None,
+];
+
+fn agent_picker_index(provider: Provider) -> usize {
+    AGENT_PICKER_PROVIDERS
+        .iter()
+        .position(|&candidate| candidate == provider)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageTab {
     #[default]
@@ -1956,7 +1970,7 @@ impl App {
         }
         if matches!(key.code, KeyCode::Char('Q') | KeyCode::Char('E')) && self.review.is_some() {
             if self.settings.ai.provider == Provider::None {
-                bail!("Choose Codex or Claude in the command palette before asking");
+                bail!("Choose Codex, Claude, or Agy in the command palette before asking");
             }
             let focus = if key.code == KeyCode::Char('E') {
                 Some(self.chat_focus()?)
@@ -2003,11 +2017,7 @@ impl App {
                     self.goto_pending = false;
                     self.pending_keys.clear();
                     self.dialog = Some(Dialog::AgentPicker {
-                        selected: match self.settings.ai.provider {
-                            Provider::Codex => 0,
-                            Provider::Claude => 1,
-                            Provider::None => 2,
-                        },
+                        selected: agent_picker_index(self.settings.ai.provider),
                         generate: false,
                     });
                     return Ok(Action::None);
@@ -2430,11 +2440,7 @@ impl App {
             KeyCode::Char('/') => self.filtering = true,
             KeyCode::Char('A') => {
                 self.dialog = Some(Dialog::AgentPicker {
-                    selected: match self.settings.ai.provider {
-                        Provider::Codex => 0,
-                        Provider::Claude => 1,
-                        Provider::None => 2,
-                    },
+                    selected: agent_picker_index(self.settings.ai.provider),
                     generate: false,
                 })
             }
@@ -2617,7 +2623,7 @@ impl App {
         );
         ensure!(
             self.settings.ai.provider != Provider::None,
-            "Choose Codex or Claude in the command palette before running an AI review"
+            "Choose Codex, Claude, or Agy in the command palette before running an AI review"
         );
         let review = self
             .review
@@ -2953,11 +2959,12 @@ impl App {
                 generate,
             } => {
                 match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => selected = (selected + 1).min(2),
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        selected = (selected + 1).min(AGENT_PICKER_PROVIDERS.len() - 1)
+                    }
                     KeyCode::Char('k') | KeyCode::Up => selected = selected.saturating_sub(1),
                     KeyCode::Enter | KeyCode::Char('o') => {
-                        let provider =
-                            [Provider::Codex, Provider::Claude, Provider::None][selected];
+                        let provider = AGENT_PICKER_PROVIDERS[selected];
                         let mut settings = self.settings.clone();
                         if settings.ai.provider != provider {
                             settings.ai.model = None;

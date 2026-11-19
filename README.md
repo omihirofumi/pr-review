@@ -2,9 +2,9 @@
 
 > Fully vibe-coded and intended for personal use.
 
-A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Jujutsu changes with Helix and optional Codex or Claude explanations.
+A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Jujutsu changes with Helix and optional Codex, Claude, or Agy explanations.
 
-Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex or Claude reading guide, review diffs and inline threads, check the PR out where you are, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
+Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex, Claude, or Agy reading guide, review diffs and inline threads, check the PR out where you are, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
 
 ## Install
 
@@ -25,7 +25,7 @@ Install only the tools needed for the features you use, using your preferred ins
 | Local Jujutsu review | [Jujutsu](https://docs.jj-vcs.dev/latest/install-and-setup/) (`jj`) |
 | Isolated PR checkout | Jujutsu (`jj`) and Git (`git`) |
 | Open source in an editor | [Helix](https://docs.helix-editor.com/install.html) (`hx`) by default; any editor can be configured |
-| AI explanations | Codex or Claude CLI, installed and authenticated separately |
+| AI explanations | Codex, Claude, or Antigravity (`agy`) CLI, installed and authenticated separately |
 
 Opening GitHub source in the isolated review workspace (`[editor] open_in = "workspace"`) also requires the isolated PR checkout tools. When using a custom [`HELIX_RUNTIME`](https://docs.helix-editor.com/building-from-source.html), keep it compatible with the `hx` binary on your `PATH`.
 
@@ -92,13 +92,13 @@ The external viewer reads the exact temporary directories supplied by Jujutsu. R
 
 ## Review with an agent
 
-Install the bundled skill for Codex and Claude:
+Install the bundled skill for Codex, Claude, and Agy:
 
 ```sh
 prpr skill install
 ```
 
-`prpr skill install --force` replaces an older copy when updating the skill. It installs `prpr-review/SKILL.md` under `~/.agents/skills` and `~/.claude/skills`. Start a new agent session if it has already cached its skill list. With the TUI open, ask the agent **“Use prpr-review to read my comments and reply.”**
+`prpr skill install --force` replaces an older copy when updating the skill. It installs `prpr-review/SKILL.md` under `~/.agents/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`. Start a new agent session if it has already cached its skill list. With the TUI open, ask the agent **“Use prpr-review to read my comments and reply.”**
 
 Local `jj` reviews use `c` for notes. In a GitHub PR, use `C` for an agent-facing local note; lowercase `c` retains its GitHub draft behavior. Agent replies appear inline and in `N`, and stay local.
 
@@ -304,6 +304,7 @@ prpr https://github.com/owner/repo/pull/123
 prpr --demo                               # Offline example; never posts
 prpr 123 --agent codex                     # Codex guide for this launch
 prpr 123 --agent claude --model MODEL      # Claude with a model override
+prpr 123 --agent agy                       # Antigravity (agy) guide for this launch
 prpr 123 --agent none                      # Read without an AI guide
 prpr --config-path                        # Print the configuration path
 prpr --print-keybindings                  # Print effective shortcuts and action names
@@ -318,13 +319,13 @@ Description previews, full descriptions, Ask responses, and AI Guide use a share
 
 ## Overview and AI reading guide
 
-Press `A` in the PR list or any PR tab to choose **Codex**, **Claude**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None. The reading guide is generated when you press `a`. The provider uses its existing CLI login, so install and sign in to `codex` or `claude` separately. Homebrew does not install an AI CLI.
+Press `A` in the PR list or any PR tab to choose **Codex**, **Claude**, **Agy**, or **None**. The choice is saved to `~/.config/prpr/config.toml` (or `$XDG_CONFIG_HOME/prpr/config.toml`). Use `prpr --config-path` to locate your configuration. A fresh installation defaults to None. The reading guide is generated when you press `a`. The provider uses its existing CLI login, so install and sign in to `codex`, `claude`, or `agy` separately. Homebrew does not install an AI CLI.
 
 Example configuration:
 
 ```toml
 [ai]
-provider = "codex"       # "codex", "claude", or "none"
+provider = "codex"       # "codex", "claude", "agy", or "none"
 language = "en"          # e.g. "ja" for Japanese explanations
 auto_explain = false     # true generates the guide whenever a review opens
 timeout_seconds = 180
@@ -349,7 +350,7 @@ Overview shows what GitHub and people say about the PR: author and state, labels
 
 AI Guide shows what the agent says. There, `j` / `k` scroll, `gg` / `ge` jump to the beginning/end, and `n` / `p` select a reading-guide step. Press `Enter`, `o`, or `gf` to jump to that step in Diff; press `gf` or `e` again there to open it in Helix. Labels, CI results, and the conversation are not sent to the agent.
 
-Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
+Guides are generated from PR metadata and the supplied diff in an isolated temporary directory. Codex runs with a read-only sandbox; Claude runs without tools or MCP servers; Agy runs in a sandbox with slash commands disabled. PR contents are treated as untrusted input. The guide does not check out code, run tests, or publish reviews. Selecting an agent sends the supplied PR content to that provider through its CLI and uses your existing account's usage allowance.
 
 Explanations are cached under the application data directory. The cache is tied to the PR metadata, head and diff base, supplied context, provider, model, language, and context budget. Reopening the same unchanged PR reuses its guide. In an opened PR, `a` explicitly regenerates it; in the PR list, `a` prepares or reuses the selected PR's guide. Leaving the PR, changing providers, or quitting cancels an active generation. A missing CLI, login error, timeout, or invalid AI response is shown in AI Guide while Overview and Diff remain usable. File and line references are validated against the supplied patch; the explanation still needs human review.
 
@@ -359,12 +360,13 @@ Press `R` in an opened GitHub PR to run your provider's own review command, so p
 
 - **Claude** runs `/code-review <PR number>` in print mode with read-only tools only (`Read`, `Grep`, `Glob`, subagents, and `gh pr view/diff/checks` and `git diff/log/show/blame`-style commands). Anything else, including posting to GitHub or editing files, is denied.
 - **Codex** runs `codex exec review --base <diff base>` in a read-only sandbox. Codex reviews the working tree, so it runs only when your checkout's HEAD is the PR head; press `w` to get there.
+- **Agy** runs `agy --mode plan --sandbox --output-format json -p ...` against the working tree, reviewing `<diff base>..HEAD` read-only. Like Codex, it requires your checkout's HEAD to be the PR head; press `w` to get there.
 
-The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. `Ctrl-x` outside the chat (or **Stop running AI work** in the command palette) stops every AI job that is still running: a chat answer, the AI guide, and provider reviews. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review` or `codex review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
+The review runs in the background from the repository you launched prpr in; keep reviewing meanwhile. `Ctrl-x` outside the chat (or **Stop running AI work** in the command palette) stops every AI job that is still running: a chat answer, the AI guide, and provider reviews. When it finishes, press `R` to read it and `r` there to rerun. When the review lists findings with file and line, and your checkout is at the PR head, each finding is also placed as a local note on its line (author `claude review`, `codex review`, or `agy review`; `t` shows, `N` lists). If your checkout is elsewhere, line numbers may refer to other code, so findings stay text-only. Results are kept per PR head for the session, survive refreshes, and never post to GitHub. Local diffs (`prpr diff`) do not support AI review.
 
 ## Ask your agent and explain a diff
 
-**Ask** and **Explain diff** use the configured Codex or Claude CLI and its existing login. They share the guide's model, timeout, and context budget, and answer in the guide's language unless a question asks for another one.
+**Ask** and **Explain diff** use the configured Codex, Claude, or Agy CLI and its existing login. They share the guide's model, timeout, and context budget, and answer in the guide's language unless a question asks for another one.
 
 The conversation lives in an AI chat panel on the right, next to whichever tab is open, so the code stays visible while you ask about it. Press `Ctrl-l` on Overview, AI Guide, or Diff to show or hide it. Terminals narrower than 120 columns show the panel over the review instead.
 
@@ -534,6 +536,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-The test suite uses temporary local repositories and fake `gh`, `codex`, and `claude` executables; it does not post to GitHub or call a live AI provider. Tests require `jj`, Git, and Python 3. The diff fixtures cover old/new line coordinates, renames, absent patches, and malformed hunks. Workflow tests cover metadata-first loading, stale background results, agent cancellation and caching, structured output validation, local persistence, failed writes, stale revisions, submission recovery, and request payloads.
+The test suite uses temporary local repositories and fake `gh`, `codex`, `claude`, and `agy` executables; it does not post to GitHub or call a live AI provider. Tests require `jj`, Git, and Python 3. The diff fixtures cover old/new line coordinates, renames, absent patches, and malformed hunks. Workflow tests cover metadata-first loading, stale background results, agent cancellation and caching, structured output validation, local persistence, failed writes, stale revisions, submission recovery, and request payloads.
 
 `src/cli.rs` runs the shared command and background jobs, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/settings.rs` persists configuration, `src/analysis.rs` runs and validates AI explanations, `src/assistant.rs` supplies focused questions and follow-ups, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.

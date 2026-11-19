@@ -125,7 +125,7 @@ pub fn generate(
     config.validate()?;
     ensure!(
         config.provider != Provider::None,
-        "Choose Codex or Claude to enable AI explanations"
+        "Choose Codex, Claude, or Agy to enable AI explanations"
     );
     ensure!(
         overview.id == review.pr.id && overview.head_sha == review.pr.head_sha,
@@ -525,14 +525,42 @@ pub(crate) fn run_structured(
             }
             command
         }
+        Provider::Agy => {
+            let mut command = Command::new("agy");
+            command
+                .args([
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--json-schema",
+                ])
+                .arg(&schema)
+                .args(["--disable-slash-commands", "--sandbox"]);
+            if let Some(model) = &config.model {
+                command.arg("--model").arg(model);
+            }
+            command
+        }
         Provider::None => bail!("No AI provider selected"),
     };
     command
         .current_dir(temporary.path())
         .env_remove("CLAUDECODE");
+    let input = match config.provider {
+        Provider::Agy => {
+            let mut line = serde_json::to_vec(&json!({
+                "event": "user",
+                "message": { "content": prompt },
+            }))?;
+            line.push(b'\n');
+            line
+        }
+        _ => prompt.as_bytes().to_vec(),
+    };
     let output = run_bounded(
         &mut command,
-        prompt.as_bytes().to_vec(),
+        input,
         Duration::from_secs(config.timeout_seconds),
         cancel,
     )?;
@@ -561,8 +589,28 @@ pub(crate) fn run_structured(
             let structured = envelope.get("structured_output").context("Claude response is missing structured_output; retry with a model supporting JSON schema")?;
             serde_json::to_vec(structured).context("Cannot decode Claude structured explanation")
         }
+        Provider::Agy => agy_structured_output(&output.stdout),
         Provider::None => unreachable!(),
     }
+}
+
+fn agy_structured_output(stdout: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(stdout).context("Agy output was not valid UTF-8")?;
+    let result = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rfind(|event| event.get("event").and_then(Value::as_str) == Some("result"))
+        .and_then(|mut event| event.get_mut("result").map(Value::take))
+        .context("Agy did not return its JSON result envelope")?;
+    ensure!(
+        result.get("status").and_then(Value::as_str) == Some("SUCCESS"),
+        "Agy reported an error; check its login and model access using the CLI"
+    );
+    let structured = result.get("structured_output").context(
+        "Agy response is missing structured_output; retry with a model supporting JSON schema",
+    )?;
+    serde_json::to_vec(structured).context("Cannot decode Agy structured explanation")
 }
 
 pub(crate) fn run_bounded(

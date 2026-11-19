@@ -1,5 +1,5 @@
-//! Runs each provider's own code-review command so prpr follows the provider's review practice
-//! instead of maintaining a review prompt of its own.
+//! Runs each provider's code review against a pull request, using the provider's native
+//! review command when available and read-only mode otherwise.
 
 use std::{path::Path, process::Command, sync::atomic::AtomicBool, time::Duration};
 
@@ -99,7 +99,34 @@ pub fn run(
             );
             std::fs::read_to_string(&report).context("Codex did not write a review")?
         }
-        Provider::None => bail!("Choose Codex or Claude before running an AI review"),
+        Provider::Agy => {
+            ensure!(
+                at_pr_head(checkout, pr),
+                "Agy reviews your checkout, which is not at PR #{} head {}; press w to check it out",
+                pr.id.number,
+                &pr.head_sha[..pr.head_sha.len().min(8)],
+            );
+            let prompt = format!(
+                "Review pull request #{} by inspecting the changes between base commit {} and HEAD ({}). Do not modify files, run mutating commands, or post to GitHub. Focus on bugs, regressions, edge cases, and missing tests. If you have line-anchored findings, end with a fenced ```json array of objects with \"file\", \"line\" (positive integer in the new file), \"summary\", and optional \"detail\".",
+                pr.id.number, pr.base_sha, pr.head_sha,
+            );
+            let mut command = Command::new("agy");
+            command.current_dir(checkout).args([
+                "--output-format",
+                "json",
+                "--mode",
+                "plan",
+                "--sandbox",
+                "-p",
+                &prompt,
+            ]);
+            if let Some(model) = &config.model {
+                command.args(["--model", model]);
+            }
+            let output = run_bounded(&mut command, Vec::new(), timeout, cancel)?;
+            agy_result(&output.stdout, &output.stderr)?
+        }
+        Provider::None => bail!("Choose Codex, Claude, or Agy before running an AI review"),
     };
     Ok(ReviewOutput {
         findings: findings(&text),
@@ -129,6 +156,29 @@ fn claude_result(stdout: &[u8], stderr: &[u8]) -> Result<String> {
         envelope["is_error"] != true && !text.trim().is_empty(),
         "Claude review failed: {}",
         if text.is_empty() { "no result" } else { &text }
+    );
+    Ok(text)
+}
+
+fn agy_result(stdout: &[u8], stderr: &[u8]) -> Result<String> {
+    let envelope: Value = serde_json::from_slice(stdout).with_context(|| {
+        format!(
+            "Agy returned no review: {}",
+            String::from_utf8_lossy(stderr).trim()
+        )
+    })?;
+    let text = envelope["response"].as_str().unwrap_or_default().to_owned();
+    let error = envelope["error"].as_str().unwrap_or_default();
+    ensure!(
+        envelope["status"] == "SUCCESS" && !text.trim().is_empty(),
+        "Agy review failed: {}",
+        if !error.is_empty() {
+            error
+        } else if !text.is_empty() {
+            &text
+        } else {
+            "no result"
+        }
     );
     Ok(text)
 }
@@ -189,6 +239,21 @@ mod tests {
         assert!(error.to_string().contains("Not logged in"));
         assert_eq!(
             claude_result(br#"{"is_error": false, "result": "Looks good"}"#, b"").unwrap(),
+            "Looks good"
+        );
+    }
+
+    #[test]
+    fn agy_errors_surface_the_error_text() {
+        let error = agy_result(
+            br#"{"status": "ERROR", "response": "", "error": "Not authenticated"}"#,
+            b"",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Not authenticated"));
+        assert!(agy_result(br#"{"status": "SUCCESS", "response": "   "}"#, b"").is_err());
+        assert_eq!(
+            agy_result(br#"{"status": "SUCCESS", "response": "Looks good"}"#, b"").unwrap(),
             "Looks good"
         );
     }

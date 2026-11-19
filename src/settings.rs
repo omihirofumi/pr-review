@@ -14,6 +14,7 @@ pub enum Provider {
     None,
     Codex,
     Claude,
+    Agy,
 }
 
 impl Provider {
@@ -22,6 +23,7 @@ impl Provider {
             Self::None => "none",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Agy => "agy",
         }
     }
 }

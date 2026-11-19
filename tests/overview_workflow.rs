@@ -280,6 +280,7 @@ fn selecting_none_disables_an_inflight_analysis_without_leaving_the_pr() {
     press(&mut app, 'A').unwrap();
     press(&mut app, 'j').unwrap();
     press(&mut app, 'j').unwrap();
+    press(&mut app, 'j').unwrap();
     let action = app.key(key(KeyCode::Enter)).unwrap();
     assert!(matches!(action, Action::DisableAi));
     assert_eq!(app.settings.ai.provider, Provider::None);
@@ -2008,7 +2009,7 @@ fn choosing_an_agent_generates_a_guide_only_when_asked_or_automatic() {
         app.key(key(KeyCode::Enter)).unwrap(),
         Action::None
     ));
-    assert_eq!(app.settings.ai.provider, Provider::Claude);
+    assert_eq!(app.settings.ai.provider, Provider::Agy);
     app.settings.ai.auto_explain = true;
     press(&mut app, 'A').unwrap();
     press(&mut app, 'k').unwrap();
@@ -2016,6 +2017,7 @@ fn choosing_an_agent_generates_a_guide_only_when_asked_or_automatic() {
         app.key(key(KeyCode::Enter)).unwrap(),
         Action::Explain { force: false }
     ));
+    assert_eq!(app.settings.ai.provider, Provider::Claude);
 }
 
 #[test]

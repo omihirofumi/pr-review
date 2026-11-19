@@ -52,7 +52,7 @@ enum Mode {
     },
     /// Inspect and annotate a running review without opening another TUI
     Session(session::Args),
-    /// Install the live review skill for Codex and Claude
+    /// Install the live review skill for Codex, Claude, and Agy
     Skill {
         #[command(subcommand)]
         command: SkillCommand,
@@ -416,7 +416,11 @@ pub fn run() -> Result<()> {
     }) = &args.command
     {
         let home = directories::BaseDirs::new().context("Cannot find the home directory")?;
-        for relative in [".agents/skills/prpr-review", ".claude/skills/prpr-review"] {
+        for relative in [
+            ".agents/skills/prpr-review",
+            ".claude/skills/prpr-review",
+            ".gemini/config/skills/prpr-review",
+        ] {
             let directory = home.home_dir().join(relative);
             std::fs::create_dir_all(&directory)?;
             let path = directory.join("SKILL.md");
