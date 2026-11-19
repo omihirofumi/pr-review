@@ -870,6 +870,7 @@ fn browsing_app(root: std::path::PathBuf) -> App {
             title: format!("Review change {number}"),
             author: "author".into(),
             draft: number == 2,
+            awaiting_review: number == 1,
             body: format!(
                 "# Description {number}\n\nSelected body {number}\n\n{}",
                 (0..150)
@@ -910,7 +911,30 @@ fn list_preview_follows_selection_without_loading_diff_or_starting_an_agent() {
     press(&mut app, 'h').unwrap();
     assert!(matches!(press(&mut app, 'o').unwrap(), Action::LoadPr(_)));
     app.opened(overview());
-    assert_eq!(app.tab, PageTab::Diff);
+    assert_eq!(app.tab, PageTab::Overview);
+    app.accept_diff(app::demo_data()).unwrap();
+    assert_eq!(
+        app.tab,
+        PageTab::Overview,
+        "the diff arriving later does not pull the reader away from Overview"
+    );
+}
+
+#[test]
+fn pr_list_marks_prs_awaiting_the_viewers_review() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = browsing_app(directory.path().into());
+    let output = screen(&mut app);
+    let row = |number: u64| {
+        output
+            .lines()
+            .find(|line| line.contains(&format!("#{number} ")))
+            .unwrap()
+            .to_owned()
+    };
+    assert!(row(1).contains('●'), "{}", row(1));
+    assert!(!row(2).contains('●'), "{}", row(2));
+    assert!(output.contains("● 1 awaiting your review"), "{output}");
 }
 
 #[test]
@@ -1426,6 +1450,7 @@ fn palette_tracks_inbox_overview_local_and_busy_contexts() {
         body: String::new(),
         author: "someone".into(),
         draft: false,
+        awaiting_review: false,
     }];
     inbox.filtering = true;
     inbox.filter = "fix".into();

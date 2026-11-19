@@ -122,19 +122,43 @@ fn conversation_path(root: &Path, id: &PrId) -> PathBuf {
         .join(format!("{}-conversation.md", id.number))
 }
 
+/// A reply belongs to its thread, which outlives new pushes, so the draft is keyed by the thread's first comment.
+fn reply_path(root: &Path, id: &PrId, comment: u64) -> PathBuf {
+    root.join("drafts")
+        .join(&id.repo)
+        .join(format!("{}-reply-{comment}.md", id.number))
+}
+
 pub fn conversation_draft(root: &Path, id: &PrId) -> Result<String> {
-    match std::fs::read_to_string(conversation_path(root, id)) {
-        Ok(text) => Ok(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(error).context("Cannot read the conversation comment draft"),
-    }
+    read_text_draft(&conversation_path(root, id))
+        .context("Cannot read the conversation comment draft")
 }
 
 /// Saves the draft, or removes it when the text is blank.
 pub fn save_conversation_draft(root: &Path, id: &PrId, text: &str) -> Result<()> {
-    let path = conversation_path(root, id);
+    save_text_draft(&conversation_path(root, id), text)
+}
+
+pub fn reply_draft(root: &Path, id: &PrId, comment: u64) -> Result<String> {
+    read_text_draft(&reply_path(root, id, comment)).context("Cannot read the reply draft")
+}
+
+/// Saves the draft, or removes it when the text is blank.
+pub fn save_reply_draft(root: &Path, id: &PrId, comment: u64, text: &str) -> Result<()> {
+    save_text_draft(&reply_path(root, id, comment), text)
+}
+
+fn read_text_draft(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn save_text_draft(path: &Path, text: &str) -> Result<()> {
     if text.trim().is_empty() {
-        return match std::fs::remove_file(&path) {
+        return match std::fs::remove_file(path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         };
@@ -143,8 +167,8 @@ pub fn save_conversation_draft(root: &Path, id: &PrId, text: &str) -> Result<()>
     std::fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     std::io::Write::write_all(&mut temp, text.as_bytes())?;
-    temp.persist(&path)
-        .with_context(|| format!("Cannot save the conversation draft to {}", path.display()))?;
+    temp.persist(path)
+        .with_context(|| format!("Cannot save the draft to {}", path.display()))?;
     Ok(())
 }
 

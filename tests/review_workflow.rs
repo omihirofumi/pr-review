@@ -510,6 +510,63 @@ fn checkout_targets_the_launch_repository_when_it_holds_the_pr() {
 }
 
 #[test]
+fn thread_reply_targets_the_root_keeps_its_draft_and_posts_after_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(dir.path().into(), false);
+    app.loaded(app::demo_data()).unwrap();
+    let id = app.review.as_ref().unwrap().data.pr.id.clone();
+    let type_text = |app: &mut App, text: &str| {
+        for character in text.chars() {
+            app.key(key(KeyCode::Char(character))).unwrap();
+        }
+    };
+    let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+
+    app.navigate("tests/deadline.rs", &prpr::model::Side::Right, 1)
+        .unwrap();
+    type_text(&mut app, "gr");
+    assert!(
+        app.dialog.is_none(),
+        "a line without a thread has nothing to reply to"
+    );
+    assert!(app.status.contains("No review thread"), "{}", app.status);
+
+    app.navigate("src/client.rs", &prpr::model::Side::Right, 25)
+        .unwrap();
+    type_text(&mut app, "gr");
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Reply { comment: 1, .. })),
+        "the reply goes to the thread's first comment"
+    );
+    type_text(&mut app, "Done in");
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(app.dialog.is_none());
+    assert_eq!(store::reply_draft(dir.path(), &id, 1).unwrap(), "Done in");
+
+    type_text(&mut app, "gr");
+    type_text(&mut app, " abc123");
+    app.key(ctrl_s).unwrap();
+    assert!(matches!(app.dialog, Some(Dialog::ReplyPreview { .. })));
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Reply { input, .. }) if input.text == "Done in abc123")
+    );
+    app.key(ctrl_s).unwrap();
+    match app.key(key(KeyCode::Enter)).unwrap() {
+        Action::PostReply {
+            id: posted,
+            comment,
+            body,
+        } => {
+            assert_eq!(posted, id);
+            assert_eq!(comment, 1);
+            assert_eq!(body, "Done in abc123");
+        }
+        _ => panic!("Enter in the preview must post the reply"),
+    }
+}
+
+#[test]
 fn conversation_comment_keeps_its_draft_across_escape_and_posts_after_preview() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = App::new(dir.path().into(), false);

@@ -26,6 +26,9 @@ pub struct PrSummary {
     pub title: String,
     pub author: String,
     pub draft: bool,
+    /// Someone else's PR that the signed-in user has not submitted a review on.
+    #[serde(default)]
+    pub awaiting_review: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

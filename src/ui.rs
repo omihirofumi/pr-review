@@ -1395,13 +1395,26 @@ fn draw_inbox(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area)
     };
-    let title = if app.filtering {
-        format!(" PULL REQUESTS · /{}_ ", app.filter)
-    } else if !app.filter.is_empty() {
-        format!(" PULL REQUESTS · {} ", app.filter)
-    } else {
-        " PULL REQUESTS ".into()
-    };
+    let awaiting = app
+        .visible_prs()
+        .iter()
+        .filter(|pr| pr.awaiting_review)
+        .count();
+    let title = format!(
+        " PULL REQUESTS{}{} ",
+        if app.filtering {
+            format!(" · /{}_", app.filter)
+        } else if !app.filter.is_empty() {
+            format!(" · {}", app.filter)
+        } else {
+            String::new()
+        },
+        if awaiting > 0 {
+            format!(" · ● {awaiting} awaiting your review")
+        } else {
+            String::new()
+        }
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -1427,6 +1440,8 @@ r loads them · # opens a PR"
     } else {
         let rows = prs.iter().map(|pr| {
             Row::new(vec![
+                Cell::from(if pr.awaiting_review { "●" } else { " " })
+                    .style(Style::default().fg(ACCENT)),
                 Cell::from(if pr.draft { "D" } else { " " }),
                 Cell::from(format!("#{}", pr.id.number)).style(Style::default().fg(ACCENT)),
                 Cell::from(pr.title.clone()),
@@ -1437,13 +1452,14 @@ r loads them · # opens a PR"
             rows,
             [
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Length(6),
                 Constraint::Min(12),
                 Constraint::Length(if inner.width >= 50 { 12 } else { 0 }),
             ],
         )
         .header(
-            Row::new(["", "PR", "TITLE", "AUTHOR"])
+            Row::new(["", "", "PR", "TITLE", "AUTHOR"])
                 .style(Style::default().fg(MUTED))
                 .bottom_margin(1),
         )
@@ -3976,6 +3992,78 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                     Style::default().fg(ACCENT).bold(),
                 )),
                 Line::from("Posts immediately to the PR conversation, outside any review."),
+                Line::from(""),
+            ];
+            lines.extend(body.lines().map(|line| Line::from(line.to_owned())));
+            if app.demo {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "OFFLINE DEMO: nothing will be posted.",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((*scroll, 0)),
+                inner,
+            );
+        }
+        Dialog::Reply {
+            comment,
+            author,
+            input,
+            ..
+        } => {
+            let root = app.review.as_ref().and_then(|review| {
+                review
+                    .data
+                    .comments
+                    .iter()
+                    .find(|candidate| candidate.id == *comment)
+            });
+            let location = root.map_or_else(String::new, |root| {
+                format!("{}:{}", root.path, root.line_label())
+            });
+            let quote = root
+                .and_then(|root| root.body.lines().find(|line| !line.trim().is_empty()))
+                .unwrap_or_default()
+                .to_owned();
+            draw_comment_editor(
+                frame,
+                CommentEditor {
+                    title: " Reply to review thread ",
+                    target: vec![
+                        Line::from(Span::styled(
+                            format!("{location} · thread by {author}"),
+                            Style::default().fg(ACCENT).bold(),
+                        )),
+                        Line::from(Span::styled(quote, Style::default().fg(MUTED))),
+                    ],
+                    placeholder: "Write the reply here (Markdown). Esc keeps it as a draft.",
+                    hint: "Ctrl-s preview before posting · Esc keep draft",
+                    input,
+                },
+            )
+        }
+        Dialog::ReplyPreview {
+            author,
+            body,
+            scroll,
+            ..
+        } => {
+            let inner = popup(
+                frame,
+                " Post reply / Enter posts / Esc edits / j,k scroll ".into(),
+                100,
+                frame.area().height.saturating_sub(4),
+            );
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    format!("Reply to {author}'s review thread"),
+                    Style::default().fg(ACCENT).bold(),
+                )),
+                Line::from("Posts immediately to GitHub, outside any pending review."),
                 Line::from(""),
             ];
             lines.extend(body.lines().map(|line| Line::from(line.to_owned())));

@@ -3,6 +3,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
+    sync::OnceLock,
     thread,
     time::{Duration, Instant},
 };
@@ -291,11 +292,12 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
         "--limit",
         "100",
         "--json",
-        "number,title,body,author,isDraft,url",
+        "number,title,body,author,isDraft,url,latestReviews",
     ];
     if let Some(search) = search.filter(|search| !search.trim().is_empty()) {
         args.extend(["--search", search]);
     }
+    let viewer = viewer_login()?;
     let prs: Vec<SearchPr> = gh_json(&args)?;
     prs.into_iter()
         .map(|pr| {
@@ -304,15 +306,31 @@ pub fn list_prs(repo: Option<&str>, search: Option<&str>) -> Result<Vec<PrSummar
                 id.number == pr.number,
                 "GitHub returned an inconsistent PR number"
             );
+            let author = login(pr.author);
+            let reviewed = pr
+                .latest_reviews
+                .into_iter()
+                .any(|review| login(review.author).eq_ignore_ascii_case(&viewer));
             Ok(PrSummary {
                 body: pr.body.unwrap_or_default(),
                 id,
                 title: pr.title,
-                author: login(pr.author),
+                awaiting_review: !reviewed && !author.eq_ignore_ascii_case(&viewer),
+                author,
                 draft: pr.is_draft,
             })
         })
         .collect()
+}
+
+/// Login of the signed-in GitHub user, fetched once per process.
+fn viewer_login() -> Result<String> {
+    static LOGIN: OnceLock<String> = OnceLock::new();
+    if let Some(login) = LOGIN.get() {
+        return Ok(login.clone());
+    }
+    let user: ApiUser = gh_json(&["api", "user"])?;
+    Ok(LOGIN.get_or_init(|| user.login).clone())
 }
 
 pub fn load_overview(id: &PrId) -> Result<PrOverview> {
@@ -704,6 +722,25 @@ pub fn post_conversation_comment(id: &PrId, body: &str) -> Result<String> {
     Ok(response["html_url"].as_str().unwrap_or_default().to_owned())
 }
 
+/// Posts a reply to a review thread; GitHub accepts only the thread's first comment as `comment`.
+///
+/// See <https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment>.
+pub fn post_review_reply(id: &PrId, comment: u64, body: &str) -> Result<ReviewComment> {
+    validate_id(id)?;
+    ensure!(!body.trim().is_empty(), "Write a reply first");
+    let path = format!(
+        "repos/{}/pulls/{}/comments/{comment}/replies",
+        id.repo, id.number
+    );
+    let bytes = gh(
+        &["api", "--method", "POST", &path, "--input", "-"],
+        Some(serde_json::to_vec(&json!({ "body": body }))?),
+    )?;
+    let reply: ApiComment =
+        serde_json::from_slice(&bytes).context("Invalid reply response from GitHub")?;
+    Ok(review_comment(reply))
+}
+
 fn fetch_pr(id: &PrId) -> Result<ApiPr> {
     validate_id(id)?;
     let path = format!("repos/{}/pulls/{}", id.repo, id.number);
@@ -971,6 +1008,13 @@ struct SearchPr {
     #[serde(rename = "isDraft")]
     is_draft: bool,
     url: String,
+    #[serde(rename = "latestReviews", default)]
+    latest_reviews: Vec<SearchReview>,
+}
+
+#[derive(Deserialize)]
+struct SearchReview {
+    author: Option<ApiUser>,
 }
 
 #[cfg(test)]

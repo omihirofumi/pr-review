@@ -33,6 +33,18 @@ mod unix {
                     github::list_prs(Some("scope/repo"), Some("repo:other/repo")).unwrap_err();
                 assert!(error.to_string().contains("does not match"));
             }
+            "reviews" => {
+                let prs = github::list_prs(Some("scope/repo"), None).unwrap();
+                let awaiting = prs
+                    .iter()
+                    .map(|pr| (pr.id.number, pr.awaiting_review))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    awaiting,
+                    [(42, true), (43, false), (44, false)],
+                    "only others' PRs without the viewer's review are marked"
+                );
+            }
             "url" => {
                 let target =
                     github::parse_target("https://github.com/url/repo/pull/42", None).unwrap();
@@ -58,6 +70,7 @@ mod unix {
             "numeric",
             "query",
             "hostile_results",
+            "reviews",
             "url",
             "missing_repo",
             "malformed",
@@ -164,9 +177,18 @@ if args[:2] == ['repo', 'view']:
         sys.stderr.write('not a git repository')
         sys.exit(1)
     print(json.dumps({'nameWithOwner': 'scope/repo'}))
+elif args[:2] == ['api', 'user']:
+    print(json.dumps({'login': 'Viewer'}))
 elif args[:2] == ['pr', 'list']:
+    assert 'latestReviews' in args[args.index('--json') + 1]
     if scenario == 'query':
         print('[]')
+    elif scenario == 'reviews':
+        def pr(number, author, reviewers):
+            return {'number': number, 'title': 'PR', 'author': {'login': author}, 'isDraft': False,
+                    'url': 'https://github.com/scope/repo/pull/' + str(number),
+                    'latestReviews': [{'author': {'login': login}, 'state': 'COMMENTED'} for login in reviewers]}
+        print(json.dumps([pr(42, 'author', ['someone']), pr(43, 'author', ['viewer']), pr(44, 'viewer', [])]))
     else:
         repo = 'other/repo' if scenario == 'hostile_results' else 'scope/repo'
         print(json.dumps([{'number': 42, 'title': 'Scoped PR', 'author': {'login': 'author'}, 'isDraft': False, 'url': 'https://github.com/' + repo + '/pull/42'}]))

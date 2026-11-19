@@ -236,6 +236,11 @@ pub(crate) enum JobResult {
         id: PrId,
         result: Result<String>,
     },
+    Replied {
+        id: PrId,
+        comment: u64,
+        result: Result<ReviewComment>,
+    },
 }
 
 type Tui = Terminal<CrosstermBackend<std::fs::File>>;
@@ -508,6 +513,7 @@ pub fn run() -> Result<()> {
             title: demo.pr.title.clone(),
             author: demo.pr.author.clone(),
             draft: false,
+            awaiting_review: true,
         }];
         app.inbox_loaded = true;
         app.message(
@@ -669,6 +675,33 @@ pub fn run() -> Result<()> {
                     }
                     Err(error) => app.message(
                         format!("{error:#}. The draft is kept; check the conversation with V before posting again."),
+                        true,
+                    ),
+                },
+                JobResult::Replied {
+                    id,
+                    comment,
+                    result,
+                } => match result {
+                    Ok(reply) => {
+                        let cleared = store::save_reply_draft(&app.root, &id, comment, "");
+                        if let Some(review) = app
+                            .review
+                            .as_mut()
+                            .filter(|review| review.data.pr.id == id)
+                        {
+                            review.data.comments.push(reply);
+                        }
+                        match cleared {
+                            Ok(()) => app.message("Reply posted", false),
+                            Err(error) => app.message(
+                                format!("Reply posted. Could not delete its draft: {error:#}. Do not post it again."),
+                                true,
+                            ),
+                        }
+                    }
+                    Err(error) => app.message(
+                        format!("{error:#}. The draft is kept; check the thread on GitHub before posting again."),
                         true,
                     ),
                 },
@@ -1547,6 +1580,7 @@ fn dispatch(
                 | Action::Activity(_)
                 | Action::Submit { .. }
                 | Action::PostComment { .. }
+                | Action::PostReply { .. }
                 | Action::PreviewGuide(_)
         )
     {
@@ -1758,6 +1792,17 @@ fn dispatch(
             thread::spawn(move || {
                 let result = github::post_conversation_comment(&id, &body);
                 let _ = sender.send(JobResult::Commented { id, result });
+            });
+        }
+        Action::PostReply { id, comment, body } => {
+            app.message("Posting the reply…", false);
+            thread::spawn(move || {
+                let result = github::post_review_reply(&id, comment, &body);
+                let _ = sender.send(JobResult::Replied {
+                    id,
+                    comment,
+                    result,
+                });
             });
         }
         Action::Submit {

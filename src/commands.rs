@@ -219,6 +219,13 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                     "saved edit delete",
                 ),
                 Command::new(
+                    "Reply to the GitHub review thread on this line",
+                    "gr",
+                    'r',
+                    "respond answer comment thread",
+                )
+                .action("reply_thread"),
+                Command::new(
                     "Write GitHub review summary",
                     "s",
                     's',
@@ -365,9 +372,14 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
     }
     if !opened && !local {
         commands.extend([
-            Command::new("Open selected PR diff", "o", 'o', "review pull request")
-                .disabled_if(!target, "Choose a PR first")
-                .disabled_if(app.busy, busy),
+            Command::new(
+                "Open selected PR",
+                "o",
+                'o',
+                "review pull request overview diff",
+            )
+            .disabled_if(!target, "Choose a PR first")
+            .disabled_if(app.busy, busy),
             Command::new("Filter PR list", "/", '/', "search pull requests"),
             Command::new("Toggle PR preview", "p", 'p', "description panel show hide"),
             Command::new(

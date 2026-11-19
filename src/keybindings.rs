@@ -135,6 +135,7 @@ specs! {
     ("clear_selection", "Clear selection", D, [";"]),
     ("toggle_comments", "Toggle inline comments and notes", D, ["t"]),
     ("threads", "Read full comment threads", D, ["T"]),
+    ("reply_thread", "Reply to the review thread on this line", D, ["gr"]),
     ("notes", "Manage local notes and replies", D, ["N"]),
     ("drafts", "Manage GitHub drafts / local notes", D, ["D"]),
     ("comment", "GitHub comment draft / local note", D, ["c"]),
@@ -165,7 +166,7 @@ specs! {
     ("preview_description", "Show description preview", I, ["1"]),
     ("preview_guide", "Show AI guide preview", I, ["2"]),
     ("filter", "Filter PR list", I, ["/"]),
-    ("open_pr", "Open selected PR diff", I, ["o", "Enter"]),
+    ("open_pr", "Open selected PR", I, ["o", "Enter"]),
 }
 
 pub fn spec(id: &str) -> Option<&'static BindingSpec> {

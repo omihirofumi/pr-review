@@ -139,6 +139,20 @@ pub enum Dialog {
         body: String,
         scroll: u16,
     },
+    /// A reply to the published review thread whose first comment is `comment`; Esc keeps the text as a draft.
+    Reply {
+        id: PrId,
+        comment: u64,
+        author: String,
+        input: TextInput,
+    },
+    ReplyPreview {
+        id: PrId,
+        comment: u64,
+        author: String,
+        body: String,
+        scroll: u16,
+    },
     Note {
         anchor: DraftComment,
         reply_to: Option<String>,
@@ -1159,6 +1173,11 @@ pub enum Action {
         id: PrId,
         body: String,
     },
+    PostReply {
+        id: PrId,
+        comment: u64,
+        body: String,
+    },
     Prepare {
         pr: PullRequest,
         open_editor: Option<Box<EditorTarget>>,
@@ -1600,6 +1619,7 @@ impl App {
                 | Dialog::Compose { input, .. }
                 | Dialog::Submit { input, .. }
                 | Dialog::Conversation { input, .. }
+                | Dialog::Reply { input, .. }
                 | Dialog::OpenPr { input },
             ) => input,
             Some(Dialog::Picker {
@@ -1677,6 +1697,9 @@ impl App {
             keybindings::spec(id).ok_or_else(|| anyhow::anyhow!("Unknown shortcut action {id}"))?;
         self.goto_pending = false;
         self.pending_keys.clear();
+        if id == "reply_thread" {
+            return self.open_thread_reply();
+        }
         let kind = match id {
             "file_picker" => Some(PickerKind::Files),
             "global_search" => Some(PickerKind::Global),
@@ -2426,9 +2449,7 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char('o') if !self.busy => {
                 if let Some(pr) = self.visible_prs().get(self.selected_pr) {
-                    let id = pr.id.clone();
-                    self.open_on_diff = true;
-                    return Ok(Action::LoadPr(id));
+                    return Ok(Action::LoadPr(pr.id.clone()));
                 }
             }
             _ => {}
@@ -2636,10 +2657,76 @@ impl App {
         Ok(Action::None)
     }
 
+    /// Opens a reply to the published review thread on the cursor line, restoring any saved draft.
+    fn open_thread_reply(&mut self) -> Result<Action> {
+        let Some(review) = &self.review else {
+            return Ok(Action::None);
+        };
+        if self.local_spec.is_some() || review.data.source.is_local() {
+            self.message("Replies need a GitHub PR; N replies to local notes", true);
+            return Ok(Action::None);
+        }
+        let (Some(file), Some(row)) = (
+            review.current_file(),
+            review.current_lines().get(review.position()),
+        ) else {
+            return Ok(Action::None);
+        };
+        let target = prpr::thread::threads(&review.data.comments)
+            .into_iter()
+            .filter(|thread| {
+                thread.matches_file(file)
+                    && thread
+                        .anchor()
+                        .is_some_and(|(side, line)| prpr::thread::matches_anchor(row, &side, line))
+            })
+            .max_by_key(|thread| thread.root.id)
+            .map(|thread| (thread.root.id, thread.root.author.clone()));
+        let Some((comment, author)) = target else {
+            self.message(
+                "No review thread on this line; move to a line with a published comment",
+                true,
+            );
+            return Ok(Action::None);
+        };
+        let id = review.data.pr.id.clone();
+        let text = store::reply_draft(&self.root, &id, comment)?;
+        self.dialog = Some(Dialog::Reply {
+            id,
+            comment,
+            author,
+            input: TextInput::new(text),
+        });
+        Ok(Action::None)
+    }
+
     fn dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
         let dialog = self.dialog.take().unwrap();
         if key.code == KeyCode::Esc {
             match dialog {
+                Dialog::Reply {
+                    id, comment, input, ..
+                } => {
+                    store::save_reply_draft(&self.root, &id, comment, &input.text)?;
+                    if !input.text.trim().is_empty() {
+                        let key = self.shortcut("reply_thread");
+                        self.message(format!("Reply draft kept; {key} continues it"), false);
+                    }
+                }
+                Dialog::ReplyPreview {
+                    id,
+                    comment,
+                    author,
+                    body,
+                    ..
+                } => {
+                    self.dialog = Some(Dialog::Reply {
+                        id,
+                        comment,
+                        author,
+                        input: TextInput::new(body),
+                    });
+                }
                 Dialog::Conversation { id, input } => {
                     store::save_conversation_draft(&self.root, &id, &input.text)?;
                     if !input.text.trim().is_empty() {
@@ -3221,6 +3308,64 @@ impl App {
                 scroll_key(&mut scroll, key);
                 Some(Dialog::ConversationPreview { id, body, scroll })
             }
+            Dialog::Reply {
+                id,
+                comment,
+                author,
+                mut input,
+            } => {
+                if save {
+                    store::save_reply_draft(&self.root, &id, comment, &input.text)?;
+                    if input.text.trim().is_empty() {
+                        self.message("Write a reply first", true);
+                        Some(Dialog::Reply {
+                            id,
+                            comment,
+                            author,
+                            input,
+                        })
+                    } else {
+                        Some(Dialog::ReplyPreview {
+                            id,
+                            comment,
+                            author,
+                            body: input.text.trim().to_owned(),
+                            scroll: 0,
+                        })
+                    }
+                } else {
+                    input.key(key);
+                    Some(Dialog::Reply {
+                        id,
+                        comment,
+                        author,
+                        input,
+                    })
+                }
+            }
+            Dialog::ReplyPreview {
+                id,
+                comment,
+                author,
+                body,
+                mut scroll,
+            } => {
+                if key.code == KeyCode::Enter && !self.busy {
+                    if self.demo {
+                        self.message("Demo: preview complete. Nothing was sent to GitHub.", false);
+                        return Ok(Action::None);
+                    }
+                    return Ok(Action::PostReply { id, comment, body });
+                }
+                scroll_key(&mut scroll, key);
+                Some(Dialog::ReplyPreview {
+                    id,
+                    comment,
+                    author,
+                    body,
+                    scroll,
+                })
+            }
             Dialog::Confirm {
                 event,
                 body,
@@ -3388,6 +3533,7 @@ mod tests {
             title: data.pr.title.clone(),
             author: data.pr.author.clone(),
             draft: false,
+            awaiting_review: false,
         });
         assert!(matches!(app.key(key('o')).unwrap(), Action::LoadPr(id) if id == data.pr.id));
         app.loaded(data).unwrap();

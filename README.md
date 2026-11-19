@@ -147,7 +147,7 @@ Select a PR with `j` / `k` and press `o`. If you already know its number, open i
 
 The PR list has a compact table and a preview pane showing the selected PR's Markdown description. `j` / `k` changes the selected PR; `h` / `l` or `Tab` focuses the table / preview. Press `p` to hide or show the preview, `P` to switch its position, and `[` / `]` or `1` / `2` to switch between **Description** and **AI guide**. Narrow terminals place the preview below the table. `Ctrl-d` / `Ctrl-u` scroll the preview. Descriptions arrive with the list; browsing them does not load diffs or start an AI agent. Press `a` to prepare or reuse a guide for the selected PR.
 
-Press `o` or `Enter` in the list to open **Diff**. A direct target such as `prpr 123` opens **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Labels, CI status, conversation, diff, and inline comments load independently in the background. Inside an opened PR, press `1` for Overview, `2` for AI Guide, `3` for Diff, or `Tab` / `Shift-Tab` to cycle. With an AI agent configured, a structured reading guide appears in AI Guide without blocking navigation; the tab label shows whether it is loading, ready, or failed.
+A `●` before a PR in the list marks someone else's PR that you have not submitted a review on yet, and the list title counts them. Press `o` or `Enter` in the list, or pass a direct target such as `prpr 123`, to open **Overview**, showing the title, author description, and change counts as soon as metadata arrives. Labels, CI status, conversation, diff, and inline comments load independently in the background. Inside an opened PR, press `1` for Overview, `2` for AI Guide, `3` for Diff, or `Tab` / `Shift-Tab` to cycle. With an AI agent configured, a structured reading guide appears in AI Guide without blocking navigation; the tab label shows whether it is loading, ready, or failed.
 
 In Diff:
 
@@ -159,7 +159,7 @@ In Diff:
 
 `Ctrl-s` inside the comment editor does not publish anything. The final preview's `Enter` is the publishing action.
 
-Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to read published review summaries. Press `#` to open another PR by number, `?` for the keyboard guide, or `q` to quit. After installing an update, restart the app to use the new version.
+Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to read published review summaries. On a line with a published thread, `gr` writes a reply: `Ctrl-s` previews it and `Enter` posts it to GitHub immediately, outside any pending review; `Esc` keeps the text as a draft for that thread. Press `#` to open another PR by number, `?` for the keyboard guide, or `q` to quit. After installing an update, restart the app to use the new version.
 
 To learn the controls without contacting GitHub, run `prpr --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
 
@@ -423,6 +423,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `F` | Toggle full-file context |
 | `t` | Toggle inline comments, replies, and local drafts |
 | `T` / `V` | Full inline thread list / PR conversation and reviews |
+| `gr` | Reply to the published review thread on the cursor line |
 | `#` | Open a PR by number in the selected repository |
 | `o` | Open the selected PR or saved item |
 | `w` / `e` | Check out the PR in this repository / open source in your editor |
@@ -517,7 +518,7 @@ Use `V` to inspect published reviews and `T` to inspect inline comments, then pr
 ## Current limits
 
 - GitHub.com repositories only.
-- Unified diffs with single-line and multiline range comments. Existing threads can be read; replying to or resolving a thread is not yet supported. PR conversation comments are read-only.
+- Unified diffs with single-line and multiline range comments. Existing threads can be read and replied to; resolving a thread is not yet supported, and outdated threads have no line to reply from. PR conversation comments are read-only.
 - No textual review for binary files or files whose patch GitHub omits. Malformed or truncated hunks remain visible but cannot receive comments.
 - Merge, suggestion application, and CI-log viewing are outside the review workflow.
 - Working-copy edits are preserved, but the app does not offer to reset them.
