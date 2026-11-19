@@ -69,10 +69,10 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             .iter()
             .any(|row| row.kind == prpr::diff::LineKind::Hunk);
         commands.extend([
-            Command::new("Next hunk", "]", ']', "forward change jump")
-                .disabled_if(review.hunk_target(true).is_none(), "No next hunk"),
-            Command::new("Previous hunk", "[", '[', "prev backward change jump")
-                .disabled_if(review.hunk_target(false).is_none(), "No previous hunk"),
+            Command::new("Next change", "]", ']', "forward hunk jump")
+                .disabled_if(review.change_target(true).is_none(), "No next change"),
+            Command::new("Previous change", "[", '[', "prev backward hunk jump")
+                .disabled_if(review.change_target(false).is_none(), "No previous change"),
             Command::new(
                 "Toggle file sidebar",
                 "Ctrl-b",

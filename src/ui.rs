@@ -22,7 +22,7 @@ use ratatui::{
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::{
-    ActivityStatus, AiReviewStatus, AiStatus, App, Dialog, Focus, OverviewState, PageTab,
+    ActivityStatus, AiReviewStatus, AiStatus, App, Dialog, Focus, Follow, OverviewState, PageTab,
     PickerKind, PreviewTab, ReviewState, TextInput,
 };
 
@@ -414,8 +414,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ],
             View::Diff => &[
                 ("command_palette", "commands"),
-                ("previous_hunk", "prev hunk"),
-                ("next_hunk", "next hunk"),
+                ("previous_hunk", "prev change"),
+                ("next_hunk", "next change"),
                 ("toggle_sidebar", "files"),
                 ("ask", "ask"),
                 ("explain_diff", "explain"),
@@ -2071,6 +2071,7 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     let selected = selected_row(&rows, review.position());
     let viewport = &review.viewport;
     let previous = viewport.tops.borrow().get(&review.selected_file).copied();
+    let follow = viewport.follow.replace(Follow::Jump);
     let start = match previous {
         Some(top) => scroll_viewport(
             top,
@@ -2078,15 +2079,10 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
             rows.len(),
             height,
             app.settings.editor.scrolloff,
-            viewport
-                .keep_offset
-                .replace(false)
-                .then(|| viewport.cursor_offset.get()),
+            follow,
+            viewport.cursor_offset.get(),
         ),
-        None => {
-            viewport.keep_offset.set(false);
-            viewport_start(&rows, review.position(), height)
-        }
+        None => viewport_start(&rows, review.position(), height),
     };
     viewport
         .tops
@@ -2978,30 +2974,29 @@ fn viewport_start(rows: &[ViewRow], source: usize, height: usize) -> usize {
         .min(rows.len().saturating_sub(height))
 }
 
-/// Scrolls only as far as needed to keep `scrolloff` rows around the cursor; a cursor that
-/// jumped out of view is centered, and `keep_offset` preserves its screen row for paging.
+/// Scrolls only as far as needed to keep `scrolloff` rows around the cursor; with `Follow::Jump`
+/// a cursor out of view is centered, and `Follow::Page` keeps it `cursor_offset` rows from the top.
 fn scroll_viewport(
     previous_top: usize,
     selected: usize,
     total: usize,
     height: usize,
     scrolloff: usize,
-    keep_offset: Option<usize>,
+    follow: Follow,
+    cursor_offset: usize,
 ) -> usize {
     if total <= height || height == 0 {
         return 0;
     }
     let margin = scrolloff.min(height.saturating_sub(1) / 2);
-    let top = if let Some(offset) = keep_offset {
-        selected.saturating_sub(offset)
-    } else if selected < previous_top || selected >= previous_top + height {
-        selected.saturating_sub(height / 2)
-    } else if selected < previous_top + margin {
-        selected.saturating_sub(margin)
-    } else if selected + margin >= previous_top + height {
-        selected + margin + 1 - height
-    } else {
-        previous_top
+    let top = match follow {
+        Follow::Page => selected.saturating_sub(cursor_offset),
+        Follow::Jump if selected < previous_top || selected >= previous_top + height => {
+            selected.saturating_sub(height / 2)
+        }
+        _ if selected < previous_top + margin => selected.saturating_sub(margin),
+        _ if selected + margin >= previous_top + height => selected + margin + 1 - height,
+        _ => previous_top,
     };
     top.min(total - height)
 }
@@ -4430,31 +4425,123 @@ mod tests {
 
     #[test]
     fn viewport_scrolls_only_near_edges_centers_jumps_and_keeps_paging_offset() {
-        let scroll = |top, selected, keep| scroll_viewport(top, selected, 100, 20, 5, keep);
+        let scroll = |top, selected, follow| scroll_viewport(top, selected, 100, 20, 5, follow, 8);
         assert_eq!(
-            scroll(10, 20, None),
+            scroll(10, 20, Follow::Jump),
             10,
             "moving inside the view keeps it still"
         );
-        assert_eq!(scroll(10, 25, None), 11, "bottom margin scrolls by one row");
-        assert_eq!(scroll(10, 14, None), 9, "top margin scrolls by one row");
-        assert_eq!(scroll(10, 60, None), 50, "a jump out of view is centered");
         assert_eq!(
-            scroll(10, 33, Some(8)),
+            scroll(10, 25, Follow::Step),
+            11,
+            "bottom margin scrolls by one row"
+        );
+        assert_eq!(
+            scroll(10, 14, Follow::Step),
+            9,
+            "top margin scrolls by one row"
+        );
+        assert_eq!(
+            scroll(10, 60, Follow::Jump),
+            50,
+            "a jump out of view is centered"
+        );
+        assert_eq!(
+            scroll(10, 33, Follow::Page),
             25,
             "paging keeps the cursor's screen row"
         );
-        assert_eq!(scroll(10, 99, None), 80, "the view never passes the end");
         assert_eq!(
-            scroll_viewport(3, 2, 10, 20, 5, None),
+            scroll(10, 99, Follow::Jump),
+            80,
+            "the view never passes the end"
+        );
+        assert_eq!(
+            scroll_viewport(3, 2, 10, 20, 5, Follow::Jump, 0),
             0,
             "short files never scroll"
         );
         assert_eq!(
-            scroll_viewport(0, 3, 100, 4, 5, None),
+            scroll_viewport(0, 3, 100, 4, 5, Follow::Jump, 0),
             1,
             "scrolloff shrinks in tiny viewports"
         );
+    }
+
+    #[test]
+    fn stepping_past_a_tall_comment_card_scrolls_to_the_margin_instead_of_centering() {
+        let scroll = |top, selected| scroll_viewport(top, selected, 100, 20, 5, Follow::Step, 0);
+        assert_eq!(
+            scroll(10, 40),
+            26,
+            "below the view, the cursor lands on the bottom margin"
+        );
+        assert_eq!(
+            scroll(30, 12),
+            7,
+            "above the view, the cursor lands on the top margin"
+        );
+    }
+
+    #[test]
+    fn j_and_k_across_a_comment_card_keep_the_cursor_on_the_scrolloff_margin() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(std::env::temp_dir(), false);
+        let mut data = demo_data();
+        let added = (1..=60)
+            .map(|line| format!("+added {line}\n"))
+            .collect::<String>();
+        data.files = vec![prpr::model::ChangedFile {
+            filename: "a.rs".into(),
+            previous_filename: None,
+            status: "added".into(),
+            additions: 60,
+            deletions: 0,
+            patch: Some(format!("@@ -0,0 +1,60 @@\n{added}")),
+        }];
+        data.comments = vec![ReviewComment {
+            id: 1,
+            path: "a.rs".into(),
+            body: (1..=8).map(|line| format!("note line {line}\n")).collect(),
+            author: "reviewer".into(),
+            line: Some(20),
+            original_line: Some(20),
+            side: "RIGHT".into(),
+            start_line: None,
+            start_side: None,
+            in_reply_to_id: None,
+        }];
+        app.loaded(data).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let cursor_row = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .find(|&y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains('›')
+                })
+                .unwrap()
+        };
+        let mut rows = Vec::new();
+        for key in std::iter::repeat_n('j', 22).chain(std::iter::repeat_n('k', 22)) {
+            app.key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+                .unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            rows.push(cursor_row(&terminal));
+        }
+        let lowest = *rows[..22].iter().max().unwrap();
+        let highest = *rows[22..].iter().min().unwrap();
+        assert!(
+            rows[..22].windows(2).all(|pair| pair[1] >= pair[0]),
+            "j never moves the cursor back up the screen: {rows:?}"
+        );
+        assert!(
+            rows[22..].windows(2).all(|pair| pair[1] <= pair[0]),
+            "k never moves the cursor back down the screen: {rows:?}"
+        );
+        assert!(lowest > highest);
     }
 
     #[test]

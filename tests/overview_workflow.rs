@@ -1329,10 +1329,10 @@ fn palette_search_uses_shared_actions_and_never_submits_without_the_existing_pre
     assert_eq!(app.review.as_ref().unwrap().position(), position);
     assert!(app.review.as_ref().unwrap().selection.is_some());
     assert!(!screen(&mut app).contains("CHANGES"));
-    assert!(matches!(palette_run(&mut app, "next hunk"), Action::None));
-    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    assert!(matches!(palette_run(&mut app, "next change"), Action::None));
+    assert_eq!(app.review.as_ref().unwrap().position(), 4);
     assert!(matches!(palette_run(&mut app, "prev hunk"), Action::None));
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     assert!(matches!(
         palette_run(&mut app, "Explain diff"),
         Action::Ask { .. }
@@ -1374,7 +1374,7 @@ fn palette_handles_disabled_actions_empty_results_paste_and_modal_text_without_b
         matches!(&app.dialog, Some(Dialog::Palette { input, selected: 0 }) if input.text == "NEXT HUNK")
     );
     app.key(key(KeyCode::Enter)).unwrap();
-    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     press(&mut app, 'x').unwrap();
     press(&mut app, 'C').unwrap();
     app.paste("Keep this text");
@@ -1435,30 +1435,74 @@ fn palette_tracks_inbox_overview_local_and_busy_contexts() {
 }
 
 #[test]
-fn hunk_navigation_crosses_files_skips_missing_patches_and_stays_with_active_selection() {
+fn change_navigation_crosses_files_skips_missing_patches_and_stays_with_active_selection() {
     let root = tempfile::tempdir().unwrap();
     let mut app = palette_app(root.path());
     press(&mut app, ']').unwrap();
-    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     press(&mut app, 'v').unwrap();
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 4);
     press(&mut app, ']').unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
     press(&mut app, ';').unwrap();
     press(&mut app, ']').unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 2);
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     press(&mut app, ']').unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 2);
     press(&mut app, '[').unwrap();
     assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
-    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    assert_eq!(app.review.as_ref().unwrap().position(), 4);
     press(&mut app, '[').unwrap();
     press(&mut app, '[').unwrap();
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
 }
 
 #[test]
-fn original_hunks_remain_navigable_when_context_merges_them_or_shows_the_full_file() {
+fn change_navigation_stops_at_each_change_inside_one_hunk() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = App::new(root.path().into(), false);
+    app.opened(overview());
+    let mut data = app::demo_data();
+    data.files = vec![prpr::model::ChangedFile {
+        filename: "a.rs".into(),
+        previous_filename: None,
+        status: "modified".into(),
+        additions: 2,
+        deletions: 2,
+        patch: Some(
+            "@@ -1,6 +1,6 @@\n same 1\n-old 2\n+new 2\n same 3\n same 4\n same 5\n-old 6\n\\ No newline at end of file\n+new 6"
+                .into(),
+        ),
+    }];
+    app.accept_diff(data).unwrap();
+    app.tab = PageTab::Diff;
+    let position = |app: &App| app.review.as_ref().unwrap().position();
+    press(&mut app, ']').unwrap();
+    assert_eq!(position(&app), 2, "the first changed line, not the header");
+    press(&mut app, ']').unwrap();
+    assert_eq!(position(&app), 7, "a later change in the same hunk");
+    press(&mut app, ']').unwrap();
+    assert_eq!(
+        position(&app),
+        7,
+        "an addition after a no-newline marker continues the same change"
+    );
+    app.review.as_mut().unwrap().positions[0] = 3;
+    press(&mut app, '[').unwrap();
+    assert_eq!(
+        position(&app),
+        2,
+        "from inside a change, [ returns to its start"
+    );
+    press(&mut app, '[').unwrap();
+    assert_eq!(position(&app), 2);
+}
+
+#[test]
+fn changes_remain_navigable_when_context_merges_hunks_or_shows_the_full_file() {
     let root = tempfile::tempdir().unwrap();
     let mut app = palette_app(root.path());
     let source = prpr::context::FileContext {
@@ -1483,13 +1527,16 @@ fn original_hunks_remain_navigable_when_context_merges_them_or_shows_the_full_fi
         .unwrap()
         .accept_context(0, source)
         .unwrap();
-    let positions = app.review.as_ref().unwrap().contexts[0]
-        .view
-        .as_ref()
-        .unwrap()
-        .hunk_positions
-        .clone();
-    assert_eq!(positions.len(), 2);
+    let deletion = |app: &App, text: &str| {
+        app.review
+            .as_ref()
+            .unwrap()
+            .current_lines()
+            .iter()
+            .position(|row| row.kind == prpr::diff::LineKind::Deletion && row.text == text)
+            .unwrap()
+    };
+    let positions = [deletion(&app, "-old"), deletion(&app, "-before")];
     assert!(positions[0] < positions[1]);
     app.review.as_mut().unwrap().positions[0] = 0;
     press(&mut app, ']').unwrap();
@@ -1508,7 +1555,10 @@ fn original_hunks_remain_navigable_when_context_merges_them_or_shows_the_full_fi
             .count(),
         1
     );
-    let second = review.contexts[0].view.as_ref().unwrap().hunk_positions[1];
+    let first = deletion(&app, "-old");
+    let second = deletion(&app, "-before");
+    press(&mut app, ']').unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), first);
     press(&mut app, ']').unwrap();
     assert_eq!(app.review.as_ref().unwrap().position(), second);
     assert_eq!(app.review.as_ref().unwrap().selected_file, 0);
@@ -1576,10 +1626,13 @@ fn configured_normal_shortcuts_replace_defaults_and_preserve_multi_key_navigatio
     assert_eq!(app.review.as_ref().unwrap().position(), 0);
     app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
         .unwrap();
-    assert_eq!(app.review.as_ref().unwrap().position(), 3);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
+    app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(app.review.as_ref().unwrap().position(), 4);
     press(&mut app, 'g').unwrap();
     press(&mut app, 'p').unwrap();
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     assert!(app.pending_keys.is_empty());
     app.key(key(KeyCode::F(2))).unwrap();
     assert!(matches!(app.dialog, Some(Dialog::Palette { .. })));
@@ -1620,7 +1673,7 @@ fn unbound_shortcuts_leave_palette_actions_available_and_canonical_keys_cannot_b
     ));
     app.review.as_mut().unwrap().positions[0] = 3;
     palette_run(&mut app, "previous hunk");
-    assert_eq!(app.review.as_ref().unwrap().position(), 0);
+    assert_eq!(app.review.as_ref().unwrap().position(), 1);
     assert!(!app.review.as_ref().unwrap().contexts[0].expansion.full);
     app.settings
         .keybindings

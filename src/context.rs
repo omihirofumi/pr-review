@@ -36,7 +36,6 @@ pub struct FullFile {
 }
 
 pub struct ContextView {
-    pub hunk_positions: Vec<usize>,
     pub lines: Vec<DiffLine>,
     pub patch: String,
     pub patch_positions: Vec<Option<usize>>,
@@ -335,7 +334,6 @@ impl FullFile {
         }
         let groups = windows.iter().map(|window| window.hunks.clone()).collect();
         let mut view = ContextView {
-            hunk_positions: Vec::new(),
             lines: Vec::new(),
             patch: String::new(),
             patch_positions: Vec::new(),
@@ -369,7 +367,6 @@ impl FullFile {
                 group,
                 &mut patch_rows,
             );
-            let header_position = view.lines.len() - 1;
             let (mut old, mut new) = (window.old, window.new);
             for &index in &window.hunks {
                 let hunk = &self.hunks[index];
@@ -377,14 +374,6 @@ impl FullFile {
                     view.push(self.unchanged(old, new), group, &mut patch_rows);
                     old += 1;
                     new += 1;
-                }
-                if !hunk.rows.is_empty() {
-                    view.hunk_positions
-                        .push(if !expansion.full && index == window.hunks[0] {
-                            header_position
-                        } else {
-                            view.lines.len()
-                        });
                 }
                 for row in &hunk.rows {
                     view.push(row.clone(), group, &mut patch_rows);

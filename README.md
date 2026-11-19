@@ -219,13 +219,15 @@ Back on #482, `D` lists the morning's drafts. Add the one AI finding you agree w
 
 ## Command palette and file sidebar
 
-Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. Type words such as `sidebar`, `next hunk`, `explain diff`, or `checkout` to filter actions. Use arrows (or `Ctrl-n` / `Ctrl-p`) to select, `Enter` to run, and `Esc` or `Ctrl-k` to close. `Ctrl-u` clears the search; `Ctrl-h` deletes backward. Available actions follow the current view. Disabled actions show why they cannot run. Review submission still uses its existing summary and final confirmation screens.
+Press `Ctrl-k` to open the command palette from the PR list, Overview, or Diff. Type words such as `sidebar`, `next change`, `explain diff`, or `checkout` to filter actions. Use arrows (or `Ctrl-n` / `Ctrl-p`) to select, `Enter` to run, and `Esc` or `Ctrl-k` to close. `Ctrl-u` clears the search; `Ctrl-h` deletes backward. Available actions follow the current view. Disabled actions show why they cannot run. Review submission still uses its existing summary and final confirmation screens.
 
 The file sidebar shows changed files as a tree. Chains of directories that each contain a single subdirectory are joined into one row, such as `services/api/src`, so deep package paths stay readable; long joined names keep their first and last directories, such as `main/…/example`.
 
 `Ctrl-b` hides or shows the file sidebar. Hiding it gives the diff the full width and preserves the current file, cursor, and selection. The setting lasts for the current app session, including file changes and refreshes. Press `h` to show and focus the file tree again; `l`, `Enter`, `Tab`, or `→` returns to the diff. Returning to a different file than the one you left starts at its top, while returning to the same file keeps your position. These shortcuts leave comment/question editors unchanged while you are typing.
 
-Use `]` for the next hunk and `[` for the previous hunk, or run those actions from the palette. At a file boundary, navigation continues to the next/previous file with a textual hunk, skipping unavailable patches. An actively extending selection stays within its current file. Original hunks remain separate navigation targets when expanded context merges them or the full file is shown.
+Use `]` for the next change and `[` for the previous change, or run those actions from the palette. A change is a run of added or deleted lines, so the cursor lands on the first changed line rather than the `@@` header, and a hunk holding several separate changes stops at each one. From inside a change, `[` returns to its start. At a file boundary, navigation continues to the next/previous file with a change, skipping unavailable patches. An actively extending selection stays within its current file. Changes remain separate targets when expanded context merges their hunks or the full file is shown.
+
+`j` / `k` scroll only as far as `scrolloff` needs, even when stepping past a tall comment card; jumps such as `]`, search, and the pickers center a target that is out of view.
 
 Press `/` in Diff, type text, and press `Enter` to jump to the first match after the cursor in the current file. Matches are highlighted, case is ignored unless the text has a capital letter, and only the lines currently shown are searched. While a search is active, `n` / `N` move to the next / previous match in the file and wrap at its ends; `Esc` clears the search, after which `n` again means next file.
 
@@ -398,7 +400,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `Q` / `E` | Ask the agent / explain selected diff lines or the current hunk |
 | `j` / `k`, up / down | Move through lines within the current file |
 | `.` / `,`, `n` / `p` | Next / previous file |
-| `]` / `[` | Next / previous hunk, continuing across files |
+| `]` / `[` | Next / previous change, continuing across files |
 | `M` | Write a PR conversation comment; `Esc` keeps the draft |
 | `/`, then `n` / `N` | Search the current file; jump to the next / previous match |
 | `Space /` | Search every file in a picker with a preview |
@@ -439,7 +441,7 @@ The terminal needs at least 48 columns and 12 rows; 100 columns or more gives th
 
 Diff starts with GitHub's original patch. Press `+` to reveal 20 more unchanged lines before and after the current hunk or visible hunk group. Nearby hunks merge when their expanded context overlaps. Press `-` to collapse that group's extra context. `F` toggles the full file; toggling it off restores the previous expansion. Pressing `-` in full-file mode returns to the collapsed diff.
 
-Hidden regions show the number of unchanged lines. The selected source location and selection endpoints stay tied to their original line numbers as context expands. `j` / `k`, `gg` / `ge`, hunk navigation, comments, and Helix opening continue to use those coordinates. If collapse hides the cursor's line, the cursor moves to the nearest visible source line.
+Hidden regions show the number of unchanged lines. The selected source location and selection endpoints stay tied to their original line numbers as context expands. `j` / `k`, `gg` / `ge`, change navigation, comments, and Helix opening continue to use those coordinates. If collapse hides the cursor's line, the cursor moves to the nearest visible source line.
 
 Source loads only when requested, using the exact PR head and diff merge-base revisions. Renames use the previous filename on the base side. Validated source is cached by repository, revisions, and file identity, so repeated expansion does not fetch it again. This uses GitHub's file APIs and does not prepare a checkout or fetch Git history. Loading context leaves the rest of the interface usable.
 

@@ -328,7 +328,21 @@ pub struct ReviewState {
 pub struct Viewport {
     pub tops: std::cell::RefCell<HashMap<usize, usize>>,
     pub cursor_offset: std::cell::Cell<usize>,
-    pub keep_offset: std::cell::Cell<bool>,
+    /// How the next draw follows the cursor; it resets to `Follow::Jump` after each draw.
+    pub follow: std::cell::Cell<Follow>,
+}
+
+/// How the diff view scrolls to keep the cursor visible after it moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Follow {
+    /// A cursor that left the view is centered.
+    #[default]
+    Jump,
+    /// The view scrolls only as far as `scrolloff` needs, even when a tall comment card pushed
+    /// the adjacent line off screen.
+    Step,
+    /// The cursor keeps its screen row, as paging does.
+    Page,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -841,22 +855,30 @@ impl ReviewState {
         self.horizontal = 0;
     }
 
-    fn hunk_positions(&self, file: usize) -> Vec<usize> {
-        if let Some(view) = &self.contexts[file].view {
-            return view.hunk_positions.clone();
+    /// First row of each run of added or deleted lines; a no-newline marker inside a run does not split it.
+    fn change_starts(&self, file: usize) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut in_change = false;
+        for (index, row) in self.lines[file].iter().enumerate() {
+            match row.kind {
+                LineKind::Addition | LineKind::Deletion => {
+                    if !in_change {
+                        starts.push(index);
+                    }
+                    in_change = true;
+                }
+                LineKind::Meta => {}
+                LineKind::Hunk | LineKind::Context => in_change = false,
+            }
         }
-        self.lines[file]
-            .iter()
-            .enumerate()
-            .filter_map(|(index, row)| (row.kind == LineKind::Hunk).then_some(index))
-            .collect()
+        starts
     }
 
-    fn hunk_target(&self, forward: bool) -> Option<(usize, usize)> {
+    fn change_target(&self, forward: bool) -> Option<(usize, usize)> {
         if self.selected_file >= self.lines.len() {
             return None;
         }
-        let positions = self.hunk_positions(self.selected_file);
+        let positions = self.change_starts(self.selected_file);
         let same_file = if forward {
             positions
                 .into_iter()
@@ -875,13 +897,13 @@ impl ReviewState {
         }
         if forward {
             (self.selected_file + 1..self.lines.len()).find_map(|file| {
-                self.hunk_positions(file)
+                self.change_starts(file)
                     .first()
                     .map(|&position| (file, position))
             })
         } else {
             (0..self.selected_file).rev().find_map(|file| {
-                self.hunk_positions(file)
+                self.change_starts(file)
                     .last()
                     .map(|&position| (file, position))
             })
@@ -1002,8 +1024,8 @@ impl ReviewState {
         self.focus = Focus::Diff;
     }
 
-    fn hunk(&mut self, forward: bool) {
-        if let Some((file, position)) = self.hunk_target(forward) {
+    fn jump_change(&mut self, forward: bool) {
+        if let Some((file, position)) = self.change_target(forward) {
             if file != self.selected_file {
                 self.selection = None;
                 self.horizontal = 0;
@@ -2133,6 +2155,7 @@ impl App {
                 if review.focus == Focus::Files {
                     review.move_file(1);
                 } else {
+                    review.viewport.follow.set(Follow::Step);
                     review.move_line(1);
                 }
             }
@@ -2140,13 +2163,14 @@ impl App {
                 if review.focus == Focus::Files {
                     review.move_file(-1);
                 } else {
+                    review.viewport.follow.set(Follow::Step);
                     review.move_line(-1);
                 }
             }
             KeyCode::Char('n') => review.move_file(1),
             KeyCode::Char('p') => review.move_file(-1),
-            KeyCode::Char(']') => review.hunk(true),
-            KeyCode::Char('[') => review.hunk(false),
+            KeyCode::Char(']') => review.jump_change(true),
+            KeyCode::Char('[') => review.jump_change(false),
             KeyCode::Home => {
                 if review.focus == Focus::Files {
                     review.selection = None;
@@ -2164,19 +2188,19 @@ impl App {
                 }
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                review.viewport.keep_offset.set(true);
+                review.viewport.follow.set(Follow::Page);
                 review.move_line(15)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                review.viewport.keep_offset.set(true);
+                review.viewport.follow.set(Follow::Page);
                 review.move_line(-15)
             }
             KeyCode::PageDown => {
-                review.viewport.keep_offset.set(true);
+                review.viewport.follow.set(Follow::Page);
                 review.move_line(20)
             }
             KeyCode::PageUp => {
-                review.viewport.keep_offset.set(true);
+                review.viewport.follow.set(Follow::Page);
                 review.move_line(-20)
             }
             KeyCode::Right | KeyCode::Left if wrap => {
@@ -2221,7 +2245,10 @@ impl App {
             KeyCode::Char('t') => review.show_comments = !review.show_comments,
             KeyCode::Char('T') => self.dialog = Some(Dialog::Threads { scroll: 0 }),
             KeyCode::Char('v') => review.toggle_selection()?,
-            KeyCode::Char('x') => review.select_line(true)?,
+            KeyCode::Char('x') => {
+                review.viewport.follow.set(Follow::Step);
+                review.select_line(true)?
+            }
             KeyCode::Char('X') => review.select_line(false)?,
             KeyCode::Char(';') => review.selection = None,
             KeyCode::Char('V') if !self.busy => {
