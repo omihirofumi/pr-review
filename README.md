@@ -1,7 +1,5 @@
 # prpr
 
-> Fully vibe-coded and intended for personal use.
-
 A standalone Rust + Ratatui app for reviewing GitHub pull requests and local Jujutsu changes with Helix and optional Codex, Claude, or Agy explanations.
 
 Run it inside a repository to browse that repository's PRs, understand a change with an optional Codex, Claude, or Agy reading guide, review diffs and inline threads, check the PR out where you are, jump into Helix, and submit a batch of inline comments from the terminal. [A day with prpr](#a-day-with-prpr) walks through a typical day.
