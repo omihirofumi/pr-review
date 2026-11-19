@@ -2053,3 +2053,52 @@ fn wrapping_is_opt_in_and_replaces_sideways_scrolling() {
     app.diff_wrap = None;
     assert!(app.wrap());
 }
+
+#[test]
+fn a_draft_pr_is_marked_ready_for_review_only_after_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = browsing_app(directory.path().into());
+    let mut metadata = overview();
+    metadata.draft = true;
+    let id = metadata.id.clone();
+    app.opened(metadata);
+    let mut data = app::demo_data();
+    data.pr.draft = true;
+    app.accept_diff(data).unwrap();
+
+    press(&mut app, 'g').unwrap();
+    assert!(matches!(press(&mut app, 'R').unwrap(), Action::None));
+    assert!(matches!(app.dialog, Some(Dialog::ReadyForReview { .. })));
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(
+        app.dialog.is_none(),
+        "Esc cancels without contacting GitHub"
+    );
+
+    assert!(matches!(
+        palette_run(&mut app, "ready for review"),
+        Action::None
+    ));
+    match app.key(key(KeyCode::Enter)).unwrap() {
+        Action::MarkReady(marked) => assert_eq!(marked, id),
+        _ => panic!("Enter in the confirmation must mark the PR ready"),
+    }
+
+    app.inbox[0].id = id.clone();
+    app.inbox[0].draft = true;
+    app.marked_ready(&id);
+    assert!(!app.overview.as_ref().unwrap().metadata.draft);
+    assert!(!app.review.as_ref().unwrap().data.pr.draft);
+    assert!(
+        !app.inbox[0].draft,
+        "the PR list stops showing D without a reload"
+    );
+
+    press(&mut app, 'g').unwrap();
+    press(&mut app, 'R').unwrap();
+    assert!(
+        app.dialog.is_none(),
+        "a PR that is already ready has nothing to confirm"
+    );
+    assert!(app.status.contains("not a draft"), "{}", app.status);
+}

@@ -139,6 +139,10 @@ pub enum Dialog {
         body: String,
         scroll: u16,
     },
+    /// Confirms taking the draft PR out of draft; Enter asks GitHub, Esc cancels.
+    ReadyForReview {
+        id: PrId,
+    },
     /// A reply to the published review thread whose first comment is `comment`; Esc keeps the text as a draft.
     Reply {
         id: PrId,
@@ -1178,6 +1182,7 @@ pub enum Action {
         comment: u64,
         body: String,
     },
+    MarkReady(PrId),
     Prepare {
         pr: PullRequest,
         open_editor: Option<Box<EditorTarget>>,
@@ -1699,6 +1704,9 @@ impl App {
         self.pending_keys.clear();
         if id == "reply_thread" {
             return self.open_thread_reply();
+        }
+        if id == "ready_for_review" {
+            return Ok(self.open_ready_for_review());
         }
         let kind = match id {
             "file_picker" => Some(PickerKind::Files),
@@ -2657,6 +2665,62 @@ impl App {
         Ok(Action::None)
     }
 
+    /// Whether the open PR is a GitHub draft, judged from the newest loaded metadata.
+    pub fn open_pr_is_draft(&self) -> bool {
+        self.overview.as_ref().map_or_else(
+            || {
+                self.review
+                    .as_ref()
+                    .is_some_and(|review| review.data.pr.draft)
+            },
+            |overview| overview.metadata.draft,
+        )
+    }
+
+    fn open_ready_for_review(&mut self) -> Action {
+        let local = self.local_spec.is_some()
+            || self
+                .review
+                .as_ref()
+                .is_some_and(|review| review.data.source.is_local());
+        let id = self
+            .overview
+            .as_ref()
+            .map(|overview| overview.metadata.id.clone())
+            .or_else(|| self.review.as_ref().map(|review| review.data.pr.id.clone()));
+        match id {
+            Some(_) if local => self.message("Ready for review needs a GitHub PR", true),
+            Some(_) if !self.open_pr_is_draft() => self.message(
+                "This PR is not a draft; it is already open for review",
+                false,
+            ),
+            Some(id) => self.dialog = Some(Dialog::ReadyForReview { id }),
+            None => {}
+        }
+        Action::None
+    }
+
+    /// Records that GitHub took `id` out of draft, so every view stops showing it as a draft.
+    pub fn marked_ready(&mut self, id: &PrId) {
+        if let Some(overview) = self
+            .overview
+            .as_mut()
+            .filter(|overview| &overview.metadata.id == id)
+        {
+            overview.metadata.draft = false;
+        }
+        if let Some(review) = self
+            .review
+            .as_mut()
+            .filter(|review| &review.data.pr.id == id)
+        {
+            review.data.pr.draft = false;
+        }
+        for pr in self.inbox.iter_mut().filter(|pr| &pr.id == id) {
+            pr.draft = false;
+        }
+    }
+
     /// Opens a reply to the published review thread on the cursor line, restoring any saved draft.
     fn open_thread_reply(&mut self) -> Result<Action> {
         let Some(review) = &self.review else {
@@ -3307,6 +3371,16 @@ impl App {
                 }
                 scroll_key(&mut scroll, key);
                 Some(Dialog::ConversationPreview { id, body, scroll })
+            }
+            Dialog::ReadyForReview { id } => {
+                if key.code == KeyCode::Enter && !self.busy {
+                    if self.demo {
+                        self.message("Demo: nothing was sent to GitHub.", false);
+                        return Ok(Action::None);
+                    }
+                    return Ok(Action::MarkReady(id));
+                }
+                Some(Dialog::ReadyForReview { id })
             }
             Dialog::Reply {
                 id,

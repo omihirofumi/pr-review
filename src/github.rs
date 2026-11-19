@@ -740,6 +740,16 @@ pub fn post_conversation_comment(id: &PrId, body: &str) -> Result<String> {
     Ok(response["html_url"].as_str().unwrap_or_default().to_owned())
 }
 
+/// Takes a draft PR out of draft through `gh pr ready`, which fails unless the user may edit the PR.
+pub fn mark_ready(id: &PrId) -> Result<()> {
+    validate_id(id)?;
+    gh(
+        &["pr", "ready", &id.number.to_string(), "--repo", &id.repo],
+        None,
+    )?;
+    Ok(())
+}
+
 /// Posts a reply to a review thread; GitHub accepts only the thread's first comment as `comment`.
 ///
 /// See <https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment>.

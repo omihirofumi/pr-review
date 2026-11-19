@@ -69,6 +69,13 @@ mod unix {
                     "GitHub's review decision wins; without one, latest reviews decide"
                 );
             }
+            "ready" => {
+                let id = prpr::model::PrId {
+                    repo: "scope/repo".into(),
+                    number: 42,
+                };
+                github::mark_ready(&id).unwrap();
+            }
             "url" => {
                 let target =
                     github::parse_target("https://github.com/url/repo/pull/42", None).unwrap();
@@ -95,6 +102,7 @@ mod unix {
             "query",
             "hostile_results",
             "reviews",
+            "ready",
             "url",
             "missing_repo",
             "malformed",
@@ -163,7 +171,12 @@ mod unix {
                     call["gh_repo"].is_null(),
                     "GH_REPO must not override cwd discovery"
                 );
-                if call["args"][0] == "pr" {
+                if call["args"][0] == "pr" && call["args"][1] == "ready" {
+                    assert_eq!(
+                        call["args"],
+                        serde_json::json!(["pr", "ready", "42", "--repo", "scope/repo"])
+                    );
+                } else if call["args"][0] == "pr" {
                     let args = call["args"].as_array().unwrap();
                     assert_eq!(args[1], "list");
                     let repo_flag = args.iter().position(|arg| arg == "--repo").unwrap();
@@ -201,6 +214,8 @@ if args[:2] == ['repo', 'view']:
         sys.stderr.write('not a git repository')
         sys.exit(1)
     print(json.dumps({'nameWithOwner': 'scope/repo'}))
+elif args[:2] == ['pr', 'ready']:
+    pass
 elif args[:2] == ['api', 'user']:
     print(json.dumps({'login': 'Viewer'}))
 elif args[:2] == ['pr', 'list']:

@@ -4017,6 +4017,30 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 inner,
             );
         }
+        Dialog::ReadyForReview { id } => {
+            let inner = popup(
+                frame,
+                " Ready for review / Enter confirms / Esc cancels ".into(),
+                72,
+                8,
+            );
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    format!("Mark {}#{} ready for review?", id.repo, id.number),
+                    Style::default().fg(ACCENT).bold(),
+                )),
+                Line::from(
+                    "GitHub takes the PR out of draft and notifies its requested reviewers.",
+                ),
+            ];
+            if app.demo {
+                lines.push(Line::from(Span::styled(
+                    "OFFLINE DEMO: nothing will be sent.",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
         Dialog::Reply {
             comment,
             author,

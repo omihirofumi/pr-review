@@ -159,7 +159,7 @@ In Diff:
 
 `Ctrl-s` inside the comment editor does not publish anything. The final preview's `Enter` is the publishing action.
 
-Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to read published review summaries. On a line with a published thread, `gr` writes a reply: `Ctrl-s` previews it and `Enter` posts it to GitHub immediately, outside any pending review; `Esc` keeps the text as a draft for that thread. Press `#` to open another PR by number, `?` for the keyboard guide, or `q` to quit. After installing an update, restart the app to use the new version.
+Press `t` to hide/show inline comments, `T` to read complete threads, and `V` to read published review summaries. On a line with a published thread, `gr` writes a reply: `Ctrl-s` previews it and `Enter` posts it to GitHub immediately, outside any pending review; `Esc` keeps the text as a draft for that thread. On a draft PR you can edit, `g R` (also "Mark PR ready for review" in the palette) asks for confirmation and then takes it out of draft, like `gh pr ready`; GitHub then notifies its requested reviewers. Press `#` to open another PR by number, `?` for the keyboard guide, or `q` to quit. After installing an update, restart the app to use the new version.
 
 To learn the controls without contacting GitHub, run `prpr --demo`. It starts on the PR list and offers a sample AI guide and sample answers, local drafts, and review previews. Source checkout and Helix opening require a real PR.
 
@@ -402,6 +402,7 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `.` / `,`, `n` / `p` | Next / previous file |
 | `]` / `[` | Next / previous change, continuing across files |
 | `M` | Write a PR conversation comment; `Esc` keeps the draft |
+| `g R` | Mark a draft PR ready for review after confirming |
 | `/`, then `n` / `N` | Search the current file; jump to the next / previous match |
 | `Space /` | Search every file in a picker with a preview |
 | `Space f` | Open a changed file by fuzzy name |

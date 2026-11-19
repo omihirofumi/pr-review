@@ -241,6 +241,10 @@ pub(crate) enum JobResult {
         comment: u64,
         result: Result<ReviewComment>,
     },
+    MarkedReady {
+        id: PrId,
+        result: Result<()>,
+    },
 }
 
 type Tui = Terminal<CrosstermBackend<std::fs::File>>;
@@ -676,6 +680,16 @@ pub fn run() -> Result<()> {
                     }
                     Err(error) => app.message(
                         format!("{error:#}. The draft is kept; check the conversation with V before posting again."),
+                        true,
+                    ),
+                },
+                JobResult::MarkedReady { id, result } => match result {
+                    Ok(()) => {
+                        app.marked_ready(&id);
+                        app.message(format!("#{} is ready for review", id.number), false);
+                    }
+                    Err(error) => app.message(
+                        format!("{error:#}. The PR is still a draft."),
                         true,
                     ),
                 },
@@ -1582,6 +1596,7 @@ fn dispatch(
                 | Action::Submit { .. }
                 | Action::PostComment { .. }
                 | Action::PostReply { .. }
+                | Action::MarkReady(_)
                 | Action::PreviewGuide(_)
         )
     {
@@ -1793,6 +1808,13 @@ fn dispatch(
             thread::spawn(move || {
                 let result = github::post_conversation_comment(&id, &body);
                 let _ = sender.send(JobResult::Commented { id, result });
+            });
+        }
+        Action::MarkReady(id) => {
+            app.message(format!("Marking #{} ready for review…", id.number), false);
+            thread::spawn(move || {
+                let result = github::mark_ready(&id);
+                let _ = sender.send(JobResult::MarkedReady { id, result });
             });
         }
         Action::PostReply { id, comment, body } => {

@@ -154,6 +154,7 @@ specs! {
     ("review_summary", "Write GitHub review summary", D, ["s"]),
     ("review_activity", "Read PR conversation and reviews", REVIEW, ["V"]),
     ("conversation_comment", "Write a PR conversation comment (drafts are kept)", REVIEW, ["M"]),
+    ("ready_for_review", "Mark the draft PR ready for review", REVIEW, ["g R"]),
     ("recover_review", "Recover uncertain GitHub submission", D, ["u"]),
     ("next_reading_step", "Next reading-guide step", G, ["n"]),
     ("previous_reading_step", "Previous reading-guide step", G, ["p"]),

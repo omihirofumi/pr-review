@@ -353,7 +353,7 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
         ]);
     }
     if opened && !local {
-        commands.push(
+        commands.extend([
             Command::new(
                 "Comment on the PR conversation",
                 "M",
@@ -361,7 +361,16 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "message reply discussion issue comment draft",
             )
             .disabled_if(app.busy, busy),
-        );
+            Command::new(
+                "Mark PR ready for review",
+                "g R",
+                'R',
+                "draft publish open reviewers undraft",
+            )
+            .action("ready_for_review")
+            .disabled_if(!app.open_pr_is_draft(), "This PR is not a draft")
+            .disabled_if(app.busy, busy),
+        ]);
     }
     if !local {
         commands.extend([
