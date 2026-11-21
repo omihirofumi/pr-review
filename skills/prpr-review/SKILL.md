@@ -63,6 +63,20 @@ prpr diff -r @ --notes "$TMPDIR/prpr-notes.json"
 
 Each note needs `file`, `body`, and exactly one of `new_line` or `old_line`; `start_line` and `author` (default `agent`) are optional. Anchors follow the same rules as `comment add`. Valid notes are saved as local notes, so later replies work, and reopening with the same file does not duplicate them. Notes whose anchors are not in the diff are skipped and reported in the status line. The viewer opens on the first note.
 
+To compress review of subtle or large changes without asking the human to mentally execute code, submit concrete `(input -> before vs after)` cases to the Behavioral Oracle (`O` in the TUI) and inspect the human's verdicts:
+
+```sh
+prpr session oracle set --repo . --revision REVISION --open --file - <<'JSON'
+{"summary": "Edge cases to judge.", "cases": [
+  {"title": "Zero retry delay", "input": "retry_delay = 0ms, budget = 5s", "before": "Sends immediately", "after": "Returns Err(DeadlineExceeded)", "file": "src/client.rs", "start_line": 19, "new_line": 22, "proof": "untested"}
+]}
+JSON
+prpr session oracle list --repo .
+prpr session oracle clear --repo .
+```
+
+Each case requires `title`, `input`, `before`, `after`, `file`, and one of `new_line` or `old_line` (optional `start_line`, `proof`: `"untested"` or `"covered"`, `test_file`, and `mechanism`). In the TUI, `After` starts masked for blind prediction; the human reveals it with `Space` and marks `intended` (`y`) or `flagged` (`x`, which pre-fills a counterexample comment). `oracle list` returns every case's `verdict` (`"intended"`, `"flagged"`, or `null`) plus `sieve` line counts (`unaccounted`, `verified`, `moved`, `mechanical`, `test`). When no viewer is open yet, write the same JSON outside the repository and pass `prpr diff -r @ --oracle "$TMPDIR/prpr-oracle.json"`.
+
 After the user pushes or edits code, reload the running review instead of asking them to press `r`, then inspect it again for the new `revision`. A `prpr diff --watch` review reloads by itself when files or Jujutsu operations change, so only inspect it again:
 
 ```sh

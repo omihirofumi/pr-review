@@ -31,7 +31,7 @@ use directories::ProjectDirs;
 use prpr::{
     analysis, assistant, context, github, local,
     model::*,
-    notes, review,
+    notes, oracle, review,
     settings::{self, OpenIn, Provider},
     workspace,
 };
@@ -83,6 +83,12 @@ struct DiffArgs {
         help = "Open with agent notes from a JSON file: {\"notes\": [{\"file\", \"new_line\" or \"old_line\", \"start_line\"?, \"body\", \"author\"?}]}"
     )]
     notes: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Open with agent behavioral oracle cases from a JSON file"
+    )]
+    oracle: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -221,6 +227,11 @@ pub(crate) enum JobResult {
         request: u64,
         result: Result<Box<analysis::Analysis>>,
     },
+    Oracle {
+        generation: u64,
+        request: u64,
+        result: Result<Box<oracle::OracleDeck>>,
+    },
     Activity(Result<String>),
     Prepared {
         result: Result<PathBuf>,
@@ -310,6 +321,9 @@ pub(crate) struct Runtime {
     ai_request: u64,
     ai_cancel: Option<Arc<AtomicBool>>,
     ai_handle: Option<thread::JoinHandle<()>>,
+    oracle_request: u64,
+    oracle_cancel: Option<Arc<AtomicBool>>,
+    oracle_handle: Option<thread::JoinHandle<()>>,
     /// Provider reviews outlive PR reloads because they take minutes; quitting stops them.
     review_cancels: HashMap<String, Arc<AtomicBool>>,
 }
@@ -335,10 +349,21 @@ impl Runtime {
         self.ai_request = self.ai_request.wrapping_add(1);
     }
 
+    fn stop_oracle(&mut self) {
+        if let Some(cancel) = self.oracle_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = self.oracle_handle.take() {
+            let _ = handle.join();
+        }
+        self.oracle_request = self.oracle_request.wrapping_add(1);
+    }
+
     fn sync(&mut self, generation: u64) {
         if generation != self.generation {
             self.stop_ai();
             self.stop_ask();
+            self.stop_oracle();
             self.generation = generation;
             self.pending_comments = None;
             self.pending_ai = None;
@@ -353,6 +378,7 @@ impl Drop for Runtime {
         }
         self.stop_ai();
         self.stop_ask();
+        self.stop_oracle();
     }
 }
 
@@ -506,6 +532,9 @@ pub fn run() -> Result<()> {
     if let Some(Mode::Diff(options)) = &args.command {
         if let Some(path) = &options.notes {
             app.pending_notes = notes::read_seeds(path)?;
+        }
+        if let Some(path) = &options.oracle {
+            app.pending_oracle = Some(oracle::read_seeds(path)?);
         }
         if options.watch {
             watcher = Some(watch::Watcher::start(&repository)?);
@@ -737,6 +766,7 @@ pub fn run() -> Result<()> {
                 | JobResult::PrActivity { .. }
                 | JobResult::AiReview { .. }
                 | JobResult::Analysis { .. }
+                | JobResult::Oracle { .. }
                 | JobResult::PreviewContext { .. }
                 | JobResult::PreviewGuide { .. }
                 | JobResult::Answer { .. }
@@ -831,6 +861,7 @@ pub(crate) fn apply_background(
                         (
                             app.tab,
                             review.show_comments,
+                            review.sieve,
                             review.current_file().map(|file| file.filename.clone()),
                             review.anchor(),
                         )
@@ -849,12 +880,13 @@ pub(crate) fn apply_background(
                         app.message(format!("Cannot load local review: {error:#}"), true);
                         return None;
                     }
-                    if let Some((tab, shown, path, anchor)) = previous {
+                    if let Some((tab, shown, sieve, path, anchor)) = previous {
                         if let (Some(path), Some((side, line))) = (path, anchor) {
                             let _ = app.navigate(&path, &side, line);
                         }
                         if let Some(review) = &mut app.review {
                             review.show_comments = shown;
+                            review.sieve = sieve;
                         }
                         app.tab = tab;
                     }
@@ -873,6 +905,29 @@ pub(crate) fn apply_background(
                     let seeds = std::mem::take(&mut app.pending_notes);
                     if !seeds.is_empty() {
                         app.import_notes(seeds);
+                    }
+                    if let Some(deck) = app.pending_oracle.take() {
+                        match app
+                            .review
+                            .as_ref()
+                            .context("No local review loaded")
+                            .and_then(|review| oracle::validate_against_review(deck, &review.data))
+                        {
+                            Ok(deck) => {
+                                let count = deck.witnesses.len();
+                                app.set_oracle_deck(deck);
+                                app.dialog = Some(app::Dialog::Oracle);
+                                app.message(
+                                    format!(
+                                        "Behavioral oracle ready ({count} cases). Space reveals, y intended, x flags."
+                                    ),
+                                    false,
+                                );
+                            }
+                            Err(error) => {
+                                app.message(format!("Oracle file skipped: {error:#}"), true)
+                            }
+                        }
                     }
                     if app.settings.ai.auto_explain {
                         start_analysis(app, sender, runtime, false);
@@ -1192,6 +1247,37 @@ pub(crate) fn apply_background(
                 };
             }
         }
+        JobResult::Oracle {
+            generation,
+            request,
+            result,
+        } => {
+            if generation != app.generation || request != runtime.oracle_request {
+                return None;
+            }
+            match result {
+                Ok(deck) => {
+                    let count = deck.witnesses.len();
+                    let untested = deck
+                        .witnesses
+                        .iter()
+                        .filter(|w| w.proof == oracle::TestProof::Untested)
+                        .count();
+                    app.set_oracle_deck(*deck);
+                    app.message(
+                        format!(
+                            "Behavioral oracle ready: {count} cases ({untested} untested). Press O to judge."
+                        ),
+                        false,
+                    );
+                }
+                Err(error) => {
+                    let msg = format!("{error:#}");
+                    app.oracle.status = app::OracleStatus::Error(msg.clone());
+                    app.message(format!("Behavioral oracle failed: {msg}"), true);
+                }
+            }
+        }
         foreground => return Some(foreground),
     }
     None
@@ -1224,6 +1310,11 @@ fn stop_ai_work(app: &mut App, runtime: &mut Runtime) {
         }
         stopped.push("AI guide");
     }
+    if matches!(app.oracle.status, app::OracleStatus::Loading) {
+        runtime.stop_oracle();
+        app.oracle.status = app::OracleStatus::Idle;
+        stopped.push("behavioral oracle");
+    }
     let reviews = std::mem::take(&mut runtime.review_cancels);
     for (key, cancel) in &reviews {
         cancel.store(true, Ordering::Relaxed);
@@ -1240,6 +1331,62 @@ fn stop_ai_work(app: &mut App, runtime: &mut Runtime) {
         },
         false,
     );
+}
+
+fn start_oracle(
+    app: &mut App,
+    sender: &mpsc::Sender<JobResult>,
+    runtime: &mut Runtime,
+    force: bool,
+) {
+    let Some(review) = app.review.as_ref() else {
+        app.message(
+            "Wait for the diff to load before running the behavioral oracle",
+            true,
+        );
+        return;
+    };
+    if app.demo {
+        let deck = oracle::sample_deck(&review.data);
+        app.set_oracle_deck(deck);
+        app.message("Offline sample oracle. No AI agent was run.", false);
+        return;
+    }
+    if app.settings.ai.provider == Provider::None {
+        return;
+    }
+    let review_data = review.data.clone();
+    let metadata = app
+        .overview
+        .as_ref()
+        .map(|state| state.metadata.clone())
+        .unwrap_or_else(|| overview_from_review(&review_data));
+    let config = app.settings.ai.clone();
+    let cache_root = app.root.join("oracle").join("cache");
+    runtime.stop_oracle();
+    let request = runtime.oracle_request;
+    let generation = app.generation;
+    let cancel = Arc::new(AtomicBool::new(false));
+    runtime.oracle_cancel = Some(cancel.clone());
+    app.oracle.revision = review_data.pr.head_sha.clone();
+    app.oracle.status = app::OracleStatus::Loading;
+    app.message(
+        format!(
+            "Tracing concrete behavioral deltas with {}… Esc continues in background.",
+            config.provider
+        ),
+        false,
+    );
+    let sender = sender.clone();
+    runtime.oracle_handle = Some(thread::spawn(move || {
+        let result = oracle::generate(&metadata, &review_data, &config, &cache_root, cancel, force)
+            .map(Box::new);
+        let _ = sender.send(JobResult::Oracle {
+            generation,
+            request,
+            result,
+        });
+    }));
 }
 
 fn start_ai_review(app: &mut App, sender: &mpsc::Sender<JobResult>, runtime: &mut Runtime) {
@@ -1610,10 +1757,12 @@ fn dispatch(
     if runtime.provider != Some(app.settings.ai.provider) {
         runtime.stop_ai();
         runtime.stop_ask();
+        runtime.stop_oracle();
         runtime.provider = Some(app.settings.ai.provider);
     }
     if matches!(action, Action::LoadInbox) {
         runtime.stop_ai();
+        runtime.stop_oracle();
     }
     if matches!(action, Action::None | Action::Quit) {
         return Ok(());
@@ -1665,6 +1814,10 @@ fn dispatch(
             start_ai_review(app, sender, runtime);
             return Ok(());
         }
+        Action::Oracle { force } => {
+            start_oracle(app, sender, runtime, force);
+            return Ok(());
+        }
         Action::Copy { text, label } => {
             match copy_to_clipboard(&text) {
                 Ok(()) => app.message(format!("Copied {label} to the clipboard."), false),
@@ -1702,6 +1855,7 @@ fn dispatch(
         Action::DisableAi => {
             runtime.stop_ai();
             runtime.stop_ask();
+            runtime.stop_oracle();
             runtime.pending_ai = None;
             return Ok(());
         }
@@ -1868,6 +2022,7 @@ fn dispatch(
         | Action::OpenEditor(_)
         | Action::LoadDiff
         | Action::Explain { .. }
+        | Action::Oracle { .. }
         | Action::DisableAi
         | Action::PreviewGuide(_)
         | Action::Ask { .. }

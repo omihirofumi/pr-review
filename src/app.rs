@@ -1,6 +1,9 @@
 #[path = "commands.rs"]
 pub mod commands;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -13,7 +16,9 @@ use prpr::{
     local,
     model::*,
     notes,
+    oracle::{self, OracleDeck, Verdict, Witness},
     settings::{self, OpenIn, Provider, Settings},
+    sieve::{self, SieveReport},
 };
 
 use crate::store;
@@ -194,6 +199,8 @@ pub enum Dialog {
     AiReview {
         scroll: u16,
     },
+    /// Concrete behavioral cases (`Input -> Before vs After`), judged by the human reviewer.
+    Oracle,
     Threads {
         scroll: u16,
     },
@@ -332,6 +339,48 @@ pub struct OverviewState {
     pub ai: AiStatus,
 }
 
+pub enum OracleStatus {
+    Idle,
+    Loading,
+    Ready(Box<OracleDeck>),
+    Error(String),
+}
+
+pub struct OracleState {
+    pub revision: String,
+    pub status: OracleStatus,
+    pub verdicts: BTreeMap<String, Verdict>,
+    pub revealed: HashSet<String>,
+    pub blind: bool,
+    pub selected: usize,
+    pub scroll: u16,
+    pub goto_pending: bool,
+}
+
+impl Default for OracleState {
+    fn default() -> Self {
+        Self {
+            revision: String::new(),
+            status: OracleStatus::Idle,
+            verdicts: BTreeMap::new(),
+            revealed: HashSet::new(),
+            blind: true,
+            selected: 0,
+            scroll: 0,
+            goto_pending: false,
+        }
+    }
+}
+
+impl OracleState {
+    pub fn witnesses(&self) -> &[Witness] {
+        match &self.status {
+            OracleStatus::Ready(deck) => &deck.witnesses,
+            _ => &[],
+        }
+    }
+}
+
 pub struct ReviewState {
     pub notes: Vec<notes::Note>,
     pub contexts: Vec<context::FileState>,
@@ -353,6 +402,10 @@ pub struct ReviewState {
     pub sidebar_origin: Option<usize>,
     /// Whether the last draw used split view, which changes the order line movement follows.
     pub split: std::cell::Cell<bool>,
+    /// Subtracts verbatim moves, mechanical edits, tests, and Oracle-verified lines from attention.
+    pub sieve: bool,
+    pub oracle_witnesses: Vec<Witness>,
+    pub oracle_verdicts: BTreeMap<String, Verdict>,
 }
 
 /// Diff scroll position, updated while drawing so it follows the rendered row layout.
@@ -887,17 +940,39 @@ impl ReviewState {
         self.horizontal = 0;
     }
 
+    pub fn sieve_report(&self) -> SieveReport {
+        sieve::analyze(
+            &self.data.files,
+            &self.lines,
+            &self.oracle_witnesses,
+            &self.oracle_verdicts,
+        )
+    }
+
     /// First row of each run of added or deleted lines; a no-newline marker inside a run does not split it.
+    /// When `self.sieve` is active, only runs of unaccounted production logic ("Dark Diff") are visited.
     fn change_starts(&self, file: usize) -> Vec<usize> {
+        let classes = self.sieve.then(|| self.sieve_report());
+        let file_classes = classes
+            .as_ref()
+            .and_then(|report| report.files.get(file))
+            .map(|f| f.rows.as_slice());
         let mut starts = Vec::new();
         let mut in_change = false;
         for (index, row) in self.lines[file].iter().enumerate() {
             match row.kind {
                 LineKind::Addition | LineKind::Deletion => {
-                    if !in_change {
-                        starts.push(index);
+                    let counted = file_classes
+                        .and_then(|rows| rows.get(index))
+                        .is_none_or(|class| class.is_unaccounted());
+                    if counted {
+                        if !in_change {
+                            starts.push(index);
+                        }
+                        in_change = true;
+                    } else {
+                        in_change = false;
                     }
-                    in_change = true;
                 }
                 LineKind::Meta => {}
                 LineKind::Hunk | LineKind::Context => in_change = false,
@@ -1168,6 +1243,9 @@ pub enum Action {
         label: &'static str,
     },
     AiReview,
+    Oracle {
+        force: bool,
+    },
     LoadContext(usize),
     PreviewGuide(PrId),
     Ask {
@@ -1175,7 +1253,7 @@ pub enum Action {
         focus: Option<Box<assistant::Focus>>,
     },
     CancelAsk,
-    /// Stops the pending chat answer, AI guide, and provider reviews.
+    /// Stops the pending chat answer, AI guide, oracle, and provider reviews.
     StopAi,
     None,
     Quit,
@@ -1223,6 +1301,10 @@ pub struct App {
     /// Layout used by the last draw, so the toggle flips what is on screen.
     pub split_shown: std::cell::Cell<bool>,
     pub ai_reviews: HashMap<String, AiReviewStatus>,
+    pub oracle: OracleState,
+    pub oracle_after_agent: bool,
+    /// Agent-supplied oracle deck from `--oracle`, validated when the first local snapshot loads.
+    pub pending_oracle: Option<OracleDeck>,
     /// Action requested outside the key loop, such as an agent asking to reload.
     pub requested: Option<Action>,
     /// Local checkout root and the GitHub repository it belongs to.
@@ -1282,6 +1364,9 @@ impl App {
             diff_wrap: None,
             split_shown: std::cell::Cell::new(false),
             ai_reviews: HashMap::new(),
+            oracle: OracleState::default(),
+            oracle_after_agent: false,
+            pending_oracle: None,
             requested: None,
             checkout: None,
             file_sidebar: true,
@@ -1332,6 +1417,9 @@ impl App {
     }
 
     pub fn opened(&mut self, metadata: PrOverview) {
+        if self.oracle.revision != metadata.head_sha {
+            self.oracle = OracleState::default();
+        }
         self.repo = Some(metadata.id.repo.clone());
         self.overview = Some(OverviewState {
             metadata,
@@ -1395,6 +1483,8 @@ impl App {
         }
         self.open_on_diff = false;
         self.chat = Chat::default();
+        self.oracle = OracleState::default();
+        self.oracle_after_agent = false;
         self.review = None;
         self.diff_loading = false;
         self.diff_error = None;
@@ -1458,6 +1548,7 @@ impl App {
             store::load(&self.root, &data.pr)?
         };
         let notes = notes::load(&self.root, &data)?;
+        let verdicts = oracle::load_verdicts(&self.root, &data).unwrap_or_default();
         for draft in &drafts {
             if !data.files.iter().any(|f| diff::validate_comment(f, draft)) {
                 bail!(
@@ -1484,6 +1575,20 @@ impl App {
         if self.repo.is_none() {
             self.repo = Some(data.pr.id.repo.clone());
         }
+        if self.oracle.revision != data.pr.head_sha {
+            self.oracle = OracleState {
+                revision: data.pr.head_sha.clone(),
+                verdicts,
+                ..OracleState::default()
+            };
+        } else {
+            self.oracle.verdicts = verdicts;
+        }
+        let show_comments = self
+            .review
+            .as_ref()
+            .is_none_or(|review| review.show_comments);
+        let sieve = self.review.as_ref().is_some_and(|review| review.sieve);
         self.review = Some(ReviewState {
             notes,
             contexts,
@@ -1493,10 +1598,7 @@ impl App {
             positions,
             focus: Focus::Diff,
             horizontal: 0,
-            show_comments: self
-                .review
-                .as_ref()
-                .is_none_or(|review| review.show_comments),
+            show_comments,
             selection: None,
             drafts,
             workspace: None,
@@ -1505,6 +1607,9 @@ impl App {
             search: None,
             sidebar_origin: None,
             split: std::cell::Cell::new(false),
+            sieve,
+            oracle_witnesses: self.oracle.witnesses().to_vec(),
+            oracle_verdicts: self.oracle.verdicts.clone(),
         });
         self.tab = PageTab::Diff;
         self.goto_pending = false;
@@ -1521,6 +1626,99 @@ impl App {
             );
         }
         Ok(())
+    }
+
+    pub fn sync_oracle_to_review(&mut self) {
+        if let Some(review) = &mut self.review {
+            if self.oracle.revision == review.data.pr.head_sha {
+                review.oracle_witnesses = self.oracle.witnesses().to_vec();
+            } else {
+                review.oracle_witnesses.clear();
+            }
+            review.oracle_verdicts = self.oracle.verdicts.clone();
+        }
+    }
+
+    pub fn set_oracle_deck(&mut self, deck: OracleDeck) {
+        if let Some(review) = &self.review {
+            self.oracle.revision = review.data.pr.head_sha.clone();
+        }
+        let count = deck.witnesses.len();
+        self.oracle.selected = self.oracle.selected.min(count.saturating_sub(1));
+        self.oracle.scroll = 0;
+        self.oracle.status = OracleStatus::Ready(Box::new(deck));
+        self.sync_oracle_to_review();
+    }
+
+    pub fn clear_oracle(&mut self) {
+        self.oracle.status = OracleStatus::Idle;
+        self.oracle.revealed.clear();
+        self.oracle.selected = 0;
+        self.oracle.scroll = 0;
+        self.sync_oracle_to_review();
+    }
+
+    pub fn is_witness_masked(&self, witness: &Witness) -> bool {
+        let id = witness.id();
+        self.oracle.blind
+            && !self.oracle.revealed.contains(&id)
+            && !self.oracle.verdicts.contains_key(&id)
+    }
+
+    fn highlight_witness(&mut self, witness: &Witness) {
+        if let Some(review) = &mut self.review {
+            let mark = Mark {
+                path: witness.path.clone(),
+                side: witness.side.clone(),
+                line: witness.effective_start(),
+                end_line: witness.line,
+                start_column: None,
+                end_column: None,
+            };
+            if !review.marks.contains(&mark) {
+                review.marks.push(mark);
+            }
+        }
+    }
+
+    fn open_oracle(&mut self) -> Result<Action> {
+        let (head, reset_verdicts, sample_deck) = {
+            let Some(review) = &self.review else {
+                self.message(
+                    "Wait for the diff to load before opening the behavioral oracle",
+                    true,
+                );
+                return Ok(Action::None);
+            };
+            let head = review.data.pr.head_sha.clone();
+            let reset_verdicts = (self.oracle.revision != head)
+                .then(|| oracle::load_verdicts(&self.root, &review.data).unwrap_or_default());
+            let sample_deck = self.demo.then(|| oracle::sample_deck(&review.data));
+            (head, reset_verdicts, sample_deck)
+        };
+        if let Some(verdicts) = reset_verdicts {
+            self.oracle = OracleState {
+                revision: head,
+                verdicts,
+                ..OracleState::default()
+            };
+            self.sync_oracle_to_review();
+        }
+        self.dialog = Some(Dialog::Oracle);
+        if matches!(self.oracle.status, OracleStatus::Idle) {
+            if let Some(deck) = sample_deck {
+                self.set_oracle_deck(deck);
+                self.message(
+                    "Offline behavioral oracle: predict After, press Space to reveal, y if intended, x to flag.",
+                    false,
+                );
+                return Ok(Action::None);
+            }
+            if self.settings.ai.provider != Provider::None {
+                return Ok(Action::Oracle { force: false });
+            }
+        }
+        Ok(Action::None)
     }
 
     pub fn add_note(
@@ -1858,6 +2056,7 @@ impl App {
                         ("open_github", true),
                         ("ask", true),
                         ("explain_diff", true),
+                        ("oracle", review_open || self.review.is_some()),
                         ("overview", review_open),
                         ("guide", review_open),
                         ("diff", review_open),
@@ -1926,6 +2125,13 @@ impl App {
             && (self.overview.is_some() || self.review.is_some())
         {
             return self.open_conversation_comment();
+        }
+        if key == KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE)
+            && (self.overview.is_some() || self.review.is_some())
+        {
+            self.goto_pending = false;
+            self.pending_keys.clear();
+            return self.open_oracle();
         }
         if self.local_spec.is_some() {
             match key.code {
@@ -2278,6 +2484,26 @@ impl App {
                         "Long lines wrap."
                     } else {
                         "Long lines are cut off; Left and Right scroll sideways."
+                    },
+                    false,
+                );
+            }
+            KeyCode::Char('z') => {
+                review.sieve = !review.sieve;
+                let sieve_on = review.sieve;
+                let report = review.sieve_report();
+                self.message(
+                    if sieve_on {
+                        format!(
+                            "Sieve ON: {} unaccounted lines ({} verified · {} moved · {} test · {} mechanical). ]/[ jumps unaccounted; z restores.",
+                            report.unaccounted,
+                            report.verified,
+                            report.moved,
+                            report.test,
+                            report.mechanical
+                        )
+                    } else {
+                        "Sieve OFF: showing all diff changes equally.".into()
                     },
                     false,
                 );
@@ -2810,6 +3036,14 @@ impl App {
                         input: TextInput::new(body),
                     });
                 }
+                Dialog::Oracle if self.oracle.goto_pending => {
+                    self.oracle.goto_pending = false;
+                    self.dialog = Some(Dialog::Oracle);
+                }
+                Dialog::AgentPicker { .. } if self.oracle_after_agent => {
+                    self.oracle_after_agent = false;
+                    self.dialog = Some(Dialog::Oracle);
+                }
                 _ => {}
             }
             return Ok(Action::None);
@@ -2986,6 +3220,9 @@ impl App {
                         if self.settings.ai.provider != provider {
                             self.chat = Chat::default();
                             self.preview.guides.clear();
+                            if matches!(self.oracle.status, OracleStatus::Loading) {
+                                self.oracle.status = OracleStatus::Idle;
+                            }
                         }
                         self.settings = settings;
                         if let Some(overview) = &mut self.overview {
@@ -2994,6 +3231,15 @@ impl App {
                             } else {
                                 AiStatus::Waiting
                             };
+                        }
+                        let from_oracle = std::mem::replace(&mut self.oracle_after_agent, false);
+                        if from_oracle {
+                            self.dialog = Some(Dialog::Oracle);
+                            return Ok(if provider == Provider::None {
+                                Action::DisableAi
+                            } else {
+                                Action::Oracle { force: false }
+                            });
                         }
                         return Ok(if provider == Provider::None {
                             Action::DisableAi
@@ -3098,6 +3344,9 @@ impl App {
             Dialog::AiReview { mut scroll } => {
                 scroll_key(&mut scroll, key);
                 Some(Dialog::AiReview { scroll })
+            }
+            Dialog::Oracle => {
+                return self.oracle_dialog_key(key);
             }
             Dialog::Threads { mut scroll } => {
                 scroll_key(&mut scroll, key);
@@ -3473,6 +3722,305 @@ impl App {
                 })
             }
         };
+        Ok(Action::None)
+    }
+
+    fn oracle_dialog_key(&mut self, key: KeyEvent) -> Result<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if control && !alt && key.code == KeyCode::Char('x') {
+            self.dialog = Some(Dialog::Oracle);
+            return Ok(Action::StopAi);
+        }
+        if self.oracle.goto_pending {
+            self.oracle.goto_pending = false;
+            let len = self.oracle.witnesses().len();
+            if !control && !alt {
+                match key.code {
+                    KeyCode::Char('g') => {
+                        self.oracle.selected = 0;
+                        self.oracle.scroll = 0;
+                    }
+                    KeyCode::Char('e') => {
+                        self.oracle.selected = len.saturating_sub(1);
+                        self.oracle.scroll = 0;
+                    }
+                    KeyCode::Char('f') => {
+                        if let Some(witness) =
+                            self.oracle.witnesses().get(self.oracle.selected).cloned()
+                        {
+                            self.navigate(&witness.path, &witness.side, witness.line)?;
+                            self.highlight_witness(&witness);
+                            self.message(
+                                format!(
+                                    "Jumped to {}:{} · O reopens Oracle",
+                                    witness.path,
+                                    witness.line_label()
+                                ),
+                                false,
+                            );
+                            return Ok(Action::None);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.dialog = Some(Dialog::Oracle);
+            return Ok(Action::None);
+        }
+        if control && !alt {
+            match key.code {
+                KeyCode::Char('d') => self.oracle.scroll = self.oracle.scroll.saturating_add(12),
+                KeyCode::Char('u') => self.oracle.scroll = self.oracle.scroll.saturating_sub(12),
+                KeyCode::Char('n') => {
+                    let len = self.oracle.witnesses().len();
+                    self.oracle.selected = (self.oracle.selected + 1).min(len.saturating_sub(1));
+                    self.oracle.scroll = 0;
+                }
+                KeyCode::Char('p') => {
+                    self.oracle.selected = self.oracle.selected.saturating_sub(1);
+                    self.oracle.scroll = 0;
+                }
+                _ => {}
+            }
+            self.dialog = Some(Dialog::Oracle);
+            return Ok(Action::None);
+        }
+        if alt {
+            self.dialog = Some(Dialog::Oracle);
+            return Ok(Action::None);
+        }
+        if key.code == KeyCode::Char('O') || key.code == KeyCode::Char('q') {
+            return Ok(Action::None);
+        }
+        if key.code == KeyCode::Char('A') {
+            self.oracle_after_agent = true;
+            self.dialog = Some(Dialog::AgentPicker {
+                selected: agent_picker_index(self.settings.ai.provider),
+                generate: false,
+            });
+            return Ok(Action::None);
+        }
+        if matches!(key.code, KeyCode::Char('a' | 'r')) {
+            if self.demo {
+                if let Some(data) = self.review.as_ref().map(|review| review.data.clone()) {
+                    self.set_oracle_deck(oracle::sample_deck(&data));
+                    self.message("Offline sample oracle reloaded.", false);
+                }
+                self.dialog = Some(Dialog::Oracle);
+                return Ok(Action::None);
+            }
+            if self.settings.ai.provider == Provider::None {
+                self.oracle_after_agent = true;
+                self.dialog = Some(Dialog::AgentPicker {
+                    selected: 0,
+                    generate: false,
+                });
+                return Ok(Action::None);
+            }
+            if matches!(self.oracle.status, OracleStatus::Loading) {
+                self.message(
+                    "Behavioral oracle is already running; Ctrl-x stops it.",
+                    false,
+                );
+                self.dialog = Some(Dialog::Oracle);
+                return Ok(Action::None);
+            }
+            self.dialog = Some(Dialog::Oracle);
+            return Ok(Action::Oracle { force: true });
+        }
+        if key.code == KeyCode::Char('b') {
+            self.oracle.blind = !self.oracle.blind;
+            self.oracle.scroll = 0;
+            self.message(
+                if self.oracle.blind {
+                    "Blind prediction ON: predict After before pressing Space to reveal."
+                } else {
+                    "Blind prediction OFF: all After outcomes and code anchors shown."
+                },
+                false,
+            );
+            self.dialog = Some(Dialog::Oracle);
+            return Ok(Action::None);
+        }
+        let len = self.oracle.witnesses().len();
+        match key.code {
+            KeyCode::Char('g') => {
+                self.oracle.goto_pending = true;
+                self.dialog = Some(Dialog::Oracle);
+                return Ok(Action::None);
+            }
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('n') => {
+                self.oracle.selected = (self.oracle.selected + 1).min(len.saturating_sub(1));
+                self.oracle.scroll = 0;
+            }
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::Char('p') => {
+                self.oracle.selected = self.oracle.selected.saturating_sub(1);
+                self.oracle.scroll = 0;
+            }
+            KeyCode::Home => {
+                self.oracle.selected = 0;
+                self.oracle.scroll = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.oracle.selected = len.saturating_sub(1);
+                self.oracle.scroll = 0;
+            }
+            KeyCode::PageDown => self.oracle.scroll = self.oracle.scroll.saturating_add(15),
+            KeyCode::PageUp => self.oracle.scroll = self.oracle.scroll.saturating_sub(15),
+            KeyCode::Char(' ') => {
+                if let Some(witness) = self.oracle.witnesses().get(self.oracle.selected) {
+                    let id = witness.id();
+                    if !self.oracle.revealed.remove(&id) {
+                        self.oracle.revealed.insert(id);
+                    }
+                    self.oracle.scroll = 0;
+                }
+            }
+            KeyCode::Char('y' | 'v') => {
+                if let Some(witness) = self.oracle.witnesses().get(self.oracle.selected).cloned() {
+                    if self.is_witness_masked(&witness) {
+                        self.oracle.revealed.insert(witness.id());
+                        self.oracle.scroll = 0;
+                        self.message(
+                            "Outcome revealed — press y again to confirm Intended, or x to flag as a counterexample.",
+                            false,
+                        );
+                        self.dialog = Some(Dialog::Oracle);
+                        return Ok(Action::None);
+                    }
+                    let id = witness.id();
+                    self.oracle.revealed.insert(id.clone());
+                    self.oracle.verdicts.insert(id, Verdict::Intended);
+                    if let Some(review) = &self.review {
+                        oracle::save_verdicts(&self.root, &review.data, &self.oracle.verdicts)?;
+                    }
+                    self.sync_oracle_to_review();
+                    let next = (0..len)
+                        .map(|offset| (self.oracle.selected + 1 + offset) % len)
+                        .find(|&idx| {
+                            let candidate = &self.oracle.witnesses()[idx];
+                            !self.oracle.verdicts.contains_key(&candidate.id())
+                        });
+                    if let Some(next) = next {
+                        self.oracle.selected = next;
+                        self.oracle.scroll = 0;
+                    }
+                    let judged = self
+                        .oracle
+                        .witnesses()
+                        .iter()
+                        .filter(|w| self.oracle.verdicts.contains_key(&w.id()))
+                        .count();
+                    let unaccounted = self
+                        .review
+                        .as_ref()
+                        .map_or(0, |review| review.sieve_report().unaccounted);
+                    self.message(
+                        format!(
+                            "Marked intended ({judged}/{len} judged · {unaccounted} unaccounted diff lines; z toggles Sieve)."
+                        ),
+                        false,
+                    );
+                }
+            }
+            KeyCode::Char('x' | 'c') => {
+                if let Some(witness) = self.oracle.witnesses().get(self.oracle.selected).cloned() {
+                    if self.is_witness_masked(&witness) {
+                        self.oracle.revealed.insert(witness.id());
+                        self.oracle.scroll = 0;
+                        self.message(
+                            "Outcome revealed — press x again to draft a counterexample comment, or y if intended.",
+                            false,
+                        );
+                        self.dialog = Some(Dialog::Oracle);
+                        return Ok(Action::None);
+                    }
+                    if self.busy {
+                        self.message("Wait for the current operation to finish", true);
+                        self.dialog = Some(Dialog::Oracle);
+                        return Ok(Action::None);
+                    }
+                    let id = witness.id();
+                    self.oracle.revealed.insert(id.clone());
+                    self.oracle.verdicts.insert(id, Verdict::Flagged);
+                    if let Some(review) = &self.review {
+                        oracle::save_verdicts(&self.root, &review.data, &self.oracle.verdicts)?;
+                    }
+                    self.sync_oracle_to_review();
+                    let _ = self.navigate(&witness.path, &witness.side, witness.line);
+                    self.highlight_witness(&witness);
+                    let mut draft = witness.anchor();
+                    let body = std::mem::take(&mut draft.body);
+                    let input = TextInput::new(body);
+                    let local = self.local_spec.is_some()
+                        || self
+                            .review
+                            .as_ref()
+                            .is_some_and(|review| review.data.source.is_local());
+                    let github_valid = !local
+                        && self.review.as_ref().is_some_and(|review| {
+                            review
+                                .data
+                                .files
+                                .iter()
+                                .any(|file| diff::validate_comment(file, &draft))
+                        });
+                    self.dialog = Some(if github_valid {
+                        Dialog::Compose {
+                            draft: draft.clone(),
+                            editing: None,
+                            input,
+                        }
+                    } else {
+                        Dialog::Note {
+                            anchor: draft.clone(),
+                            reply_to: None,
+                            input,
+                        }
+                    });
+                    self.message(
+                        format!(
+                            "Counterexample pre-filled on {}:{} · Ctrl-s saves draft, Esc cancels.",
+                            draft.path,
+                            draft.line_label()
+                        ),
+                        false,
+                    );
+                    return Ok(Action::None);
+                }
+            }
+            KeyCode::Char('u') | KeyCode::Backspace => {
+                if let Some(witness) = self.oracle.witnesses().get(self.oracle.selected).cloned() {
+                    let id = witness.id();
+                    if self.oracle.verdicts.remove(&id).is_some() {
+                        self.oracle.revealed.insert(id);
+                        if let Some(review) = &self.review {
+                            oracle::save_verdicts(&self.root, &review.data, &self.oracle.verdicts)?;
+                        }
+                        self.sync_oracle_to_review();
+                        self.message("Cleared verdict.", false);
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('o') => {
+                if let Some(witness) = self.oracle.witnesses().get(self.oracle.selected).cloned() {
+                    self.navigate(&witness.path, &witness.side, witness.line)?;
+                    self.highlight_witness(&witness);
+                    self.message(
+                        format!(
+                            "Jumped to {}:{} · O reopens Oracle.",
+                            witness.path,
+                            witness.line_label()
+                        ),
+                        false,
+                    );
+                    return Ok(Action::None);
+                }
+            }
+            _ => {}
+        }
+        self.dialog = Some(Dialog::Oracle);
         Ok(Action::None)
     }
 }

@@ -111,6 +111,12 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
                 "wrap long lines horizontal scroll cut off",
             ),
             Command::new(
+                "Sieve diff to unaccounted logic",
+                "z",
+                'z',
+                "distill dark unaccounted moved mechanical test verified noise filter",
+            ),
+            Command::new(
                 "Copy selected lines as Markdown",
                 "y",
                 'y',
@@ -269,6 +275,17 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
             ),
         );
     }
+    if opened {
+        commands.push(
+            Command::new(
+                "Behavioral oracle (judge concrete cases)",
+                "O",
+                'O',
+                "oracle witness cases counterexample blind behavior before after",
+            )
+            .disabled_if(app.review.is_none(), "Wait for the diff to load"),
+        );
+    }
     if app.overview.is_some() && !diff && !local {
         commands.push(
             Command::new(
@@ -412,7 +429,8 @@ pub fn available(app: &App, query: &str) -> Vec<Command> {
         || app
             .ai_reviews
             .values()
-            .any(|status| matches!(status, super::AiReviewStatus::Running(_)));
+            .any(|status| matches!(status, super::AiReviewStatus::Running(_)))
+        || matches!(app.oracle.status, super::OracleStatus::Loading);
     commands.extend([
         Command::new(
             "Stop running AI work",

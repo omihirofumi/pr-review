@@ -1,7 +1,7 @@
 use crate::app::App;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args as ClapArgs, Subcommand};
-use prpr::{diff::LineKind, model::*};
+use prpr::{diff::LineKind, model::*, oracle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -41,6 +41,39 @@ enum SessionCommand {
         #[command(subcommand)]
         command: MarkCommand,
     },
+    /// Supply concrete (Input -> Before vs After) oracle cases and read human verdicts
+    Oracle {
+        #[command(subcommand)]
+        command: OracleCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OracleCommand {
+    /// List behavioral oracle cases, human verdicts (intended / flagged), and Sieve counts
+    List(Selector),
+    /// Supply concrete behavioral oracle cases from a JSON file (`-` reads stdin)
+    Set(OracleSetArgs),
+    /// Clear behavioral oracle cases from the session
+    Clear(Selector),
+}
+
+#[derive(ClapArgs)]
+struct OracleSetArgs {
+    #[command(flatten)]
+    selector: Selector,
+    #[arg(
+        long,
+        help = "JSON file with {\"summary\"?, \"cases\": [...]}, or - for stdin"
+    )]
+    file: PathBuf,
+    #[arg(
+        long,
+        help = "Reject cases if the loaded revision changed since inspection"
+    )]
+    revision: Option<String>,
+    #[arg(long, help = "Open the Behavioral Oracle dialog if no dialog is open")]
+    open: bool,
 }
 
 #[derive(Subcommand)]
@@ -190,6 +223,15 @@ enum Request {
     ClearMarks {
         file: Option<String>,
     },
+    OracleList,
+    OracleSet {
+        #[serde(default)]
+        revision: Option<String>,
+        deck: oracle::OracleDeck,
+        #[serde(default)]
+        open: bool,
+    },
+    OracleClear,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -400,6 +442,87 @@ fn handle(app: &mut App, identity: &Manifest, request: Request) -> Result<Value>
                 .marks
                 .retain(|mark| file.as_ref().is_some_and(|path| *path != mark.path));
             Ok(json!({"cleared": before - review.marks.len()}))
+        }
+        Request::OracleList => {
+            let review = app.review.as_ref().context("No diff is loaded yet")?;
+            let sieve = review.sieve_report();
+            let cases = app
+                .oracle
+                .witnesses()
+                .iter()
+                .map(|witness| {
+                    let id = witness.id();
+                    json!({
+                        "id": id,
+                        "verdict": app.oracle.verdicts.get(&id),
+                        "title": witness.title,
+                        "input": witness.input,
+                        "before": witness.before,
+                        "after": witness.after,
+                        "path": witness.path,
+                        "side": witness.side,
+                        "start_line": witness.start_line,
+                        "line": witness.line,
+                        "proof": witness.proof,
+                        "test_file": witness.test_file,
+                        "mechanism": witness.mechanism,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "session": identity.id,
+                "revision": review.data.pr.head_sha,
+                "cases": cases,
+                "sieve": {
+                    "unaccounted": sieve.unaccounted,
+                    "verified": sieve.verified,
+                    "moved": sieve.moved,
+                    "mechanical": sieve.mechanical,
+                    "test": sieve.test,
+                }
+            }))
+        }
+        Request::OracleSet {
+            revision,
+            deck,
+            open,
+        } => {
+            ensure!(!app.busy, "Review is loading; retry when it finishes");
+            let review_data = app
+                .review
+                .as_ref()
+                .context("No diff is loaded yet")?
+                .data
+                .clone();
+            if let Some(revision) = revision {
+                ensure!(
+                    review_data.pr.head_sha == revision,
+                    "The review changed since inspection; read it again before setting oracle cases"
+                );
+            }
+            let validated = oracle::validate_against_review(deck, &review_data)?;
+            let count = validated.witnesses.len();
+            app.set_oracle_deck(validated);
+            if open && app.dialog.is_none() {
+                app.dialog = Some(crate::app::Dialog::Oracle);
+            }
+            app.message(
+                format!(
+                    "Agent supplied {count} behavioral oracle case{}. O opens Oracle.",
+                    if count == 1 { "" } else { "s" }
+                ),
+                false,
+            );
+            Ok(json!({
+                "cases": count,
+                "revision": review_data.pr.head_sha,
+            }))
+        }
+        Request::OracleClear => {
+            ensure!(app.review.is_some(), "No diff is loaded yet");
+            app.clear_oracle();
+            app.message("Cleared behavioral oracle cases.", false);
+            Ok(json!({"cleared": true}))
         }
     }
 }
@@ -628,6 +751,35 @@ pub fn run(args: &Args, root: &Path) -> Result<()> {
                 line: args.old_line.or(args.new_line).unwrap(),
             },
         )?,
+        SessionCommand::Oracle {
+            command: OracleCommand::List(selector),
+        } => call(root, selector, Request::OracleList)?,
+        SessionCommand::Oracle {
+            command: OracleCommand::Set(args),
+        } => {
+            let deck = if args.file == Path::new("-") {
+                let mut bytes = Vec::new();
+                std::io::stdin()
+                    .take(1024 * 1024)
+                    .read_to_end(&mut bytes)
+                    .context("Cannot read oracle cases from stdin")?;
+                oracle::parse_seed_bytes(&bytes)?
+            } else {
+                oracle::read_seeds(&args.file)?
+            };
+            call(
+                root,
+                &args.selector,
+                Request::OracleSet {
+                    revision: args.revision.clone(),
+                    deck,
+                    open: args.open,
+                },
+            )?
+        }
+        SessionCommand::Oracle {
+            command: OracleCommand::Clear(selector),
+        } => call(root, selector, Request::OracleClear)?,
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -841,5 +993,92 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         thread.join().unwrap();
         assert!(manifests(&root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_oracle_session_sets_cases_reads_verdicts_and_reports_sieve() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut app = App::new(root.clone(), false);
+        let mut data = crate::app::demo_data();
+        data.source = ReviewSource::Local {
+            repository: root.clone(),
+            label: "local".into(),
+        };
+        let revision = data.pr.head_sha.clone();
+        app.loaded(data).unwrap();
+
+        let seed_json = br#"{
+            "summary": "Agent-prepared retry boundary cases.",
+            "cases": [
+                {
+                    "title": "Zero retry_delay with healthy budget",
+                    "input": "retry_delay = 0ms, budget = 5s",
+                    "before": "Calls sleep(0ms), then sends",
+                    "after": "Returns Err(DeadlineExceeded)",
+                    "file": "src/client.rs",
+                    "start_line": 19,
+                    "new_line": 23
+                }
+            ]
+        }"#;
+        let deck = oracle::parse_seed_bytes(seed_json).unwrap();
+        let identity = Manifest {
+            id: "oracle-test".into(),
+            repository: root.clone(),
+            socket: root.join("socket"),
+            pid: 0,
+        };
+        assert!(
+            handle(
+                &mut app,
+                &identity,
+                Request::OracleSet {
+                    revision: Some("stale".into()),
+                    deck: deck.clone(),
+                    open: false,
+                }
+            )
+            .is_err()
+        );
+        let set_resp = handle(
+            &mut app,
+            &identity,
+            Request::OracleSet {
+                revision: Some(revision.clone()),
+                deck,
+                open: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(set_resp["cases"], 1);
+        assert!(matches!(app.dialog, Some(crate::app::Dialog::Oracle)));
+
+        let initial = handle(&mut app, &identity, Request::OracleList).unwrap();
+        assert_eq!(initial["cases"][0]["verdict"], serde_json::Value::Null);
+        assert_eq!(initial["sieve"]["unaccounted"], 5);
+        assert_eq!(initial["sieve"]["test"], 6);
+
+        // Human reveals with Space, then marks Intended with 'y'.
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+
+        let after_verdict = handle(&mut app, &identity, Request::OracleList).unwrap();
+        assert_eq!(after_verdict["cases"][0]["verdict"], "intended");
+        assert_eq!(after_verdict["sieve"]["unaccounted"], 0);
+        assert!(after_verdict["sieve"]["verified"].as_u64().unwrap() >= 4);
+
+        let cleared = handle(&mut app, &identity, Request::OracleClear).unwrap();
+        assert_eq!(cleared["cleared"], true);
+        let empty = handle(&mut app, &identity, Request::OracleList).unwrap();
+        assert_eq!(empty["cases"].as_array().unwrap().len(), 0);
     }
 }

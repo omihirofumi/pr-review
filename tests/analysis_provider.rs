@@ -10,7 +10,7 @@ use std::{
 use prpr::{
     analysis, assistant,
     model::{ChangedFile, PrId, PrOverview, PullRequest, ReviewData},
-    review,
+    oracle, review,
     settings::{self, AiConfig, Provider, Settings},
 };
 
@@ -304,6 +304,75 @@ fn provider_fixture_child() {
             _ => {
                 assert!(result.is_err());
             }
+        }
+        return;
+    }
+    if scenario.starts_with("oracle_") {
+        if scenario == "oracle_small_budget" {
+            config.max_input_bytes = 100;
+        }
+        if scenario == "oracle_pre_canceled" {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let result = oracle::generate(
+            &overview,
+            &review,
+            &config,
+            &root.join("cache"),
+            cancel.clone(),
+            false,
+        );
+        match scenario.as_str() {
+            "oracle_success" => {
+                let deck = result.unwrap();
+                assert_eq!(deck.witnesses.len(), 2);
+                assert_eq!(deck.witnesses[0].proof, oracle::TestProof::Untested);
+                assert_eq!(deck.witnesses[0].start_line, None);
+                assert_eq!(deck.witnesses[0].line, 8);
+                assert_eq!(deck.witnesses[1].proof, oracle::TestProof::Covered);
+                assert_eq!(deck.witnesses[1].start_line, Some(8));
+                assert_eq!(deck.witnesses[1].line, 9);
+                assert_eq!(
+                    deck.witnesses[1].test_file.as_deref(),
+                    Some("tests/retry.rs")
+                );
+                assert_eq!(
+                    deck.coverage.included_files,
+                    vec!["src/lib.rs", "tests/retry.rs"]
+                );
+            }
+            "oracle_cache" => {
+                result.unwrap();
+                oracle::generate(
+                    &overview,
+                    &review,
+                    &config,
+                    &root.join("cache"),
+                    cancel.clone(),
+                    false,
+                )
+                .unwrap();
+                assert_eq!(calls(&root).len(), 1, "cached oracle deck is reused");
+                oracle::generate(
+                    &overview,
+                    &review,
+                    &config,
+                    &root.join("cache"),
+                    cancel,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(calls(&root).len(), 2, "force bypasses oracle cache");
+            }
+            "oracle_small_budget" | "oracle_pre_canceled" => {
+                assert!(result.is_err());
+                assert!(calls(&root).is_empty());
+            }
+            "oracle_invalid_line" | "oracle_invalid_file" | "oracle_fake_test_file" => {
+                assert!(result.is_err());
+                assert!(!root.join("cache").exists());
+            }
+            other => panic!("Unknown oracle scenario: {other}"),
         }
         return;
     }
@@ -688,6 +757,42 @@ if scenario.startswith('ask_'):
     if scenario == 'ask_invalid_line': response['references'][0]['line'] = 9999
     if scenario == 'ask_invalid_file': response['references'][0]['path'] = 'not-provided.rs'
     if scenario == 'ask_empty': response['answer'] = ''
+if scenario.startswith('oracle_'):
+    response = {
+        'summary': 'Concrete retry-budget deltas.',
+        'witnesses': [
+            {
+                'title': 'Positive budget with extra line',
+                'input': 'budget = 10ms',
+                'before': 'old outcome',
+                'after': 'new + extra outcome',
+                'path': 'src/lib.rs',
+                'side': 'RIGHT',
+                'start_line': 8,
+                'line': 9,
+                'proof': 'covered',
+                'test_file': 'tests/retry.rs',
+                'mechanism': 'Exercises lines 8..=9.'
+            },
+            {
+                'title': 'Zero retry_delay edge case',
+                'input': 'retry_delay = 0ms, budget = 5s',
+                'before': 'sends immediately',
+                'after': 'returns DeadlineExceeded',
+                'path': 'src/lib.rs',
+                'side': 'RIGHT',
+                'start_line': 8,
+                'line': 8,
+                'proof': 'untested',
+                'test_file': None,
+                'mechanism': 'min(0, 5s) == 0 triggers is_zero().'
+            }
+        ],
+        'unknowns': ['No tests were executed.']
+    }
+    if scenario == 'oracle_invalid_line': response['witnesses'][0]['line'] = 9999
+    if scenario == 'oracle_invalid_file': response['witnesses'][0]['path'] = 'not-provided.rs'
+    if scenario == 'oracle_fake_test_file': response['witnesses'][0]['test_file'] = 'src/lib.rs'
 if program == 'codex':
     answer = Path(args[args.index('--output-last-message') + 1])
     answer.write_text('PRIVATE_SENTINEL not json' if scenario == 'malformed' else json.dumps(response))
@@ -702,6 +807,30 @@ elif program == 'agy':
 else:
     print(json.dumps({'result': json.dumps(response)} if scenario == 'unstructured' else {'is_error': False, 'structured_output': response}))
 "#;
+
+#[cfg(unix)]
+#[test]
+fn behavioral_oracle_uses_all_providers_validates_coordinates_and_caches() {
+    for provider in ["codex", "claude", "agy"] {
+        let calls = run_fixture("oracle_success", provider);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0]["schema"]["required"],
+            serde_json::json!(["summary", "witnesses", "unknowns"])
+        );
+        assert_eq!(run_fixture("local_oracle_success", provider).len(), 1);
+        for scenario in [
+            "oracle_invalid_line",
+            "oracle_invalid_file",
+            "oracle_fake_test_file",
+            "oracle_small_budget",
+            "oracle_pre_canceled",
+        ] {
+            run_fixture(scenario, provider);
+        }
+    }
+    run_fixture("oracle_cache", "codex");
+}
 
 #[cfg(unix)]
 #[test]

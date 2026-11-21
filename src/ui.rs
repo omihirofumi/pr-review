@@ -5,7 +5,9 @@ use prpr::{
     diff::{DiffLine, LineKind},
     keybindings::{self, View},
     model::{ChangedFile, CheckState, ReviewStatus, Side},
+    oracle::{TestProof, Verdict},
     settings::{DiffLayout, Provider},
+    sieve::RowClass,
     thread::{Thread, matches_anchor, threads},
 };
 use ratatui::{
@@ -22,8 +24,8 @@ use ratatui::{
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::{
-    ActivityStatus, AiReviewStatus, AiStatus, App, Dialog, Focus, Follow, OverviewState, PageTab,
-    PickerKind, PreviewTab, ReviewState, TextInput,
+    ActivityStatus, AiReviewStatus, AiStatus, App, Dialog, Focus, Follow, OracleStatus,
+    OverviewState, PageTab, PickerKind, PreviewTab, ReviewState, TextInput,
 };
 
 const BACKGROUND: Color = Color::Rgb(24, 24, 23);
@@ -467,6 +469,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some(Dialog::AiReview { scroll }) = &mut app.dialog {
             *scroll = actual;
         }
+    } else if matches!(app.dialog, Some(Dialog::Oracle)) {
+        app.oracle.scroll = draw_oracle(frame, app);
     } else if let Some(dialog) = &app.dialog {
         draw_dialog(frame, app, dialog);
     }
@@ -656,6 +660,34 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(
             format!(" {} {label} ", keys.primary(id)),
             selected(app.tab == tab),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    let oracle_badge = match &app.oracle.status {
+        OracleStatus::Idle => None,
+        OracleStatus::Loading => Some(("Oracle · loading".to_owned(), ACCENT)),
+        OracleStatus::Error(_) => Some(("Oracle · error".to_owned(), RED)),
+        OracleStatus::Ready(deck) => {
+            let total = deck.witnesses.len();
+            let judged = deck
+                .witnesses
+                .iter()
+                .filter(|w| app.oracle.verdicts.contains_key(&w.id()))
+                .count();
+            Some((
+                format!("Oracle · {judged}/{total}"),
+                if judged == total && total > 0 {
+                    GREEN
+                } else {
+                    COMMENT_ACCENT
+                },
+            ))
+        }
+    };
+    if let Some((badge, color)) = oracle_badge {
+        spans.push(Span::styled(
+            format!(" {} {badge} ", keys.primary("oracle")),
+            Style::default().fg(color).bg(SIDEBAR).bold(),
         ));
         spans.push(Span::raw(" "));
     }
@@ -1941,6 +1973,7 @@ fn sidebar_indent(depth: usize, width: u16) -> String {
 
 fn sidebar_rows(review: &ReviewState, width: u16) -> Vec<SidebarRow> {
     let mut rows = Vec::new();
+    let sieve = review.sieve.then(|| review.sieve_report());
     let filenames = review
         .data
         .files
@@ -1980,21 +2013,33 @@ fn sidebar_rows(review: &ReviewState, width: u16) -> Vec<SidebarRow> {
             .iter()
             .filter(|draft| draft.path == file.filename)
             .count();
+        let file_sieve = sieve.as_ref().and_then(|report| report.files.get(index));
+        let accounted_file = file_sieve.is_some_and(|fs| fs.unaccounted == 0);
         let status = match file.status.as_str() {
             "added" => "A",
             "removed" => "D",
             "renamed" => "R",
             _ => "M",
         };
-        let status_color = match file.status.as_str() {
-            "added" => GREEN,
-            "removed" => RED,
-            _ => ACCENT,
-        };
-        let counts = if width >= 27 {
-            format!(" +{} -{}", file.additions, file.deletions)
+        let status_color = if accounted_file {
+            MUTED
         } else {
-            String::new()
+            match file.status.as_str() {
+                "added" => GREEN,
+                "removed" => RED,
+                _ => ACCENT,
+            }
+        };
+        let (counts, counts_color) = match file_sieve {
+            Some(fs) if width >= 22 => {
+                if fs.unaccounted == 0 {
+                    (" ✓".to_owned(), GREEN)
+                } else {
+                    (format!(" ◆{}", fs.unaccounted), ACCENT)
+                }
+            }
+            _ if width >= 27 => (format!(" +{} -{}", file.additions, file.deletions), MUTED),
+            _ => (String::new(), MUTED),
         };
         let draft_marker = if drafts > 0 {
             format!(" *{drafts}")
@@ -2003,16 +2048,21 @@ fn sidebar_rows(review: &ReviewState, width: u16) -> Vec<SidebarRow> {
         };
         let prefix = format!(" {indentation}{status} ");
         let remaining = usize::from(width).saturating_sub(
-            Line::from(prefix.as_str()).width() + counts.len() + draft_marker.len(),
+            Line::from(prefix.as_str()).width()
+                + Line::from(counts.as_str()).width()
+                + draft_marker.len(),
         );
         let filename = truncate(parts.last().copied().unwrap_or(&file.filename), remaining);
         rows.push(SidebarRow {
             file: Some(index),
             line: Line::from(vec![
                 Span::styled(prefix, Style::default().fg(status_color)),
-                Span::styled(filename, Style::default().fg(TEXT)),
+                Span::styled(
+                    filename,
+                    Style::default().fg(if accounted_file { MUTED } else { TEXT }),
+                ),
                 Span::styled(draft_marker, Style::default().fg(ACCENT)),
-                Span::styled(counts, Style::default().fg(MUTED)),
+                Span::styled(counts, Style::default().fg(counts_color)),
             ]),
         });
     }
@@ -2046,13 +2096,14 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
             Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
         frame.render_widget(
             Paragraph::new(format!(
-                " {}CHANGES · {}",
+                " {}CHANGES · {}{}",
                 if review.focus == Focus::Files {
                     "› "
                 } else {
                     ""
                 },
-                review.data.files.len()
+                review.data.files.len(),
+                if review.sieve { " · SIEVE" } else { "" }
             ))
             .style(Style::default().fg(if review.focus == Focus::Files {
                 ACCENT
@@ -2177,7 +2228,7 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
     } else {
         ""
     };
-    let context_label = if review.horizontal > 0 {
+    let mut context_label = if review.horizontal > 0 {
         format!(
             "{context_label} · scrolled {} columns right",
             review.horizontal
@@ -2185,6 +2236,13 @@ fn draw_file_header(frame: &mut Frame, review: &ReviewState, comments_loading: b
     } else {
         context_label.to_string()
     };
+    if review.sieve {
+        let report = review.sieve_report();
+        context_label.push_str(&format!(
+            " · SIEVE ◆{} unaccounted (✓{} ⇄{} ◇{} ·{})",
+            report.unaccounted, report.verified, report.moved, report.test, report.mechanical
+        ));
+    }
     frame.render_widget(
         Paragraph::new(if review.data.source.is_local() {
             format!(
@@ -2299,6 +2357,11 @@ fn review_rows(review: &ReviewState, width: u16, split: bool, wrap: bool) -> Vec
         .to_string()
         .len()
         .max(3);
+    let sieve = review.sieve.then(|| review.sieve_report());
+    let sieve_rows = sieve
+        .as_ref()
+        .and_then(|report| report.files.get(review.selected_file))
+        .map(|fs| fs.rows.as_slice());
     let state = |index: usize, line: &DiffLine| RowState {
         selected: review
             .selected_range()
@@ -2315,6 +2378,7 @@ fn review_rows(review: &ReviewState, width: u16, split: bool, wrap: bool) -> Vec
                 .map(|(start, end)| (start as u32 + 1, end as u32))
                 .collect()
         }),
+        sieve: sieve_rows.and_then(|classes| classes.get(index)).cloned(),
     };
     let row = |index: usize, gutter: Gutter, columns: usize| {
         let line = &lines[index];
@@ -2442,6 +2506,7 @@ struct RowState {
     mark: Option<(u32, u32)>,
     /// Search matches as source columns, in the same form as `mark`.
     matches: Vec<(u32, u32)>,
+    sieve: Option<RowClass>,
 }
 
 const MARK: Color = Color::Rgb(96, 76, 24);
@@ -2534,13 +2599,17 @@ fn code_row(
     digits: usize,
     gutter_numbers: Gutter,
 ) -> ViewRow {
-    let background = match (line.kind, state.selected) {
-        (LineKind::Addition, true) => SELECTED_ADDITION,
-        (LineKind::Deletion, true) => SELECTED_DELETION,
-        (_, true) => SELECTED,
-        (LineKind::Addition, false) => ADDITION,
-        (LineKind::Deletion, false) => DELETION,
-        (LineKind::Hunk, false) => PANEL,
+    let dimmed = state
+        .sieve
+        .as_ref()
+        .is_some_and(|class| !matches!(class, RowClass::Unchanged | RowClass::Unaccounted));
+    let background = match (line.kind, state.selected, dimmed) {
+        (LineKind::Addition, true, false) => SELECTED_ADDITION,
+        (LineKind::Deletion, true, false) => SELECTED_DELETION,
+        (_, true, _) => SELECTED,
+        (LineKind::Addition, false, false) => ADDITION,
+        (LineKind::Deletion, false, false) => DELETION,
+        (LineKind::Hunk, false, _) => PANEL,
         _ => BACKGROUND,
     };
     let gutter = Style::default()
@@ -2585,15 +2654,16 @@ fn code_row(
     let new = line
         .new_line
         .map_or_else(String::new, |number| number.to_string());
-    let sign = match line.kind {
-        LineKind::Addition => "+",
-        LineKind::Deletion => "-",
-        _ => " ",
-    };
-    let sign_color = match line.kind {
-        LineKind::Addition => GREEN,
-        LineKind::Deletion => RED,
-        _ => MUTED,
+    let (sign, sign_color) = match state.sieve.as_ref() {
+        Some(RowClass::Verified) => ("✓", GREEN),
+        Some(RowClass::Moved { .. }) => ("⇄", COMMENT_ACCENT),
+        Some(RowClass::Test) => ("◇", MUTED),
+        Some(RowClass::Mechanical) => ("·", MUTED),
+        _ => match line.kind {
+            LineKind::Addition => ("+", GREEN),
+            LineKind::Deletion => ("-", RED),
+            _ => (" ", MUTED),
+        },
     };
     let marker = if state.cursor {
         "›"
@@ -2627,7 +2697,11 @@ fn code_row(
         Span::styled(format!("{sign} "), Style::default().fg(sign_color)),
     ];
     let source = line.text.get(1..).unwrap_or_default();
-    let mut syntax = syntax_spans(&code, &file.filename);
+    let mut syntax = if dimmed {
+        vec![Span::styled(code, Style::default().fg(MUTED))]
+    } else {
+        syntax_spans(&code, &file.filename)
+    };
     for columns in state.matches {
         syntax = highlight_spans(
             syntax,
@@ -2639,6 +2713,22 @@ fn code_row(
         Some(columns) => highlight_spans(syntax, display_range(source, columns, horizontal), MARK),
         None => syntax,
     });
+    if let Some(RowClass::Moved {
+        peer_file,
+        peer_line,
+        block_start: true,
+    }) = state.sieve
+    {
+        let direction = if line.kind == LineKind::Addition {
+            "from"
+        } else {
+            "to"
+        };
+        spans.push(Span::styled(
+            format!("  ⇄ {direction} {peer_file}:{peer_line}"),
+            Style::default().fg(MUTED),
+        ));
+    }
     ViewRow {
         line: Line::from(spans),
         source: None,
@@ -3498,6 +3588,329 @@ fn draw_description(frame: &mut Frame, app: &App, scroll: u16) -> u16 {
     markdown(frame, &body, inner, scroll)
 }
 
+fn oracle_box(
+    lines: &mut Vec<Line<'static>>,
+    heading: &str,
+    heading_color: Color,
+    body: &str,
+    box_bg: Color,
+    body_fg: Color,
+    width: usize,
+) {
+    lines.push(Line::from(Span::styled(
+        format!(" {heading}"),
+        Style::default().fg(heading_color).bold(),
+    )));
+    let inner_width = width.saturating_sub(4).max(1);
+    for wrapped in wrap_comment(body.trim(), inner_width) {
+        let used = Span::raw(wrapped.as_str()).width();
+        let pad = inner_width.saturating_sub(used);
+        lines.push(Line::from(vec![
+            Span::styled(" ▎ ", Style::default().fg(heading_color).bg(box_bg)),
+            Span::styled(wrapped, Style::default().fg(body_fg).bg(box_bg)),
+            Span::styled(" ".repeat(pad + 1), Style::default().bg(box_bg)),
+        ]));
+    }
+    lines.push(Line::default());
+}
+
+fn draw_oracle(frame: &mut Frame, app: &App) -> u16 {
+    let area = frame.area();
+    let blind_tag = if app.oracle.blind {
+        "blind ON"
+    } else {
+        "blind OFF"
+    };
+    let title = match &app.oracle.status {
+        OracleStatus::Ready(deck) => {
+            let total = deck.witnesses.len();
+            let untested = deck
+                .witnesses
+                .iter()
+                .filter(|w| w.proof == TestProof::Untested)
+                .count();
+            let intended = deck
+                .witnesses
+                .iter()
+                .filter(|w| app.oracle.verdicts.get(&w.id()) == Some(&Verdict::Intended))
+                .count();
+            let flagged = deck
+                .witnesses
+                .iter()
+                .filter(|w| app.oracle.verdicts.get(&w.id()) == Some(&Verdict::Flagged))
+                .count();
+            format!(
+                " Behavioral Oracle · {total} cases ({untested} untested) · ✓{intended} ✗{flagged} · {blind_tag} · Esc closes "
+            )
+        }
+        OracleStatus::Loading => {
+            format!(
+                " Behavioral Oracle · tracing with {}… · Esc continues in background ",
+                app.settings.ai.provider
+            )
+        }
+        OracleStatus::Error(_) => " Behavioral Oracle · error · r retries · Esc closes ".into(),
+        OracleStatus::Idle => " Behavioral Oracle · A chooses agent · Esc closes ".into(),
+    };
+    let inner = popup(
+        frame,
+        title,
+        area.width.saturating_sub(4).min(152),
+        area.height.saturating_sub(2),
+    );
+    if inner.height < 3 || inner.width < 16 {
+        return 0;
+    }
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+    let footer = match &app.oracle.status {
+        OracleStatus::Ready(deck) if !deck.witnesses.is_empty() => {
+            " Space reveal · y intended ✓ · x flag & comment ✗ · u clear · Enter jump · b blind · r rerun"
+        }
+        OracleStatus::Loading => " Ctrl-x stop · Esc continue reviewing while Oracle runs",
+        _ => " A choose AI agent · r generate · Esc close (z in Diff runs offline Sieve anytime)",
+    };
+    frame.render_widget(
+        Paragraph::new(truncate(footer, usize::from(footer_area.width)))
+            .style(Style::default().fg(MUTED).bg(SIDEBAR)),
+        footer_area,
+    );
+
+    match &app.oracle.status {
+        OracleStatus::Idle => {
+            let text = "# Judge Concrete Cases Instead of Simulating Syntax\n\n**Behavioral Oracle** inverts code review: the machine traces concrete `(Input -> Before vs After)` outcomes (prioritizing **untested** edge cases), while you act purely as the specification oracle.\n\n- Press **A** to choose **Codex**, **Claude**, or **Agy** and generate cases for this change.\n- Or push cases from a coding agent with `prpr session oracle set` (or `prpr diff --oracle FILE`).\n- Even without AI, press **z** on Diff to run **Sieve**, dimming verbatim moves, mechanical edits, and tests.";
+            markdown(frame, text, body_area, app.oracle.scroll)
+        }
+        OracleStatus::Loading => {
+            let text = format!(
+                "# Tracing concrete behavioral deltas with **{}**…\n\nExtracting concrete boundary inputs where **Before** and **After** behave differently, without editorializing.\n\nPress **Esc** to keep reviewing Overview or Diff (try **z** for offline Sieve); cases appear here as soon as ready. **Ctrl-x** cancels.",
+                app.settings.ai.provider
+            );
+            markdown(frame, &text, body_area, app.oracle.scroll)
+        }
+        OracleStatus::Error(error) => {
+            let text = format!(
+                "> Behavioral oracle failed: {error}\n\nPress **r** to retry or **A** to choose another agent."
+            );
+            markdown(frame, &text, body_area, app.oracle.scroll)
+        }
+        OracleStatus::Ready(deck) if deck.witnesses.is_empty() => {
+            let text = format!(
+                "{}\n\n_No distinct input-to-outcome behavioral deltas were identified in the supplied patches._\n\nPress **r** to regenerate or **Esc** to return.",
+                deck.summary
+            );
+            markdown(frame, &text, body_area, app.oracle.scroll)
+        }
+        OracleStatus::Ready(deck) => {
+            let selected = app
+                .oracle
+                .selected
+                .min(deck.witnesses.len().saturating_sub(1));
+            let detail_area = if body_area.width >= 96 {
+                let [list_area, detail_area] =
+                    Layout::horizontal([Constraint::Length(38), Constraint::Min(20)])
+                        .areas(body_area);
+                let list_block = Block::default()
+                    .borders(Borders::RIGHT)
+                    .border_style(Style::default().fg(BORDER));
+                let list_inner = list_block.inner(list_area);
+                frame.render_widget(list_block, list_area);
+                let row_width = usize::from(list_inner.width).saturating_sub(3).max(4);
+                let items = deck
+                    .witnesses
+                    .iter()
+                    .map(|witness| {
+                        let verdict = app.oracle.verdicts.get(&witness.id());
+                        let (icon, icon_color) = match (verdict, witness.proof) {
+                            (Some(Verdict::Intended), _) => ("✓", GREEN),
+                            (Some(Verdict::Flagged), _) => ("✗", RED),
+                            (None, TestProof::Untested) => ("●", RED),
+                            (None, TestProof::Covered) => ("◌", COMMENT_ACCENT),
+                        };
+                        let title_line = Line::from(vec![
+                            Span::styled(
+                                format!("{icon} "),
+                                Style::default().fg(icon_color).bold(),
+                            ),
+                            Span::styled(
+                                truncate(&witness.title, row_width.saturating_sub(2)),
+                                Style::default().fg(TEXT),
+                            ),
+                        ]);
+                        let proof_word = match witness.proof {
+                            TestProof::Untested => "untested",
+                            TestProof::Covered => "tested",
+                        };
+                        let loc = format!(
+                            "  {}:{} · {proof_word}",
+                            path_tail(&witness.path, row_width.saturating_sub(16).max(6)),
+                            witness.line_label()
+                        );
+                        let sub_line = Line::from(Span::styled(
+                            truncate(&loc, row_width),
+                            Style::default().fg(MUTED),
+                        ));
+                        ListItem::new(vec![title_line, sub_line])
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(selected));
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .highlight_style(Style::default().bg(SELECTED))
+                        .highlight_symbol("›"),
+                    list_inner,
+                    &mut state,
+                );
+                detail_area
+            } else {
+                body_area
+            };
+
+            let witness = &deck.witnesses[selected];
+            let masked = app.is_witness_masked(witness);
+            let verdict = app.oracle.verdicts.get(&witness.id());
+            let width = usize::from(detail_area.width.saturating_sub(2)).max(10);
+            let mut lines = Vec::<Line<'static>>::new();
+
+            for summary_row in wrap_comment(&deck.summary, width.saturating_sub(2).max(1)) {
+                lines.push(Line::from(Span::styled(
+                    format!(" {summary_row}"),
+                    Style::default().fg(MUTED),
+                )));
+            }
+            lines.push(Line::default());
+
+            let (proof_badge, proof_color) = match (&witness.proof, &witness.test_file) {
+                (TestProof::Untested, _) => (" UNTESTED IN DIFF ".to_owned(), RED),
+                (TestProof::Covered, Some(tf)) => {
+                    (format!(" COVERED · {} ", path_tail(tf, 28)), GREEN)
+                }
+                (TestProof::Covered, None) => (" COVERED ".to_owned(), GREEN),
+            };
+            let (verdict_badge, verdict_color) = match verdict {
+                Some(Verdict::Intended) => (" ✓ INTENDED ", GREEN),
+                Some(Verdict::Flagged) => (" ✗ FLAGGED ", RED),
+                None => (" UNJUDGED ", ACCENT),
+            };
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!("Case {}/{} ", selected + 1, deck.witnesses.len()),
+                    Style::default().fg(ACCENT).bold(),
+                ),
+                Span::styled(
+                    proof_badge,
+                    Style::default().fg(BACKGROUND).bg(proof_color).bold(),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    verdict_badge,
+                    Style::default().fg(verdict_color).bg(SIDEBAR).bold(),
+                ),
+                Span::styled(
+                    format!("  {}:{}", witness.path, witness.line_label()),
+                    Style::default().fg(MUTED),
+                ),
+            ]));
+            for title_row in wrap_comment(&witness.title, width.saturating_sub(2).max(1)) {
+                lines.push(Line::from(Span::styled(
+                    format!(" {title_row}"),
+                    Style::default().fg(TEXT).bold(),
+                )));
+            }
+            lines.push(Line::default());
+
+            oracle_box(
+                &mut lines,
+                "Concrete Input / Preconditions",
+                COMMENT_ACCENT,
+                &witness.input,
+                CODE_BACKGROUND,
+                TEXT,
+                width,
+            );
+            oracle_box(
+                &mut lines,
+                "Before (base)",
+                RED,
+                &witness.before,
+                DELETION,
+                TEXT,
+                width,
+            );
+
+            if masked {
+                oracle_box(
+                    &mut lines,
+                    "After (head) · BLIND PREDICTION",
+                    ACCENT,
+                    "░░ Predict what SHOULD happen for this input, then press Space to reveal ░░\n Forming your expectation before seeing After prevents LGTM anchoring bias. (Press b to toggle blind mode.)",
+                    DRAFT,
+                    ACCENT,
+                    width,
+                );
+            } else {
+                oracle_box(
+                    &mut lines,
+                    "After (head)",
+                    GREEN,
+                    &witness.after,
+                    ADDITION,
+                    TEXT,
+                    width,
+                );
+                oracle_box(
+                    &mut lines,
+                    "Mechanism",
+                    MUTED,
+                    &witness.mechanism,
+                    SIDEBAR,
+                    TEXT,
+                    width,
+                );
+                let anchor = witness.anchor();
+                lines.extend(anchor_context(app, &anchor, detail_area.width));
+                lines.push(Line::default());
+            }
+
+            if !deck.unknowns.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    " Unknowns",
+                    Style::default().fg(MUTED).bold(),
+                )));
+                for unknown in &deck.unknowns {
+                    for row in wrap_comment(&format!("- {unknown}"), width.saturating_sub(2).max(1))
+                    {
+                        lines.push(Line::from(Span::styled(
+                            format!(" {row}"),
+                            Style::default().fg(MUTED),
+                        )));
+                    }
+                }
+            }
+
+            let total = lines.len();
+            let max_scroll = total
+                .saturating_sub(usize::from(detail_area.height))
+                .min(u16::MAX as usize) as u16;
+            let scroll = app.oracle.scroll.min(max_scroll);
+            let padded = Rect::new(
+                detail_area.x,
+                detail_area.y,
+                detail_area.width.saturating_sub(1),
+                detail_area.height,
+            );
+            frame.render_widget(
+                Paragraph::new(Text::from(lines)).scroll((scroll, 0)),
+                padded,
+            );
+            draw_scrollbar(frame, detail_area, total, usize::from(scroll));
+            scroll
+        }
+    }
+}
+
 fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
     match dialog {
         Dialog::Palette { input, selected } => {
@@ -3588,7 +4001,7 @@ fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog) {
                 hint,
             );
         }
-        Dialog::Ask => {}
+        Dialog::Ask | Dialog::Oracle => {}
         Dialog::AgentPicker { selected, .. } => {
             let inner = popup(
                 frame,

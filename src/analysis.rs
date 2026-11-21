@@ -109,7 +109,7 @@ pub(crate) struct ContextData {
     prompt: String,
     pub(crate) coverage: Coverage,
     pub(crate) included: HashMap<String, String>,
-    test_paths: HashSet<String>,
+    pub(crate) test_paths: HashSet<String>,
     description_available: bool,
     pub(crate) description_truncated: bool,
 }

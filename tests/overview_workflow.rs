@@ -370,6 +370,9 @@ mod cli {
                 ai_cancel: None,
                 ai_handle: None,
                 review_cancels: Default::default(),
+                oracle_request: 0,
+                oracle_cancel: None,
+                oracle_handle: None,
             };
             let (sender, _receiver) = mpsc::channel();
             for result in [
@@ -431,6 +434,9 @@ mod cli {
                 ai_cancel: Some(guide.clone()),
                 ai_handle: None,
                 review_cancels: [("review".to_owned(), review.clone())].into(),
+                oracle_request: 0,
+                oracle_cancel: None,
+                oracle_handle: None,
             };
 
             stop_ai_work(&mut app, &mut runtime);
@@ -460,6 +466,103 @@ mod cli {
         }
 
         #[test]
+        fn oracle_background_supports_cancellation_stale_rejection_and_local_seed_files() {
+            let directory = tempfile::tempdir().unwrap();
+            let mut app = App::new(directory.path().into(), false);
+            app.generation = 5;
+            app.opened(crate::overview());
+            app.accept_diff(app::demo_data()).unwrap();
+            app.oracle.status = app::OracleStatus::Loading;
+            let oracle_flag = Arc::new(AtomicBool::new(false));
+            let mut runtime = Runtime {
+                provider: None,
+                ask_request: 0,
+                ask_cancel: None,
+                ask_handle: None,
+                generation: 5,
+                ai_request: 0,
+                pending_comments: None,
+                pending_ai: None,
+                ai_cancel: None,
+                ai_handle: None,
+                review_cancels: Default::default(),
+                oracle_request: 3,
+                oracle_cancel: Some(oracle_flag.clone()),
+                oracle_handle: None,
+            };
+
+            stop_ai_work(&mut app, &mut runtime);
+            assert!(oracle_flag.load(Ordering::Relaxed));
+            assert!(matches!(app.oracle.status, app::OracleStatus::Idle));
+            assert_eq!(app.status, "Stopped: behavioral oracle.");
+
+            let (sender, _receiver) = mpsc::channel();
+            let deck = prpr::oracle::sample_deck(&app::demo_data());
+            apply_background(
+                JobResult::Oracle {
+                    generation: 5,
+                    request: 3,
+                    result: Ok(Box::new(deck.clone())),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert!(
+                matches!(app.oracle.status, app::OracleStatus::Idle),
+                "stale oracle_request after stop_oracle is ignored"
+            );
+
+            let current_req = runtime.oracle_request;
+            apply_background(
+                JobResult::Oracle {
+                    generation: 5,
+                    request: current_req,
+                    result: Ok(Box::new(deck)),
+                },
+                &mut app,
+                &sender,
+                &mut runtime,
+            );
+            assert_eq!(app.oracle.witnesses().len(), 3);
+            assert!(app.status.contains("Behavioral oracle ready: 3 cases"));
+
+            // Also verify local diff --oracle seed file auto-opens Dialog::Oracle.
+            let left = directory.path().join("left");
+            let right = directory.path().join("right");
+            std::fs::create_dir_all(&left).unwrap();
+            std::fs::create_dir_all(&right).unwrap();
+            std::fs::write(left.join("a.rs"), "fn f(x: i32) -> i32 {\n    x\n}\n").unwrap();
+            std::fs::write(right.join("a.rs"), "fn f(x: i32) -> i32 {\n    x + 1\n}\n").unwrap();
+            let spec = prpr::local::Spec::Directories {
+                repository: directory.path().into(),
+                left,
+                right,
+            };
+            let snapshot = spec.load().unwrap();
+            let mut local_app = App::new(directory.path().into(), false);
+            local_app.local_spec = Some(spec);
+            local_app.pending_oracle = Some(
+                prpr::oracle::parse_seed_bytes(
+                    br#"{"cases":[{"title":"Increment","input":"x = 0","before":"0","after":"1","file":"a.rs","new_line":2}]}"#,
+                )
+                .unwrap(),
+            );
+            apply_background(
+                JobResult::Local {
+                    generation: local_app.generation,
+                    watched: false,
+                    result: Ok(snapshot),
+                },
+                &mut local_app,
+                &sender,
+                &mut Runtime::default(),
+            );
+            assert!(matches!(local_app.dialog, Some(app::Dialog::Oracle)));
+            assert_eq!(local_app.oracle.witnesses().len(), 1);
+        }
+
+        #[test]
         fn changing_ai_request_rejects_an_old_result_for_the_same_pr() {
             let directory = tempfile::tempdir().unwrap();
             let mut app = App::new(directory.path().into(), false);
@@ -479,6 +582,9 @@ mod cli {
                 ai_cancel: None,
                 ai_handle: None,
                 review_cancels: Default::default(),
+                oracle_request: 0,
+                oracle_cancel: None,
+                oracle_handle: None,
             };
             let (sender, _receiver) = mpsc::channel();
             let stale = JobResult::Analysis {
@@ -626,6 +732,9 @@ mod cli {
                 ai_cancel: Some(cancel.clone()),
                 ai_handle: Some(handle),
                 review_cancels: Default::default(),
+                oracle_request: 0,
+                oracle_cancel: None,
+                oracle_handle: None,
             };
             runtime.sync(8);
             assert!(cancel.load(Ordering::Relaxed));
@@ -661,6 +770,9 @@ mod cli {
                     ai_cancel: Some(cancel.clone()),
                     ai_handle: Some(handle),
                     review_cancels: Default::default(),
+                    oracle_request: 0,
+                    oracle_cancel: None,
+                    oracle_handle: None,
                 };
             }
             assert!(cancel.load(Ordering::Relaxed));
@@ -698,6 +810,9 @@ mod cli {
                 ai_cancel: None,
                 ai_handle: None,
                 review_cancels: Default::default(),
+                oracle_request: 0,
+                oracle_cancel: None,
+                oracle_handle: None,
             };
             let (sender, _) = mpsc::channel();
             for (generation, request) in [(6, 3), (7, 2)] {

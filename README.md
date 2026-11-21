@@ -51,6 +51,7 @@ prpr diff --from main --to @    # Compare two revisions
 prpr diff --agent codex          # Override the AI provider for this launch
 prpr diff --watch               # Reload whenever files or Jujutsu operations change
 prpr diff --notes notes.json    # Open with notes an agent prepared
+prpr diff --oracle cases.json   # Open with concrete Input -> Before/After cases to judge
 ```
 
 `--watch` reloads the diff a moment after files in the repository change or a Jujutsu operation such as `jj describe` or `jj squash` completes, so you can read along while an agent edits. The cursor, tab, AI chat, and AI guide stay in place; notes on changed files become outdated, and agent marks clear. Reloads wait while a dialog other than the AI chat is open. `jj diff --tool prpr` and `diff-formatter = "prpr"` launches review temporary snapshots and cannot watch.
@@ -116,6 +117,9 @@ prpr session comment add --repo . --reply-to note-ID --body 'Explanation' --auth
 prpr session navigate --repo . --file src/main.rs --new-line 42
 prpr session mark add --repo . --file src/main.rs --new-line 42 --start-column 9 --end-column 21
 prpr session mark clear --repo .
+prpr session oracle set --repo . --file - --open
+prpr session oracle list --repo .
+prpr session oracle clear --repo .
 prpr session reload --repo .
 ```
 
@@ -385,6 +389,29 @@ Each turn shows its source scope, file/line references, unknowns, and context co
 
 Conversations remain in memory for the current open PR revision; leaving the PR or changing agents clears them. Use `c` for persistent GitHub-review drafts and `Q` for local agent questions. AI explanations and questions do not publish reviews or run tests. A failed request restores the question for editing and retry.
 
+## Behavioral oracle and residual diff sieve
+
+AI-generated diffs are syntactically fluent, so reading them line by line invites anchoring bias while forcing you to simulate concrete execution in your head. **Behavioral Oracle (`O`)** and **Residual Diff Sieve (`z`)** invert that division of labor: the machine traces concrete values and subtracts mechanical noise, while you judge specifications.
+
+### Behavioral Oracle (`O`)
+
+Press `O` on Overview, AI Guide, or Diff to open **Behavioral Oracle**. Using your configured Codex, Claude, or Agy CLI (or cases supplied via `prpr session oracle set`, `prpr diff --oracle FILE`, or `prpr --demo`), it extracts concrete `(Input -> Before vs After)` state transitions anchored to exact diff lines, sorting **untested** boundary cases ahead of test-covered ones.
+
+- **Blind prediction (`b` toggles, ON by default):** `After` and the anchored code start masked behind `Space`. Predict what the system *should* do for `Input` before revealing what the new code actually does. Pressing `y` or `x` while masked reveals `After` first so cases cannot be rubber-stamped unseen.
+- **`y` / `v` (`✓ Intended`):** Records that `After` matches your intended specification, persists the verdict for the current revision, marks those diff lines verified in Sieve, and advances to the next case.
+- **`x` / `c` (`✗ Flagged`):** Records a specification violation, jumps to the culprit lines in Diff, highlights them, and opens a GitHub draft (`Compose`) or local note pre-filled with the exact counterexample (`Input`, `Before`, `After`).
+- **`u` / `Backspace`:** Clears the verdict on the selected case. **`Enter` / `o`** jumps to its source lines in Diff; **`r`** regenerates cases.
+
+### Residual Diff Sieve (`z`)
+
+Press `z` in Diff (offline and instant, even with `provider = "none"`) to dim diff lines already accounted for and isolate **unaccounted production logic (`◆`)**:
+
+- **`✓` Verified:** Lines covered by an `Intended` Behavioral Oracle case (including paired deletions in verified replacements).
+- **`⇄` Moved:** Verbatim multi-line blocks or substantive unique lines moved across hunks or files, annotated with `⇄ from …` / `⇄ to …`. Sneaky 1-line edits *inside* a moved block remain bright `◆` unaccounted lines.
+- **`◇` Test / `·` Mechanical:** Test files and pure whitespace, indentation, or non-`TODO`/`SAFETY` comment changes.
+
+While Sieve is active, the file header summarizes `SIEVE ◆N unaccounted`, the sidebar marks fully accounted files with `✓` and remaining files with `◆N`, and `]` / `[` jump exclusively across unaccounted changes in both unified and split layouts.
+
 ## Review controls
 
 Comments on deleted lines target the LEFT side; added and context-only ranges target the RIGHT side. Multiline comments must stay within one complete hunk on a single side; a selection containing both deleted and added lines cannot be submitted as one range. Both the displayed revision and comment coordinates are checked before submission. A changed PR head or diff base requires a refresh with `r`.
@@ -398,6 +425,8 @@ Navigation and selection follow Helix's line-oriented workflow: `gg` goes to the
 | `1` / `2` / `3`, `Tab` / `Shift-Tab` | Overview / AI Guide / Diff tabs |
 | `h` / `l` | Focus files / diff pane in Diff |
 | `a` / `A` | Prepare AI guide / choose and save an agent |
+| `O` | Behavioral oracle: judge concrete `Input -> Before vs After` cases |
+| `z` | Sieve diff to unaccounted logic (`◆`), dimming moves, tests, mechanical edits, and verified lines |
 | `Ctrl-k` | Search and run commands for the current view |
 | `Ctrl-b` | Toggle the file sidebar |
 | `Ctrl-l` | Toggle the AI chat panel |
@@ -540,4 +569,4 @@ cargo test --all-targets
 
 The test suite uses temporary local repositories and fake `gh`, `codex`, `claude`, and `agy` executables; it does not post to GitHub or call a live AI provider. Tests require `jj`, Git, and Python 3. The diff fixtures cover old/new line coordinates, renames, absent patches, and malformed hunks. Workflow tests cover metadata-first loading, stale background results, agent cancellation and caching, structured output validation, local persistence, failed writes, stale revisions, submission recovery, and request payloads.
 
-`src/cli.rs` runs the shared command and background jobs, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/settings.rs` persists configuration, `src/analysis.rs` runs and validates AI explanations, `src/assistant.rs` supplies focused questions and follow-ups, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.
+`src/cli.rs` runs the shared command and background jobs, `src/app.rs` owns navigation and dialogs, `src/ui.rs` draws the interface, `src/settings.rs` persists configuration, `src/analysis.rs` runs and validates AI explanations, `src/assistant.rs` supplies focused questions and follow-ups, `src/oracle.rs` traces and persists behavioral oracle cases and verdicts, `src/sieve.rs` classifies moved, mechanical, test, and verified diff rows, `src/thread.rs` groups review replies, `src/github.rs` talks to GitHub through `gh`, `src/diff.rs` maps patch lines to comment coordinates, `src/workspace.rs` manages isolated Jujutsu checkouts, and `src/store.rs` persists local review state.
